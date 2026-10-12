@@ -99,3 +99,20 @@ test("plan: out-of-scope base entries are ignored", () => {
 	const p = decide({ "big.mp4": "1" }, M({}), M({}), "sync", (x) => x !== "big.mp4");
 	assert.equal(p.decisions.length, 0);
 });
+
+test("globs: negation (last match wins), literal brackets, escapes", () => {
+	const m = compileGlobs(["Attachments/", "!Attachments/keep/", "*.log", "!important.log", "\\!bang.md", "\\#hash.md", "/Team [Acme]/", "Archive [2024-2020]/"]);
+	assert.equal(m("Attachments/a.png"), true);
+	assert.equal(m("Attachments/keep/a.png"), false, "re-included by a later !pattern");
+	assert.equal(m("logs/a.log"), true);
+	assert.equal(m("important.log"), false);
+	assert.equal(m("!bang.md"), true);
+	assert.equal(m("#hash.md"), true);
+	assert.equal(m("Team [Acme]/note.md"), true, "brackets are literal (shared folder names)");
+	assert.equal(m("Team A/note.md"), false);
+	assert.equal(m("Archive [2024-2020]/x.md"), true, "no regex range errors");
+	// A later exclude still wins over an earlier re-include (mandatory excludes come last).
+	const forced = compileGlobs(["!secret/", "secret/"]);
+	assert.equal(forced("secret/a.md"), true);
+	assert.equal(compileGlobs(["a\\n.md"])("an.md"), true, "escaped letters stay literal");
+});

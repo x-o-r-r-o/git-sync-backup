@@ -9,6 +9,7 @@ import type { HostKind } from "./hosts.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
 import { destructive } from "./ui.ts";
 import { t } from "./i18n.ts";
+import { GitHubSignInModal } from "./ghapp-ui.ts";
 
 /** Runs `fn` when the field is committed (blur or Enter) instead of on every keystroke. */
 function onCommit(c: TextComponent, fn: (v: string) => Promise<void>): TextComponent {
@@ -69,6 +70,69 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			if (first.link) f.createEl("a", { text: first.link.label, href: first.link.href });
 		});
 
+		// GitHub: sign in with the GitHub App when one is available, else (or instead) paste a token.
+		const usingApp = p.usingGitHubApp();
+		const auth: Item[] = [];
+		if (usingApp) {
+			auth.push({
+				name: t("app.signedIn"),
+				desc: t("app.signedInDesc"),
+				render: (st) =>
+					st.addButton((b) =>
+						b.setButtonText(t("app.signOut")).onClick(() => {
+							p.signOutApp();
+							this.refresh();
+						}),
+					),
+			});
+		} else if (s.provider === "github" && p.githubApp()) {
+			auth.push({
+				name: t("app.signIn"),
+				desc: t("app.signInDesc"),
+				render: (st) => st.addButton((b) => b.setButtonText(t("app.signInBtn")).setCta().onClick(() => new GitHubSignInModal(this.app, p, () => this.refresh()).open())),
+			});
+		}
+		if (!usingApp) {
+			auth.push({
+				name: t("s.token"),
+				desc: tokenDesc,
+				render: (st) =>
+					st.addText((c) => {
+						c.inputEl.type = "password";
+						c.setPlaceholder(t("s.tokenPlaceholder"))
+							.setValue(p.getToken())
+							.onChange((v) => p.setToken(v.trim()));
+					}),
+			});
+		}
+		// GitHub Enterprise: sign-in needs the organisation's own GitHub App.
+		const enterpriseApp: Item[] =
+			s.provider === "github" && !/^https:\/\/api\.github\.com\/?$/i.test(p.getApiBase())
+				? [
+						{
+							name: t("app.clientId"),
+							desc: t("app.clientIdDesc"),
+							render: (st) =>
+								st.addText((c) =>
+									onCommit(c.setValue(p.customGitHubApp().clientId), async (v) => {
+										p.setCustomGitHubApp(v.trim(), p.customGitHubApp().slug);
+										this.refresh();
+									}),
+								),
+						},
+						{
+							name: t("app.slug"),
+							desc: t("app.slugDesc"),
+							render: (st) =>
+								st.addText((c) =>
+									onCommit(c.setValue(p.customGitHubApp().slug), async (v) => {
+										p.setCustomGitHubApp(p.customGitHubApp().clientId, v.trim());
+									}),
+								),
+						},
+					]
+				: [];
+
 		return [
 			{
 				items: [
@@ -95,17 +159,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 								});
 							}),
 					},
-					{
-						name: t("s.token"),
-						desc: tokenDesc,
-						render: (st) =>
-							st.addText((c) => {
-								c.inputEl.type = "password";
-								c.setPlaceholder(t("s.tokenPlaceholder"))
-									.setValue(p.getToken())
-									.onChange((v) => p.setToken(v.trim()));
-							}),
-					},
+					...auth,
 					{
 						name: t("s.owner"),
 						desc: s.provider === "gitlab" ? t("s.ownerDescGitlab") : s.provider === "bitbucket" ? t("s.ownerDescBitbucket") : t("s.ownerDesc"),
@@ -180,8 +234,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.apiBase"),
 						desc: t("s.apiBaseDesc", { hint: host.apiHint }),
-						render: (st) => st.addText((c) => c.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi))),
+						render: (st) => st.addText((c) => onCommit(c.setValue(p.getApiBase()), async (v) => {
+							p.setApiBase(v.trim() || host.defaultApi);
+							if (s.provider === "github") this.refresh();
+						})),
 					},
+					...enterpriseApp,
 					{
 						name: t("s.device"),
 						desc: t("s.deviceDesc"),
@@ -241,7 +299,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			{
 				heading: t("s.hScope"),
 				items: [
-					{ name: t("s.configDir", { dir: this.app.vault.configDir }), desc: t("s.configDirDesc"), render: toggle("syncConfigDir") },
+					{ name: t("s.configDir", { dir: this.app.vault.configDir }), desc: `${t("s.configDirDesc")} ${t("s.configDirWarn")}`, render: toggle("syncConfigDir") },
 					{
 						name: t("s.exclude"),
 						desc: t("s.excludeDesc"),

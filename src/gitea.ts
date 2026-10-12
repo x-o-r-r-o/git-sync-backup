@@ -11,6 +11,8 @@ export interface HostConfig {
 	apiBase: string;
 	owner: string;
 	repo: string;
+	/** GitHub only: refresh a sign-in token after a 401. */
+	onUnauthorized?: (failedToken: string) => Promise<boolean>;
 }
 
 const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");

@@ -465,3 +465,20 @@
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 }
+
+/* Sign in with GitHub: device code */
+.vsg-device-code {
+	font-family: var(--font-monospace);
+	font-size: 2em;
+	letter-spacing: 0.15em;
+	text-align: center;
+	padding: var(--size-4-3);
+	margin: var(--size-4-2) 0;
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	user-select: all;
+}
+
+.vsg-hidden {
+	display: none;
+}

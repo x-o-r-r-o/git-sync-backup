@@ -96,4 +96,6 @@ export interface Remote {
 	/** HTTPS clone URL base of the repo (used by Git LFS). */
 	gitUrl(): string;
 	authHeader(): string;
+	/** When the token expires (epoch ms), if the host reports it; null = unknown or never. */
+	tokenExpiresAt?(): number | null;
 }

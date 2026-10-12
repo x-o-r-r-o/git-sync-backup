@@ -50,18 +50,18 @@ export function stamp(d = new Date()): string {
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
-export function conflictCopyPath(path: string, device: string, d = new Date()): string {
+export function conflictCopyPath(path: string, device: string, d = new Date(), n = 1): string {
 	const dir = parentDir(path);
 	const file = dir ? path.slice(dir.length + 1) : path;
 	const dot = file.lastIndexOf(".");
 	const name = dot > 0 ? file.slice(0, dot) : file;
 	const ext = dot > 0 ? file.slice(dot) : "";
 	const safeDevice = device.replace(/[\\/:*?"<>|#^[\]]/g, "-");
-	const out = `${name} (conflict ${safeDevice} ${stamp(d)})${ext}`;
+	const out = `${name} (conflict ${safeDevice} ${stamp(d)}${n > 1 ? `-${n}` : ""})${ext}`;
 	return dir ? `${dir}/${out}` : out;
 }
 
-const COPY_RE = /^(.*) \((?:conflict|restored) .+ \d{4}-\d{2}-\d{2} \d{4}\)(\.[^./]*)?$/;
+const COPY_RE = /^(.*) \((?:conflict|restored) .+ \d{4}-\d{2}-\d{2} \d{4}(?:-\d+)?\)(\.[^./]*)?$/;
 
 /** If `path` is a conflict copy made by this plugin, the path of the original file; otherwise null. */
 export function conflictCopyOriginal(path: string): string | null {

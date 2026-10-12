@@ -1,4 +1,6 @@
-# Authentication: research and plan (2026-10-12)
+# Authentication (2026-10-12)
+
+**Status (1.2.0): Sign in with GitHub is live** (GitHub App + device flow, `src/ghapp.ts`). The plugin's app is [Vault Sync for Git](https://github.com/apps/vault-sync-for-git) (client ID `Iv23lilDQAJBENeFs5Ei`, *Contents: read and write* only). On GitHub Enterprise a device can enter its own app's client ID in settings. Token entry stays available everywhere. Verified against the real API: sign-in, token refresh (both tokens rotate) and the full live sync suite running on the app's token.
 
 ## Today
 
@@ -40,3 +42,31 @@ Sources:
   - Refresh the access token before its 8-hour expiry, and save the rotated refresh token immediately.
   - Keep token entry as the fallback for GitHub Enterprise, locked-down organizations, and users who prefer it.
   - Risk: if the app is suspended or deleted, sign-in stops working for everyone, which is another reason to keep tokens.
+
+## How it works (1.2.0)
+
+1. The plugin posts its public client ID to `https://github.com/login/device/code` and shows the user code.
+2. **Copy and open GitHub** copies the code and opens `github.com/login/device`. The user pastes the code and approves.
+3. The plugin polls `login/oauth/access_token` at the interval GitHub asks for (and slows down on `slow_down`) until it gets an access token (8 hours) and a refresh token (6 months).
+4. Tokens are stored in Obsidian's SecretStorage on that device only, under its own key; the pasted token is kept separately, so signing out falls back to it.
+5. Before each sync, and once after any 401, the access token is refreshed. Only one refresh runs at a time, because GitHub rotates the refresh token on every use. No client secret is sent: GitHub doesn't require one for tokens that came from the device flow.
+6. If the refresh token has expired (6 months unused) or was revoked, the user is asked to sign in again.
+
+The app only sees the repositories the user installed it on. In the wizard, **Choose repositories** opens `github.com/apps/<slug>/installations/new`, and the repository list refreshes afterwards. The app can't create repositories, so the wizard links to `github.com/new` instead.
+
+## Registering the GitHub App
+
+One-time step for the plugin author (or a GitHub Enterprise admin for their server):
+
+1. GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**.
+2. Name: *Vault Sync for Git* (the URL name becomes the slug). Homepage: the plugin repository.
+3. Callback URL: not needed. Untick *Expire user authorization tokens* only if you want non-expiring tokens (not recommended).
+4. Tick **Enable Device Flow**.
+5. Webhook: untick *Active*.
+6. Repository permissions: **Contents: Read and write**. Metadata: Read-only is added automatically. Nothing else.
+7. *Where can this GitHub App be installed?* **Any account**.
+8. Create the app, then copy the **Client ID** (not the App ID) and the slug from the app's public URL into `GITHUB_APP` in `src/ghapp.ts`. No client secret or private key is needed.
+
+## Listing repositories
+
+`GET /user/repos` with an app token lists every repository the *user* can see, not the ones the app may write to. With a `ghu_` token the plugin lists `GET /user/installations` and each installation's repositories instead, so the wizard only offers repositories that will actually sync.

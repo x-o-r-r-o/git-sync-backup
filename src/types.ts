@@ -147,6 +147,11 @@ export interface ConflictInfo {
 	path: string;
 	/** Name of the remote side ("GitHub", "GitLab", …). */
 	remoteLabel?: string;
+	/** Name of the local side (default "This device"). */
+	localLabel?: string;
+	/** Title override, and whether to offer "merge with markers" (default true). */
+	title?: string;
+	markers?: boolean;
 	localText: string | null;
 	remoteText: string | null;
 	localSize: number;

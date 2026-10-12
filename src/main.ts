@@ -45,7 +45,10 @@ import {
 	TimelineModal,
 } from "./ui.ts";
 import { t } from "./i18n.ts";
-import { asText, conflictCopyOriginal, errMsg, restoredCopyPath, stamp } from "./util.ts";
+import { DeviceFlowError, GITHUB_APP, needsRefresh, parseTokens, refreshAppToken } from "./ghapp.ts";
+import type { AppConfig, AppTokens } from "./ghapp.ts";
+import { webBase } from "./auth.ts";
+import { asText, conflictCopyOriginal, errMsg, restoredCopyPath, sleep, stamp } from "./util.ts";
 
 type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background";
 type Status = "idle" | "syncing" | "ok" | "error" | "offline" | "conflict";
@@ -54,6 +57,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	settings!: VaultSyncSettings;
 	state!: SyncState;
 	private remoteCache: { kind: string; remote: Remote } | null = null;
+	private refreshing: Promise<boolean> | null = null;
+	private unloaded = false;
+	private expiredNoticeShown = false;
 	lastReport: SyncReport | null = null;
 	private encLayer: EncryptionLayer | null = null;
 	private shared: { sig: string; hosts: SharedFolderHost[] } | null = null;
@@ -143,7 +149,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (!this.isConfigured() && !this.settings.wizardShown) {
 				this.settings.wizardShown = true;
 				void this.saveSettings();
-				window.setTimeout(() => this.openWizard(), 1000);
+				window.setTimeout(() => !this.unloaded && this.openWizard(), 1000);
 			} else if (this.settings.syncOnStartup) window.setTimeout(() => void this.sync("startup"), 2500);
 		});
 
@@ -157,7 +163,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	onunload() {
+		this.unloaded = true;
 		this.onChangeDebounced?.cancel();
+	}
+	isUnloaded(): boolean {
+		return this.unloaded;
 	}
 
 	// Called by Obsidian when data.json changes on disk (e.g. synced from another device).
@@ -222,21 +232,120 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.localSet(`secret:${name}`, value || null);
 	}
 	getToken(): string {
+		if (this.usingGitHubApp()) return this.appTokens()?.access ?? "";
 		return this.getSecret("token");
 	}
 	setToken(token: string) {
 		this.setSecret("token", token);
+		// Pasting a token switches this device back to token sign-in.
+		if (token && this.usingGitHubApp()) this.localSet("auth:github", null);
+	}
+
+	// ---------------- Sign in with GitHub (GitHub App device flow) ----------------
+
+	/** Days until the pasted token expires, when the host reports it (GitHub); null = unknown. */
+	tokenExpiryDays(): number | null {
+		if (this.usingGitHubApp()) return null;
+		const at = this.gh.tokenExpiresAt?.() ?? null;
+		return at === null ? null : Math.floor((at - Date.now()) / 86_400_000);
+	}
+	/** Opens the host's token page (prefilled on GitHub). */
+	openTokenPage() {
+		const first = HOSTS[this.settings.provider ?? "github"].tokenSteps(this.getApiBase(), this.app.vault.getName()).find((s) => s.link);
+		if (first?.link) window.open(first.link.href);
+		else this.openSettings();
+	}
+	/** Once a day, warn when the pasted token expires within a week. */
+	private warnTokenExpiry() {
+		const days = this.tokenExpiryDays();
+		if (days === null || days > 7) return;
+		const today = new Date().toDateString();
+		if (this.localGet("tokenWarned") === today) return;
+		this.localSet("tokenWarned", today);
+		new Notice(days <= 0 ? t("h.tokenExpiresToday") : t("h.tokenExpires", { days }), 15000);
+	}
+
+	/** The GitHub App to sign in with on this device: a custom one (Enterprise), else the built-in one on github.com. */
+	githubApp(): AppConfig | null {
+		const clientId = this.localGet("ghapp:clientId") ?? "";
+		if (clientId) return { clientId, slug: this.localGet("ghapp:slug") ?? "" };
+		const api = this.getApiBaseFor("github").replace(/\/+$/, "");
+		return GITHUB_APP.clientId && /^https:\/\/api\.github\.com$/i.test(api) ? GITHUB_APP : null;
+	}
+	setCustomGitHubApp(clientId: string, slug: string) {
+		this.localSet("ghapp:clientId", clientId || null);
+		this.localSet("ghapp:slug", slug || null);
+	}
+	customGitHubApp(): AppConfig {
+		return { clientId: this.localGet("ghapp:clientId") ?? "", slug: this.localGet("ghapp:slug") ?? "" };
+	}
+	githubWeb(): string {
+		return webBase(this.getApiBaseFor("github"));
+	}
+	usingGitHubApp(): boolean {
+		return (this.settings.provider ?? "github") === "github" && this.localGet("auth:github") === "app";
+	}
+	/** The sign-in tokens, but only for the server and app that issued them (never sent anywhere else). */
+	appTokens(): AppTokens | null {
+		const tokens = parseTokens(this.getSecret("ghapp"));
+		if (!tokens) return null;
+		const app = this.githubApp();
+		if ((tokens.web && tokens.web !== this.githubWeb()) || (tokens.clientId && tokens.clientId !== app?.clientId)) return null;
+		return tokens;
+	}
+	signedInWithApp(tokens: AppTokens) {
+		this.setSecret("ghapp", JSON.stringify({ ...tokens, web: this.githubWeb(), clientId: this.githubApp()?.clientId }));
+		this.localSet("auth:github", "app");
+		this.expiredNoticeShown = false;
+	}
+	signOutApp() {
+		this.setSecret("ghapp", "");
+		this.localSet("auth:github", null);
+	}
+	/**
+	 * Make sure the sign-in token is valid, refreshing it shortly before it expires (or right away
+	 * when `force`, after a 401). Only one refresh runs at a time: GitHub rotates the refresh token,
+	 * so two concurrent refreshes would sign the device out. Returns true when a usable token exists.
+	 */
+	ensureFreshToken(force = false, failedToken?: string): Promise<boolean> {
+		// A pasted token can't be renewed: retrying a 401 with it would fail again.
+		if (!this.usingGitHubApp()) return Promise.resolve(!force && !!this.getToken());
+		if (this.refreshing) return this.refreshing;
+		const before = this.appTokens();
+		if (!before) return Promise.resolve(false);
+		// Another request already renewed it: just retry with the new token.
+		if (failedToken && before.access !== failedToken) return Promise.resolve(true);
+		if (!force && !needsRefresh(before)) return Promise.resolve(true);
+		this.refreshing = (async () => {
+			try {
+				const app = this.githubApp();
+				if (!app || !before.refresh) throw new DeviceFlowError("bad_refresh_token");
+				this.signedInWithApp(await refreshAppToken(this.githubWeb(), app.clientId, before.refresh));
+				return true;
+			} catch (e) {
+				this.log(`Sign-in refresh failed: ${errMsg(e)}`);
+				if (e instanceof DeviceFlowError && e.code !== "http" && !this.expiredNoticeShown) {
+					this.expiredNoticeShown = true;
+					new Notice(t("app.expiredSession"), 10000);
+				}
+				return false;
+			} finally {
+				this.refreshing = null;
+			}
+		})();
+		return this.refreshing;
 	}
 	/** The git host client for the configured provider (rebuilt when the provider changes). */
 	get gh(): Remote {
 		const kind = this.settings.provider ?? "github";
-		const key = `${kind}|${this.settings.owner}|${this.settings.repo}`;
+		const { owner, repo } = this.settings;
+		const key = `${kind}|${owner}|${repo}`;
 		if (!this.remoteCache || this.remoteCache.kind !== key) {
 			this.remoteCache = {
 				kind: key,
 				remote: makeRemote(
 					kind,
-					() => ({ token: this.getToken(), apiBase: this.getApiBase(), owner: this.settings.owner, repo: this.settings.repo }),
+					() => ({ token: this.getToken(), apiBase: this.getApiBaseFor(kind), owner, repo, onUnauthorized: (failed) => this.ensureFreshToken(true, failed) }),
 					this.blobCacheStore(`${this.settings.owner}-${this.settings.repo}`),
 				),
 			};
@@ -458,9 +567,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	/** First sync from the setup wizard. Returns a one-line summary. */
 	async firstSync(prefer?: "local" | "remote"): Promise<string> {
+		// An automatic sync may be running: wait for it, so this one runs now (not queued) and its
+		// result, with the side chosen in the wizard, is the one reported.
+		for (let i = 0; this.syncing && i < 600; i++) await sleep(500);
+		this.lastError = null;
+		this.lastReport = null;
 		await this.sync("manual", this.settings.mode, prefer ? { firstSyncPrefer: prefer } : { firstSyncPrefer: undefined });
-		if (this.lastError) return t("m.firstFailed", { error: this.lastError });
-		const r = this.lastReport;
+		const err = this.lastError as string | null;
+		if (err) return t("m.firstFailed", { error: err });
+		const r = this.lastReport as SyncReport | null;
 		if (!r) return t("m.syncFinished");
 		if (r.upToDate) return t("m.alreadyInSync");
 		const parts = [
@@ -659,6 +774,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	async sync(trigger: Trigger, mode: SyncMode = this.settings.mode, opts: SyncOptions = {}): Promise<void> {
+		if (this.unloaded) return;
+		if (this.usingGitHubApp() && navigator.onLine) await this.ensureFreshToken();
 		const problem = this.configProblem();
 		if (problem) {
 			if (trigger === "manual") new Notice(problem);
@@ -724,6 +841,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	private afterSync(r: SyncReport, trigger: Trigger, ms: number) {
+		this.warnTokenExpiry();
 		if (r.upToDate) {
 			this.log(`Up to date (${trigger}).`);
 			this.setStatus(this.conflictCopies().length ? "conflict" : "ok");
@@ -782,7 +900,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return { text: asText(path, data), size: data.byteLength };
 	}
 
-	async openReview() {
+	async openReview(previewOnly = false) {
 		const problem = this.configProblem();
 		if (problem) return void new Notice(problem);
 		if (this.syncing) return void new Notice(t("notice.busy"));
@@ -820,7 +938,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				const n = await this.textOf(d.path, newData);
 				return { oldLabel, newLabel, oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
 			};
-			new ReviewModal(this.app, pv.decisions, pv.skipped, loadDiff, (deferred) => void this.sync("manual", this.settings.mode, { defer: deferred })).open();
+			new ReviewModal(this.app, pv.decisions, pv.skipped, loadDiff, previewOnly ? null : (deferred) => void this.sync("manual", this.settings.mode, { defer: deferred })).open();
 		} catch (e) {
 			new Notice(t("m.reviewFailed", { error: errMsg(e) }));
 		}
@@ -857,6 +975,38 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async trashFile(f: TFile) {
 		await this.io.remove(f.path);
+	}
+
+	/**
+	 * Resolve a conflict copy in place: pick change by change (or a whole side), write the result to
+	 * the original note and move the copy to the trash. Closing the dialog changes nothing.
+	 */
+	async resolveConflictCopy(original: TFile, copy: TFile): Promise<boolean> {
+		const [a, b] = await Promise.all([this.app.vault.readBinary(original), this.app.vault.readBinary(copy)]);
+		const localText = asText(original.path, a);
+		const remoteText = asText(copy.path, b);
+		const choice = await new Promise<ConflictChoice>((resolve) =>
+			new ConflictModal(
+				this.app,
+				{
+					path: original.path,
+					title: t("h.resolveTitle", { path: original.path }),
+					localLabel: t("h.currentNote"),
+					remoteLabel: t("h.conflictCopy"),
+					markers: false,
+					localText,
+					remoteText,
+					localSize: a.byteLength,
+					remoteSize: b.byteLength,
+				},
+				resolve,
+			).open(),
+		);
+		if (choice === "keep-both" || choice === "markers") return false;
+		if (choice === "remote") await this.app.vault.modifyBinary(original, b);
+		else if (typeof choice === "object") await this.app.vault.modify(original, choice.custom);
+		await this.trashFile(copy);
+		return true;
 	}
 
 	// ---------------- timeline / restore / reset ----------------
@@ -967,7 +1117,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.addCommand({ id: "open-status", name: t("cmd.status"), callback: () => this.openHealth() });
 		this.addCommand({ id: "pull-now", name: t("cmd.pull"), callback: () => this.sync("manual", "pull") });
 		this.addCommand({ id: "push-now", name: t("cmd.push"), callback: () => this.sync("manual", "push") });
-		this.addCommand({ id: "preview", name: t("cmd.preview"), callback: () => this.openReview() });
+		this.addCommand({ id: "preview", name: t("cmd.preview"), callback: () => this.openReview(true) });
 		this.addCommand({ id: "timeline", name: t("cmd.timeline"), callback: () => this.openTimeline() });
 		this.addCommand({ id: "reset-to-github", name: t("cmd.reset"), callback: () => this.resetToGitHub() });
 		this.addCommand({ id: "snapshot", name: t("cmd.snapshot"), callback: () => this.snapshot(true) });

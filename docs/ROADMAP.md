@@ -67,13 +67,14 @@ We cover 1–3. The plan below targets 4–10 and adds features no git-based plu
 - https://github.com/remotely-save/remotely-save/issues
 - https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugin-stats.json
 
-## Status after 1.1.0 (2026-10-12)
+## Status after 1.2.0 (2026-10-12)
 
-All roadmap items have shipped except the one deliberately planned:
+All roadmap items have shipped:
 
 | Item | Status |
 |---|---|
-| 9: Sign in with GitHub (GitHub App + device flow) | **Planned, not built** (see [AUTH.md](AUTH.md)). Needs a GitHub App registered by the author. |
+| 9: Sign in with GitHub (GitHub App + device flow) | ✅ 1.2 (see [AUTH.md](AUTH.md)) |
+| 15: More languages | ✅ 1.2: German, Spanish, French, Japanese, Korean, Portuguese |
 | 15: Full translations | ✅ 1.1: every screen, English and Simplified Chinese |
 | 6 / 12: Attachments on demand | ✅ 1.1 |
 | 4: Rename + edit detection | ✅ 1.1 (content similarity, merge across rename) |
@@ -81,3 +82,15 @@ All roadmap items have shipped except the one deliberately planned:
 | Settings search (Obsidian 1.13+) | ✅ 1.1 |
 
 Still to verify: real phones, and real GitLab, Gitea and Bitbucket servers (so far they are tested against simulated servers only).
+
+## Next (from the 1.2 review)
+
+Ranked by user demand in competitor issue trackers (Fit, Obsidian Git, Remotely Save, LiveSync) and effort:
+
+1. **Granular settings-folder sync**: per category or per plugin (code + settings, code only, device-local), so workspace and plugin settings stop conflicting. Fit 1.6 and halyard-sync just shipped this.
+2. **Add a device with a setup link or QR code** carrying host, repository, branch and scope (token optional, passphrase-encrypted), plus a warning when another sync tool (Obsidian Sync, iCloud, a `.git` folder, Remotely Save, LiveSync) is active in the vault.
+3. **Respect the repository's `.gitignore`** and allow dotfiles outside the settings folder.
+4. **Sync status in the file explorer** (pending, conflict, on demand, excluded) and better feedback on phones, which have no status bar.
+5. **Sync this file now** and sync on file open.
+6. Fewer, grouped settings (basics first, advanced collapsed).
+7. Real-server verification of GitLab, Gitea and Bitbucket, and real-phone testing, before dropping "beta".

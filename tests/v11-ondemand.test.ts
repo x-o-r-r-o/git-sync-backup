@@ -48,3 +48,21 @@ test("changing this device's scope triggers a full comparison even when nothing 
 	assert.equal(r.upToDate, false);
 	assert.equal(phone.fs.text("Personal/p.md"), "p\n");
 });
+
+test("deleting a big file on a size-limited device reaches the repository", async () => {
+	const gh = new FakeGitHub();
+	const a = device("Mac", gh);
+	const phone = device("Phone", gh);
+	a.fs.put("big.pdf", "x".repeat(4000));
+	await a.sync();
+	// The phone had it (pinned), then the limit applies again and the user deletes it.
+	let pinned = ["big.pdf"];
+	phone.host.deviceScope = () => ({ include: [], exclude: [], maxDownloadMB: 0.001, pinned });
+	await phone.sync();
+	assert.ok(phone.fs.files.has("big.pdf"));
+	pinned = [];
+	phone.fs.files.delete("big.pdf");
+	await phone.sync();
+	assert.ok(!gh.headFiles().has("big.pdf"), "deletion uploaded, not mistaken for 'available on demand'");
+	assert.deepEqual(phone.host.state.remoteOnly, {});
+});

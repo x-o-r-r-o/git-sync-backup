@@ -36,7 +36,7 @@
 
 - GitHub hard limit 100 MB per file (default plugin limit 50 MB, configurable). Repos > ~1 GB get slow; keep big media out (exclude patterns).
 - A file edited while a sync is writing it will be reloaded by Obsidian from disk.
-- Git LFS is not supported.
+- Git LFS is supported since v0.5 (opt-in, by size threshold).
 
 ## Audit (2026-10-12) — fixed
 

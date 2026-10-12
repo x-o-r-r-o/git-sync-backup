@@ -10,6 +10,8 @@ import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { errMsg } from "./util.ts";
 import { t as tr } from "./i18n.ts";
+import { GitHubSignInModal } from "./ghapp-ui.ts";
+import { installUrl } from "./ghapp.ts";
 
 type Step = "connect" | "repo" | "vault" | "syncing" | "done";
 type FirstSync = "upload" | "download" | "merge" | "prefer-local";
@@ -87,8 +89,8 @@ export class SetupWizard extends Modal {
 			.addText((t) => t.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim())));
 
 		const status = this.contentEl.createDiv({ cls: "vsg-wz-status" });
-		const done = async (token: string) => {
-			p.setToken(token);
+		const done = async (token?: string) => {
+			if (token !== undefined) p.setToken(token);
 			try {
 				this.login = (await p.gh.getUser()).login;
 				new Notice(tr("w.signedIn", { user: this.login }));
@@ -101,11 +103,25 @@ export class SetupWizard extends Modal {
 		if (p.getToken()) {
 			new Setting(this.contentEl)
 				.setName(tr("w.alreadyConnected"))
-				.addButton((b) => b.setButtonText(tr("w.continue")).setCta().onClick(() => done(p.getToken())));
+				.addButton((b) => b.setButtonText(tr("w.continue")).setCta().onClick(() => done()));
+		}
+
+		const app = p.settings.provider === "github" ? p.githubApp() : null;
+		if (app) {
+			const box = this.contentEl.createDiv({ cls: "vsg-wz-token" });
+			box.createEl("h4", { text: tr("app.signIn") });
+			new Setting(box)
+				.setDesc(tr("app.signInDesc"))
+				.addButton((b) =>
+					b
+						.setButtonText(tr("app.signInBtn"))
+						.setCta()
+						.onClick(() => new GitHubSignInModal(this.app, p, (ok) => void (ok && done())).open()),
+				);
 		}
 
 		const tokenBox = this.contentEl.createDiv({ cls: "vsg-wz-token" });
-		tokenBox.createEl("h4", { text: tr("w.connectWith", { host: host.label.split(" ")[0] }) });
+		tokenBox.createEl("h4", { text: app ? tr("app.orToken") : tr("w.connectWith", { host: host.label.split(" ")[0] }) });
 		const tips = tokenBox.createEl("ol", { cls: "vsg-muted" });
 		for (const step of host.tokenSteps(p.getApiBase(), this.app.vault.getName())) {
 			const li = tips.createEl("li");
@@ -141,7 +157,15 @@ export class SetupWizard extends Modal {
 		};
 
 		let newName = this.app.vault.getName().replace(/[^A-Za-z0-9._-]+/g, "-");
-		new Setting(this.contentEl)
+		// Signed in with the GitHub App: it can only see repositories it was granted, and can't create any.
+		if (p.usingGitHubApp()) {
+			const app = p.githubApp();
+			const web = p.githubWeb();
+			const st = new Setting(this.contentEl).setName(tr("app.chooseRepos")).setDesc(tr("app.chooseReposDesc"));
+			if (app?.slug) st.addButton((b) => b.setButtonText(tr("app.chooseRepos")).setCta().onClick(() => window.open(installUrl(web, app.slug))));
+			st.addButton((b) => b.setButtonText(tr("app.createOnGitHub")).onClick(() => window.open(`${web}/new`)));
+			st.addButton((b) => b.setButtonText(tr("app.refresh")).onClick(() => this.render()));
+		} else new Setting(this.contentEl)
 			.setName(tr("w.createNew"))
 			.addText((t) => t.setValue(newName).onChange((v) => (newName = v.trim())))
 			.addButton((b) =>

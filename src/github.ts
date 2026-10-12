@@ -15,6 +15,8 @@ export interface GitHubConfig {
 	apiBase: string;
 	owner: string;
 	repo: string;
+	/** Called once after a 401 with the token that failed (e.g. to refresh a sign-in token); true = retry. */
+	onUnauthorized?: (failedToken: string) => Promise<boolean>;
 }
 
 export interface NewTreeEntry {
@@ -26,6 +28,18 @@ export interface NewTreeEntry {
 }
 
 export class GitHubError extends RemoteError {}
+
+/**
+ * Parses GitHub's `github-authentication-token-expiration` header ("2026-11-01 12:00:00 -0700" or
+ * "... UTC"). Done by hand because Safari/iOS's Date.parse rejects that format.
+ */
+export function parseTokenExpiry(v: string | undefined): number | null {
+	const m = /^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)\s*(?:(UTC|Z)|([+-])(\d\d):?(\d\d))?/i.exec((v ?? "").trim());
+	if (!m) return null;
+	const utc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+	const offset = m[8] ? (m[8] === "-" ? -1 : 1) * (+m[9] * 60 + +m[10]) * 60_000 : 0;
+	return utc - offset;
+}
 
 // Text up to this size is sent inline in tree requests (saves one API call per file).
 const INLINE_MAX = 400 * 1024;
@@ -65,8 +79,14 @@ export class GitHub implements Remote {
 	readonly kind = "github" as const;
 	readonly label = "GitHub";
 	private cfg: () => GitHubConfig;
+	private expiry: { token: string; at: number | null } | null = null;
 	constructor(cfg: () => GitHubConfig) {
 		this.cfg = cfg;
+	}
+
+	tokenExpiresAt(): number | null {
+		const e = this.expiry;
+		return e && e.token === this.cfg().token ? e.at : null;
 	}
 
 	gitUrl(): string {
@@ -138,10 +158,11 @@ export class GitHub implements Remote {
 		body?: unknown,
 		opts: { accept?: string; okStatuses?: number[] } = {},
 	): Promise<RequestUrlResponse> {
-		const c = this.cfg();
+		let c = this.cfg();
 		if (!c.token) throw new GitHubError("No GitHub token set. Add one in the plugin settings.", 401);
 		const url = (c.apiBase || "https://api.github.com").replace(/\/+$/, "") + path;
 		let lastErr: unknown;
+		let reauthed = false;
 
 		for (let attempt = 0; attempt < 4; attempt++) {
 			let res: RequestUrlResponse;
@@ -169,7 +190,14 @@ export class GitHub implements Remote {
 				continue;
 			}
 
-			if (res.status < 300 || opts.okStatuses?.includes(res.status)) return res;
+			if (res.status < 300 || opts.okStatuses?.includes(res.status)) {
+				if (res.status < 300) {
+					// Not every endpoint sends the header: keep what we learned for this token.
+					const at = parseTokenExpiry(header(res, "github-authentication-token-expiration"));
+					if (at !== null || this.expiry?.token !== c.token) this.expiry = { token: c.token, at };
+				}
+				return res;
+			}
 
 			const data = safeJson(res);
 			const msg = data?.message ?? `HTTP ${res.status}`;
@@ -194,7 +222,15 @@ export class GitHub implements Remote {
 				await sleep(1000 * 2 ** attempt);
 				continue;
 			}
-			if (res.status === 401) throw new GitHubError("GitHub token is invalid or expired.", 401);
+			if (res.status === 401) {
+				if (!reauthed && c.onUnauthorized && (await c.onUnauthorized(c.token))) {
+					reauthed = true;
+					c = this.cfg();
+					attempt--;
+					continue;
+				}
+				throw new GitHubError("GitHub token is invalid or expired.", 401);
+			}
 			throw new GitHubError(`${msg} (${method} ${path.split("?")[0]})`, res.status);
 		}
 		throw lastErr instanceof Error ? lastErr : new GitHubError("Network error talking to GitHub", 0);
@@ -218,6 +254,20 @@ export class GitHub implements Remote {
 	/** Repositories the token can see, most recently updated first. */
 	async listRepos(maxPages = 3): Promise<{ owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[]> {
 		const out: { owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[] = [];
+		// Signed in through the GitHub App (user-to-server tokens start with ghu_): /user/repos lists every
+		// repository the user can see, but the app can only sync those it is installed on.
+		if (this.cfg().token.startsWith("ghu_")) {
+			const inst = await this.json<{ installations: { id: number }[] }>("GET", "/user/installations?per_page=100");
+			for (const i of inst.installations ?? []) {
+				for (let page = 1; page <= maxPages; page++) {
+					const res = await this.json<{ repositories: GhRepoListItem[] }>("GET", `/user/installations/${i.id}/repositories?per_page=100&page=${page}`);
+					const list = res.repositories ?? [];
+					for (const r of list) out.push({ owner: r.owner.login, name: r.name, private: r.private, updated: r.updated_at, defaultBranch: r.default_branch });
+					if (list.length < 100) break;
+				}
+			}
+			return out.sort((a, b) => b.updated.localeCompare(a.updated));
+		}
 		for (let page = 1; page <= maxPages; page++) {
 			const list = await this.json<GhRepoListItem[]>("GET", `/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`);
 			for (const r of list) out.push({ owner: r.owner.login, name: r.name, private: r.private, updated: r.updated_at, defaultBranch: r.default_branch });

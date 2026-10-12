@@ -26,3 +26,16 @@ test("i18n: Simplified Chinese covers every English key, with the same placehold
 		assert.equal(ph((zh as Record<string, string>)[k]), ph(v), `placeholders differ for ${k}`);
 	}
 });
+
+test("i18n: every catalog covers every English key, with the same placeholders", async () => {
+	const { en } = await import("../src/locales/en.ts");
+	const ph = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
+	for (const lang of ["de", "es", "fr", "ja", "ko", "pt"]) {
+		const cat = (await import(`../src/locales/${lang}.ts`))[lang] as Record<string, string>;
+		const missing = Object.keys(en).filter((k) => !(k in cat));
+		const extra = Object.keys(cat).filter((k) => !(k in en));
+		assert.deepEqual(missing, [], `${lang}: missing ${missing.join(", ")}`);
+		assert.deepEqual(extra, [], `${lang}: unknown keys ${extra.join(", ")}`);
+		for (const [k, v] of Object.entries(en)) assert.equal(ph(cat[k]), ph(v), `${lang}: placeholders differ for ${k}`);
+	}
+});

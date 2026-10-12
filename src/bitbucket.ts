@@ -212,10 +212,14 @@ export class Bitbucket implements Remote {
 		return files;
 	}
 
-	/** Paths that differ between two commits (direction doesn't matter: each is re-fetched). */
+	/**
+	 * Paths that differ between two commits (direction doesn't matter: each is re-fetched).
+	 * `topic=false` asks for a plain two-dot diff; Bitbucket's default is relative to the merge base,
+	 * which would miss changes when the cache sits ahead of `b` (timeline, restore, force-push).
+	 */
 	private async changedPaths(a: string, b: string): Promise<Set<string>> {
 		const out = new Set<string>();
-		for (const d of await this.pages<BbDiffstat>(`${this.repoPath}/diffstat/${b}..${a}?pagelen=500`, 1000)) {
+		for (const d of await this.pages<BbDiffstat>(`${this.repoPath}/diffstat/${b}..${a}?pagelen=500&topic=false`, 1000)) {
 			if (d.old?.path) out.add(d.old.path);
 			if (d.new?.path) out.add(d.new.path);
 		}

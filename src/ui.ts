@@ -71,9 +71,10 @@ export class ConflictModal extends Modal {
 	onOpen() {
 		const { contentEl, info } = this;
 		this.modalEl.addClass("vsg-wide");
-		this.titleEl.setText(tr("u.conflictTitle", { path: info.path }));
+		this.titleEl.setText(info.title ?? tr("u.conflictTitle", { path: info.path }));
 		const R = info.remoteLabel ?? tr("u.repository");
-		contentEl.createEl("p", { text: tr("u.conflictBody", { host: R }), cls: "vsg-muted" });
+		const L = info.localLabel ?? tr("u.thisDevice");
+		if (!info.title) contentEl.createEl("p", { text: tr("u.conflictBody", { host: R }), cls: "vsg-muted" });
 		const pick = (c: ConflictChoice) => {
 			this.choice = c;
 			this.close();
@@ -88,10 +89,10 @@ export class ConflictModal extends Modal {
 				tabs.querySelectorAll("button").forEach((b, i) => b.toggleClass("is-active", (i === 0) === (which === "pick")));
 				if (which === "pick") {
 					pane.createEl("p", { cls: "vsg-muted", text: tr("u.pickHint") });
-					build = renderHunkPicker(pane, info.localText!, info.remoteText!, { a: tr("u.thisDevice"), b: R });
+					build = renderHunkPicker(pane, info.localText!, info.remoteText!, { a: L, b: R });
 				} else {
 					build = null;
-					renderDiff(pane, info.localText!, info.remoteText!, { oldLabel: tr("u.thisDevice"), newLabel: R });
+					renderDiff(pane, info.localText!, info.remoteText!, { oldLabel: L, newLabel: R });
 				}
 			};
 			tabs.createEl("button", { text: tr("u.chooseChanges") }).onClickEvent(() => show("pick"));
@@ -111,10 +112,10 @@ export class ConflictModal extends Modal {
 		}
 
 		const whole = new Setting(contentEl).setName(tr("u.wholeFile"));
-		whole.addButton((b) => b.setButtonText(tr("u.thisDevice")).onClick(() => pick("local")));
+		whole.addButton((b) => b.setButtonText(L).onClick(() => pick("local")));
 		whole.addButton((b) => b.setButtonText(R).onClick(() => pick("remote")));
 		whole.addButton((b) => b.setButtonText(tr("u.keepBoth")).onClick(() => pick("keep-both")));
-		if (info.localText !== null && info.remoteText !== null) {
+		if (info.markers !== false && info.localText !== null && info.remoteText !== null) {
 			whole.addButton((b) => b.setButtonText(tr("u.markers")).onClick(() => pick("markers")));
 		}
 	}
@@ -177,14 +178,16 @@ export class ReviewModal extends Modal {
 		private decisions: Decision[],
 		private skipped: string[],
 		private loadDiff: (d: Decision) => Promise<DiffSides>,
-		private onSync: (deferred: Set<string>) => void,
+		/** null = preview only (dry run): no checkboxes and no sync button. */
+		private onSync: ((deferred: Set<string>) => void) | null,
 	) {
 		super(app);
 	}
 	onOpen() {
 		const { contentEl } = this;
 		this.modalEl.addClass("vsg-wide");
-		this.titleEl.setText(tr("u.reviewTitle"));
+		const preview = !this.onSync;
+		this.titleEl.setText(preview ? tr("u.previewTitle") : tr("u.reviewTitle"));
 		if (!this.decisions.length) {
 			contentEl.createEl("p", { text: tr("u.upToDate") });
 			if (this.skipped.length) {
@@ -193,7 +196,7 @@ export class ReviewModal extends Modal {
 			}
 			return;
 		}
-		contentEl.createEl("p", { cls: "vsg-muted", text: tr("u.reviewHint") });
+		contentEl.createEl("p", { cls: "vsg-muted", text: preview ? tr("u.previewHint") : tr("u.reviewHint") });
 		const footer = new Setting(contentEl.createDiv());
 		const syncBtnRef: { set?: (n: number) => void } = {};
 		const refresh = () => syncBtnRef.set?.([...this.checked.values()].filter(Boolean).length);
@@ -204,6 +207,7 @@ export class ReviewModal extends Modal {
 			const h = contentEl.createDiv({ cls: "vsg-review-group" });
 			const all = h.createEl("input", { type: "checkbox" });
 			all.checked = true;
+			all.toggleClass("vsg-hidden", preview);
 			h.createSpan({ text: ` ${title} (${items.length})`, cls: "vsg-review-title" });
 			const ul = contentEl.createDiv({ cls: "vsg-review-list" });
 			const boxes: HTMLInputElement[] = [];
@@ -212,6 +216,7 @@ export class ReviewModal extends Modal {
 				const row = ul.createDiv({ cls: "vsg-review-row" });
 				const cb = row.createEl("input", { type: "checkbox" });
 				cb.checked = true;
+				cb.toggleClass("vsg-hidden", preview);
 				cb.onchange = () => {
 					this.checked.set(d.path, cb.checked);
 					refresh();
@@ -235,7 +240,8 @@ export class ReviewModal extends Modal {
 			list(contentEl, this.skipped);
 		}
 		contentEl.appendChild(footer.settingEl.parentElement!);
-		footer.addButton((b) => b.setButtonText(tr("u.cancel")).onClick(() => this.close()));
+		footer.addButton((b) => b.setButtonText(preview ? tr("u.close") : tr("u.cancel")).onClick(() => this.close()));
+		if (preview) return;
 		footer.addButton((b) => {
 			syncBtnRef.set = (n) => {
 				b.setButtonText(n === this.checked.size ? tr("u.syncAll") : tr("u.syncSelected", { n })).setDisabled(n === 0);
@@ -251,7 +257,7 @@ export class ReviewModal extends Modal {
 					if (d.kind === "delete-remote" && d.renamedTo) deferred.add(d.renamedTo);
 				}
 				this.close();
-				this.onSync(deferred);
+				this.onSync?.(deferred);
 			});
 		});
 		refresh();

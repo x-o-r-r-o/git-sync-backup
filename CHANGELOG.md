@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0 (2026-10-12)
+
+**New**
+- **Sign in with GitHub.** No token to create: approve a short code on github.com and pick the repositories the *Vault Sync for Git* GitHub App may use (Contents only). Access renews automatically (8-hour tokens, refreshed before expiry and once after a 401, one refresh at a time because GitHub rotates refresh tokens). No client secret, no server. GitHub Enterprise can use its own app. Tokens remain available for every host.
+- **Six more languages:** German, Spanish, French, Japanese, Korean and Portuguese (Brazil), alongside English and Simplified Chinese. Tests check every catalog for every key and placeholder.
+- **Resolve conflict copies** from the status panel: pick change by change, the result goes into the note and the copy to the trash.
+- **Token expiry warning** for pasted GitHub tokens (status panel two weeks ahead, a notice in the last week).
+- **Exclude patterns:** `!pattern` re-includes (the last matching pattern wins), with `\!` and `\#` escapes. Brackets stay literal, so folder names like `Team [Acme]` keep matching.
+- **Preview sync (dry run)** is now a true preview, without checkboxes or a sync button.
+
+**Fixed (from a full code audit)**
+- Downloads are checked against their git hash, so a truncated or empty response (Gitea's 10 MB API limit, a proxy) is refused instead of written over the file.
+- Two conflicts on the same note within a minute no longer overwrite the first conflict copy.
+- Conflict and merge results re-check that the note wasn't edited during the download or the conflict dialog before writing.
+- A branch moved back on purpose (undo + force-push) no longer blocks syncing forever: after retries it is compared from scratch, without deleting anything.
+- Large-file (LFS) objects respect this device's download limit; the listing only shows the pointer's size, so phones could download huge files.
+- Deleting or renaming a big file on a device with a download limit now reaches the repository instead of being mistaken for "available on demand".
+- Bitbucket: change listings use a plain two-commit diff (`topic=false`), fixing timeline and restore listings when the cache is ahead.
+- Unloading the plugin (update, disable) stops a running sync at the next safe point, so a reloaded copy never syncs alongside it.
+- A running sync keeps using the repository it started with, even if settings change meanwhile.
+- The setup wizard's first sync waits for an automatic sync already running, so its own choice runs and is reported.
+- Progress messages are translated and name the actual host; the status panel no longer shows the GitHub API budget for other hosts and has a clean empty state before setup; the Compare dialog names the configured host.
+- Docs: corrected setting names, documented GitLab's missing file sizes and Gitea's blob limit, and the testing status of beta hosts.
+
 ## 1.1.1 (2026-10-12)
 
 - Fix the Obsidian Community scorecard: `package-lock.json` is back in sync with `package.json` (the `obsidian` type package is pinned instead of `latest`), so `npm ci` succeeds and source review and build verification can run.

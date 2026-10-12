@@ -6,11 +6,18 @@ import { getLanguage } from "obsidian";
 
 import { en } from "./locales/en.ts";
 import { zh } from "./locales/zh.ts";
+import { de } from "./locales/de.ts";
+import { es } from "./locales/es.ts";
+import { fr } from "./locales/fr.ts";
+import { ja } from "./locales/ja.ts";
+import { ko } from "./locales/ko.ts";
+import { pt } from "./locales/pt.ts";
 
 export type Key = keyof typeof en;
 
 
-const catalogs: Record<string, Partial<Record<Key, string>>> = { zh };
+// Looked up by Obsidian's language code, then by its first part ("pt-BR" → "pt", "zh-TW" → "zh").
+const catalogs: Record<string, Partial<Record<Key, string>>> = { zh, de, es, fr, ja, ko, pt };
 
 function language(): string {
 	try {

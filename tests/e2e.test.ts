@@ -251,9 +251,28 @@ test("stale (cached) remote head never causes local deletions", async () => {
 	a.fs.put("two.md", "2\n");
 	await a.sync();
 	gh.staleRef = older; // GitHub/HTTP cache serves the previous head
-	await assert.rejects(() => a.sync(), /outdated branch state/);
+	// After retrying, an older head is treated like a moved-back branch: compared from scratch, so
+	// the sync may succeed or fail on the stale ref, but it never deletes anything.
+	await a.sync().catch(() => undefined);
 	assert.ok(a.fs.files.has("two.md"), "two.md must survive");
+	assert.ok(gh.headFiles().has("two.md") && gh.headFiles().has("one.md"), "nothing deleted in the repository");
 	gh.staleRef = null;
+	await a.sync();
+	assert.equal((await a.sync()).upToDate, true);
+	assert.deepEqual([...a.fs.files.keys()].filter((p) => p.endsWith(".md")).sort(), ["one.md", "two.md"]);
+});
+
+test("a branch moved back on purpose (force-push) syncs again without deleting", async () => {
+	const { gh, a } = setup();
+	a.fs.put("one.md", "1\n");
+	await a.sync();
+	const older = gh.refs.get("main")!;
+	a.fs.put("two.md", "2\n");
+	await a.sync();
+	gh.refs.set("main", older); // "undo last commit" + force-push
+	await a.sync();
+	assert.equal(a.fs.text("two.md"), "2\n", "local file kept");
+	assert.ok(gh.headFiles().has("two.md"), "and uploaded again");
 	assert.equal((await a.sync()).upToDate, true);
 });
 
@@ -269,4 +288,39 @@ test("rewritten remote history never deletes local files", async () => {
 	assert.equal(a.fs.text("keep.md"), "k\n");
 	assert.equal(a.fs.text("other.md"), "o\n");
 	assert.ok(gh.headFiles().has("keep.md"), "re-uploaded");
+});
+
+test("two conflicts on the same file in the same minute keep both copies", async () => {
+	const { a, b } = setup();
+	a.fs.put("n.md", "same\n");
+	await a.sync();
+	await b.sync();
+	const copies: string[] = [];
+	for (const round of [1, 2]) {
+		a.fs.put("n.md", `A${round}\n`);
+		b.fs.put("n.md", `B${round}\n`);
+		await a.sync();
+		copies.push(...(await b.sync()).conflictCopies);
+	}
+	assert.equal(copies.length, 2);
+	assert.notEqual(copies[0], copies[1], "second copy gets its own name");
+	assert.equal(b.fs.text(copies[0]), "B1\n");
+	assert.equal(b.fs.text(copies[1]), "B2\n");
+});
+
+test("a truncated download is refused, never written over the file", async () => {
+	const { gh, a, b } = setup();
+	a.fs.put("doc.md", "original\n");
+	await a.sync();
+	await b.sync();
+	a.fs.put("doc.md", "new version\n");
+	await a.sync();
+	const real = gh.getBlob.bind(gh);
+	gh.getBlob = async () => new ArrayBuffer(0); // e.g. Gitea's blob size limit
+	const r = await b.sync().catch((e: unknown) => e);
+	assert.equal(b.fs.text("doc.md"), "original\n", "local file untouched");
+	assert.ok(r instanceof Error || (r as { errors: string[] }).errors.some((x) => /couldn't be downloaded completely/.test(x)));
+	gh.getBlob = real;
+	await b.sync();
+	assert.equal(b.fs.text("doc.md"), "new version\n", "next sync recovers");
 });

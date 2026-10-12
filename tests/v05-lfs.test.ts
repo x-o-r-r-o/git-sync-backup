@@ -80,3 +80,29 @@ test("LFS: turning it on later converts big files on upload without conflicts", 
 	assert.ok(parsePointer(gh.rawFiles().get("img.png").buffer), "converted to LFS");
 	assert.equal(a.fs.text("img.png"), "P".repeat(3000));
 });
+
+test("LFS: a device's download limit uses the real size, not the pointer's", async () => {
+	const gh = new FakeGitHub() as any;
+	gh.gitUrl = () => "https://github.test/me/vault.git";
+	gh.authHeader = () => "Basic dGVzdA==";
+	gh.label = "GitHub";
+	const lfs = fakeLfs();
+	const a = device("A", gh);
+	const phone = device("Phone", gh);
+	a.host.codec = () => new Codec([new LfsLayer(gh, 100, lfs.transport)]);
+	phone.host.codec = () => new Codec([new LfsLayer(gh, 0, lfs.transport)]);
+	a.fs.put("video.mp4", "v".repeat(5000)); // stored as a ~130-byte pointer
+	a.fs.put("note.md", "n\n");
+	await a.sync();
+	let pinned: string[] = [];
+	phone.host.deviceScope = () => ({ include: [], exclude: [], maxDownloadMB: 0.001, pinned }); // ~1 KB
+	const r = await phone.sync();
+	assert.equal(phone.fs.text("note.md"), "n\n");
+	assert.ok(!phone.fs.files.has("video.mp4"), "not downloaded");
+	assert.equal(lfs.calls.downloads, 0, "the LFS object was never fetched");
+	assert.equal(phone.host.state.remoteOnly["video.mp4"]?.size, 5000, "listed on demand with its real size");
+	assert.ok(r.skipped.some((x) => x.startsWith("video.mp4")));
+	pinned = ["video.mp4"];
+	await phone.sync();
+	assert.equal(phone.fs.text("video.mp4"), "v".repeat(5000), "downloads once pinned");
+});

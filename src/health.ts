@@ -134,7 +134,7 @@ export class HealthView extends ItemView {
 		setIcon(icon, ico);
 		st.addClass(`vsg-h-${cls}`);
 		text.createDiv({ cls: "vsg-h-headline", text: headline });
-		text.createDiv({
+		if (p.isConfigured()) text.createDiv({
 			cls: "vsg-muted",
 			text: `${t("h.lastSync", { ago: ago(p.state.lastSync) })} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? t("s.modeSync") : p.settings.mode === "push" ? t("s.modePush") : t("s.modePull")}${p.isEncrypted() ? ` · 🔒 ${t("health.encrypted")}` : ""}`,
 		});
@@ -142,7 +142,12 @@ export class HealthView extends ItemView {
 		if (!p.isConfigured()) this.button(acts, t("health.wizard"), () => p.openWizard(), true);
 		else this.button(acts, t("health.syncNow"), () => p.sync("manual"), true);
 		this.button(acts, t("health.review"), () => p.openReview());
-		this.button(acts, "↻", () => this.refresh(true)).setAttr("aria-label", "Refresh");
+		this.button(acts, "↻", () => this.refresh(true)).setAttr("aria-label", t("h.refresh"));
+		if (!p.isConfigured()) {
+			// Nothing to show until a host and repository are set up.
+			el.createDiv({ cls: "vsg-muted", text: t("h.setupHint") });
+			return;
+		}
 
 		if (p.lastError) {
 			const f = friendlyError(p.lastError, p.hostLabel());
@@ -191,7 +196,12 @@ export class HealthView extends ItemView {
 				const row = s.createDiv({ cls: "vsg-h-row" });
 				row.createDiv({ text: copy.path, cls: "vsg-h-path" });
 				const b = row.createDiv({ cls: "vsg-h-row-actions" });
-				if (original) this.button(b, t("health.compare"), () => p.compareFiles(original, copy));
+				if (original) {
+					this.button(b, t("h.resolve"), async () => {
+						if (await p.resolveConflictCopy(original, copy)) this.refresh();
+					}, true);
+					this.button(b, t("health.compare"), () => p.compareFiles(original, copy));
+				}
 				this.button(b, t("health.open"), () => void this.app.workspace.getLeaf(true).openFile(copy));
 				this.button(b, t("health.deleteCopy"), async () => {
 					await p.trashFile(copy);
@@ -230,7 +240,12 @@ export class HealthView extends ItemView {
 
 		// ---- GitHub ----
 		const gh = this.section(p.hostLabel(), "server");
-		gh.createDiv({ cls: "vsg-muted", text: t("h.budget", { budget: this.remoteInfo?.budget ?? "…" }) });
+		if (p.settings.provider === "github") gh.createDiv({ cls: "vsg-muted", text: t("h.budget", { budget: this.remoteInfo?.budget ?? "…" }) });
+		const expires = p.tokenExpiryDays();
+		if (expires !== null && expires <= 14) {
+			gh.createDiv({ cls: "vsg-h-accent", text: expires <= 0 ? t("h.tokenExpiresToday") : t("h.tokenExpires", { days: expires }) });
+			this.button(gh, t("h.newToken"), () => p.openTokenPage(), true);
+		}
 		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: t("h.checkFailed", { host: p.hostLabel(), error: this.remoteInfo.error }) });
 
 		// ---- tools ----
