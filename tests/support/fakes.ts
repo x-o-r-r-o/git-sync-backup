@@ -109,6 +109,8 @@ export class FakeFS {
 }
 
 export class FakeGitHub {
+	label = "GitHub";
+	kind = "github";
 	blobs = new Map<string, Uint8Array>();
 	trees = new Map<string, Map<string, { sha: string; mode: string }>>();
 	commits = new Map<string, { tree: string; parents: string[]; message: string }>();
@@ -242,7 +244,7 @@ export function device(name: string, gh: FakeGitHub, overrides: Partial<VaultSyn
 		settings,
 		state: emptyState(),
 		gh: gh as any,
-		stateFilePath: ".obsidian/plugins/vault-sync-github/sync-state.json",
+		stateFilePath: ".obsidian/plugins/vault-sync-git/sync-state.json",
 		deviceName: () => name,
 		log: () => {},
 		saveState: async () => {},

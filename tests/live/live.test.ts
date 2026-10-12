@@ -159,12 +159,12 @@ test("live: config folder sync honours excludes", { skip: !live }, async () => {
 	a.fs.put(".obsidian/app.json", '{"x":1}');
 	a.fs.put(".obsidian/snippets/my.css", "body{}");
 	a.fs.put(".obsidian/workspace.json", "{}");
-	a.fs.put(".obsidian/plugins/vault-sync-github/sync-state.json", "{}");
+	a.fs.put(".obsidian/plugins/vault-sync-git/sync-state.json", "{}");
 	await a.sync();
 	const remote = await remoteFiles(branch);
 	assert.ok(remote.has(".obsidian/app.json") && remote.has(".obsidian/snippets/my.css"));
 	assert.ok(!remote.has(".obsidian/workspace.json"));
-	assert.ok(!remote.has(".obsidian/plugins/vault-sync-github/sync-state.json"));
+	assert.ok(!remote.has(".obsidian/plugins/vault-sync-git/sync-state.json"));
 	await b.sync();
 	assert.equal(b.fs.text(".obsidian/snippets/my.css"), "body{}");
 });

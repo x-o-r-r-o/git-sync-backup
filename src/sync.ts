@@ -488,7 +488,7 @@ export class SyncEngine {
 			await this.host.gh.createRef(`refs/heads/${this.s.branch}`, otherHead);
 			this.host.log(`Created branch ${this.s.branch} from ${repo.default_branch}.`);
 		} else {
-			const content = "# Managed by Vault Sync for GitHub. Keeps git clients from rewriting line endings.\n* -text\n";
+			const content = "# Managed by Vault Sync for Git. Keeps git clients from rewriting line endings.\n* -text\n";
 			await this.host.gh.putFile(".gitattributes", "Initialise vault repository", arrayBufferToBase64(encodeText(content)), this.s.branch);
 			this.host.log("Initialised empty repository.");
 		}
@@ -636,7 +636,7 @@ export class SyncEngine {
 						await queueUpload(d.path, data, d.sha);
 						remoteDeletes.push(d.from);
 						renames.push(`${d.from} → ${d.path}`);
-						report.renamed.push(`${d.from} → ${d.path} (with edits from GitHub)`);
+						report.renamed.push(`${d.from} → ${d.path} (with edits from ${this.host.gh.label})`);
 						host.progress?.(`Downloading ${++done}/${downloads}`);
 						break;
 					}
@@ -775,7 +775,7 @@ export class SyncEngine {
 		// Structure-aware merge first (canvas/JSON by key and id, Markdown frontmatter by key).
 		if (d.base && localText !== null && remoteText !== null && this.s.conflictStrategy !== "local" && this.s.conflictStrategy !== "remote") {
 			const b = asText(d.path, await this.blob(d.path, d.base));
-			const smart = b === null ? null : smartMerge(d.path, b, localText, remoteText, { local: `this device (${device})`, remote: "GitHub" });
+			const smart = b === null ? null : smartMerge(d.path, b, localText, remoteText, { local: `this device (${device})`, remote: this.host.gh.label });
 			if (smart?.clean) {
 				const merged = encodeText(smart.text);
 				const sha = await this.codec.storedSha(d.path, merged);
@@ -792,6 +792,7 @@ export class SyncEngine {
 		if (strategy === "ask") {
 			const choice = await host.askConflict({
 				path: d.path,
+				remoteLabel: host.gh.label,
 				localText,
 				remoteText,
 				localSize: localData.byteLength,
@@ -818,7 +819,7 @@ export class SyncEngine {
 				return;
 			case "remote":
 				await replaceWithRemote();
-				host.log(`Conflict on ${d.path}: took the GitHub version.`);
+				host.log(`Conflict on ${d.path}: took the ${this.host.gh.label} version.`);
 				return;
 			case "keep-both":
 				return keepBoth(true);
@@ -832,7 +833,7 @@ export class SyncEngine {
 					if (b === null) return keepBoth(true);
 					baseText = b;
 				}
-				const res = merge3(baseText, localText, remoteText, { local: `this device (${device})`, remote: "GitHub" });
+				const res = merge3(baseText, localText, remoteText, { local: `this device (${device})`, remote: this.host.gh.label });
 				if (!res || (!res.clean && strategy === "auto")) return keepBoth(true);
 				const merged = encodeText(res.text);
 				await this.io.write(d.path, merged);
@@ -939,7 +940,7 @@ export class SyncEngine {
 		const max = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
 		this.loadCodec();
 		const head = await this.host.gh.getRef(this.s.branch);
-		if (!head) throw new Error("The branch on GitHub is empty.");
+		if (!head) throw new Error("The branch in the repository is empty.");
 		const remote = new Map<string, string>();
 		for (const [p, e] of await this.filesAt(head, shared)) remote.set(p, e.sha);
 
@@ -964,7 +965,7 @@ export class SyncEngine {
 			delete state.baseNorm[p];
 		}
 		await this.host.saveState();
-		this.host.log(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB: removed ${plan.files.length} local copies that are safe on GitHub.`);
+		this.host.log(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB: removed ${plan.files.length} local copies that are safe in the repository.`);
 		return plan;
 	}
 
@@ -977,7 +978,7 @@ export class SyncEngine {
 		this.loadCodec();
 		const ctx = await this.gather(false, {}, true);
 		const head = ctx.upToDate ? state.head : ctx.head;
-		if (!head) throw new Error("The branch on GitHub is empty. Nothing to reset to.");
+		if (!head) throw new Error("The branch in the repository is empty. Nothing to reset to.");
 		const remoteShas = ctx.upToDate ? new Map(ctx.localShas) : ctx.remoteShas;
 		const plan: ResetPlan = { overwrite: [], download: [], remove: [] };
 		for (const p of new Set([...ctx.localShas.keys(), ...remoteShas.keys()])) {
@@ -1021,7 +1022,7 @@ export class SyncEngine {
 		state.dirty = false;
 		await this.host.saveState();
 		this.host.log(
-			`Reset to GitHub: ${plan.overwrite.length} replaced, ${plan.download.length} downloaded, ${plan.remove.length} removed (old versions in trash).`,
+			`Reset to ${this.host.gh.label}: ${plan.overwrite.length} replaced, ${plan.download.length} downloaded, ${plan.remove.length} removed (old versions in trash).`,
 		);
 		return plan;
 	}
@@ -1033,11 +1034,11 @@ export class SyncEngine {
 	 */
 	async restoreTo(commit: string, folder: string, confirm: (plan: RestorePlan) => Promise<boolean>): Promise<RestorePlan> {
 		this.loadCodec();
-		if (this.s.mode === "pull") throw new Error("Restore needs to push to GitHub, which pull-only mode does not allow.");
+		if (this.s.mode === "pull") throw new Error("Restore needs to push to the repository, which pull-only mode does not allow.");
 		await this.run(this.s.mode);
 		const gh = this.host.gh;
 		const head = await gh.getRef(this.s.branch);
-		if (!head) throw new Error("The branch on GitHub is empty.");
+		if (!head) throw new Error("The branch in the repository is empty.");
 		// Restores act on GitHub for every device, so they use the shared scope, not this device's.
 		const scope = this.buildScope(false);
 		const prefix = folder.replace(/^\/+|\/+$/g, "");

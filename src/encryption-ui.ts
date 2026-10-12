@@ -66,8 +66,8 @@ export class EncryptionModal extends Modal {
 		const { contentEl } = this;
 		this.titleEl.setText("Turn on end-to-end encryption");
 		const ul = contentEl.createEl("ul");
-		ul.createEl("li", { text: "Notes, attachments and file names are encrypted on this device before upload. GitHub only stores unreadable data." });
-		ul.createEl("li", { text: "Every device needs the same passphrase. There is no way to recover it: if you forget it, the copy on GitHub can't be read." });
+		ul.createEl("li", { text: "Notes, attachments and file names are encrypted on this device before upload. The repository host only stores unreadable data." });
+		ul.createEl("li", { text: "Every device needs the same passphrase. There is no way to recover it: if you forget it, the copy in the repository can't be read." });
 		ul.createEl("li", { text: "If this repository already has unencrypted notes, they remain in its history. For full privacy use a new, empty repository." });
 		ul.createEl("li", { text: "You can't browse the notes on github.com any more; use the plugin's history and timeline instead." });
 		let pass = "";

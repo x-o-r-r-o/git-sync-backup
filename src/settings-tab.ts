@@ -276,7 +276,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName("This device only").setHeading();
 		containerEl.createEl("p", {
 			cls: "setting-item-description",
-			text: "These choices are stored on this device and are not synced, so a phone can sync less than a laptop. Files outside this device's scope are never uploaded, downloaded or deleted from here, and stay safe on GitHub.",
+			text: "These choices are stored on this device and are not synced, so a phone can sync less than a laptop. Files outside this device's scope are never uploaded, downloaded or deleted from here, and stay safe in the repository.",
 		});
 		const ds = p.deviceScope();
 		new Setting(containerEl)
@@ -295,11 +295,11 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			});
 		new Setting(containerEl)
 			.setName("Skip downloading files larger than this many megabytes")
-			.setDesc("Big attachments stay on GitHub and are not downloaded to this device. 0 = no limit.")
+			.setDesc("Big attachments stay in the repository and are not downloaded to this device. 0 = no limit.")
 			.addText((t) => t.setValue(String(ds.maxDownloadMB)).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), maxDownloadMB: Math.max(0, Number(v) || 0) })));
 		new Setting(containerEl)
 			.setName("Free up space")
-			.setDesc("Remove local copies of files this device doesn't sync, but only when they are identical to the copy on GitHub.")
+			.setDesc("Remove local copies of files this device doesn't sync, but only when they are identical to the copy in the repository.")
 			.addButton((b) => b.setButtonText("Free up space…").onClick(() => p.freeUpSpace()));
 
 		// ---------- conflicts & safety ----------

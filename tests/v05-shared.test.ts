@@ -13,7 +13,7 @@ test("shared folder: Work/ syncs to its own repo root; main repo never sees it",
 	me.host.extraExcludes = () => ["Work/"];
 	const teamHost = { ...me.host, gh: teamRepo as any, state: { ...me.host.state, base: {}, cache: {} } } as any;
 	teamHost.settings = { ...me.host.settings, repo: "team" };
-	teamHost.stateFilePath = ".obsidian/plugins/vault-sync-github/sync-state-team.json";
+	teamHost.stateFilePath = ".obsidian/plugins/vault-sync-git/sync-state-team.json";
 	teamHost.deviceScope = () => ({ include: ["Work/"], exclude: [], maxDownloadMB: 0 });
 	teamHost.codec = () => new Codec([new PrefixLayer("Work")]);
 	teamHost.extraExcludes = undefined;
@@ -55,7 +55,7 @@ test("shared folder: a nested folder with the same name stays private", async ()
 	const me = device("Mac", privateRepo);
 	me.host.extraExcludes = () => [sharedFolderPattern("Work")];
 	const teamHost = { ...me.host, gh: teamRepo as any, state: { ...me.host.state, base: {}, cache: {} } } as any;
-	teamHost.stateFilePath = ".obsidian/plugins/vault-sync-github/sync-state-team.json";
+	teamHost.stateFilePath = ".obsidian/plugins/vault-sync-git/sync-state-team.json";
 	teamHost.deviceScope = () => ({ include: [sharedFolderPattern("Work")], exclude: [], maxDownloadMB: 0 });
 	teamHost.codec = () => new Codec([new PrefixLayer("Work")]);
 	teamHost.extraExcludes = undefined;

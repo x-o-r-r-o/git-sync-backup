@@ -71,7 +71,8 @@ export class ConflictModal extends Modal {
 		const { contentEl, info } = this;
 		this.modalEl.addClass("vsg-wide");
 		this.titleEl.setText(`Conflict: ${info.path}`);
-		contentEl.createEl("p", { text: "This file changed on this device and on GitHub since the last sync.", cls: "vsg-muted" });
+		const R = info.remoteLabel ?? "Repository";
+		contentEl.createEl("p", { text: `This file changed on this device and in the repository (${R}) since the last sync.`, cls: "vsg-muted" });
 		const pick = (c: ConflictChoice) => {
 			this.choice = c;
 			this.close();
@@ -86,10 +87,10 @@ export class ConflictModal extends Modal {
 				tabs.querySelectorAll("button").forEach((b, i) => b.toggleClass("is-active", (i === 0) === (which === "pick")));
 				if (which === "pick") {
 					pane.createEl("p", { cls: "vsg-muted", text: "For each change, choose which version to keep. Choosing both keeps the lines from this device first." });
-					build = renderHunkPicker(pane, info.localText!, info.remoteText!, { a: "This device", b: "GitHub" });
+					build = renderHunkPicker(pane, info.localText!, info.remoteText!, { a: "This device", b: R });
 				} else {
 					build = null;
-					renderDiff(pane, info.localText!, info.remoteText!, { oldLabel: "This device", newLabel: "GitHub" });
+					renderDiff(pane, info.localText!, info.remoteText!, { oldLabel: "This device", newLabel: R });
 				}
 			};
 			tabs.createEl("button", { text: "Choose changes" }).onClickEvent(() => show("pick"));
@@ -110,7 +111,7 @@ export class ConflictModal extends Modal {
 
 		const whole = new Setting(contentEl).setName("Or take a whole file");
 		whole.addButton((b) => b.setButtonText("This device").onClick(() => pick("local")));
-		whole.addButton((b) => b.setButtonText("GitHub").onClick(() => pick("remote")));
+		whole.addButton((b) => b.setButtonText(R).onClick(() => pick("remote")));
 		whole.addButton((b) => b.setButtonText("Keep both files").onClick(() => pick("keep-both")));
 		if (info.localText !== null && info.remoteText !== null) {
 			whole.addButton((b) => b.setButtonText("Merge with markers").onClick(() => pick("markers")));
@@ -138,7 +139,7 @@ export class DeleteGuardModal extends Modal {
 			list(contentEl, this.local, 50);
 		}
 		if (this.remote.length) {
-			contentEl.createEl("h4", { text: `Delete on GitHub (kept in history): ${this.remote.length}` });
+			contentEl.createEl("h4", { text: `Delete in the repository (kept in history): ${this.remote.length}` });
 			list(contentEl, this.remote, 50);
 		}
 		new Setting(contentEl)

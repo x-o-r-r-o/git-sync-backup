@@ -2,6 +2,8 @@
 
 ## 1.0.0 (2026-10-12) First public release
 
+**Renamed to Vault Sync for Git** (plugin id `vault-sync-git`). It syncs with GitHub, GitLab or Gitea / Forgejo / Codeberg, and the interface names the host you use.
+
 Full audit (independent code review plus Obsidian's official lint rules), with these fixes:
 
 - **Critical:** a shared folder now matches only its top-level folder. A nested folder with the same name (e.g. `Projects/Work/`) could previously leak to the shared repository. The folder mapping also refuses any path outside its folder.

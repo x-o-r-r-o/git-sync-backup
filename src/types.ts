@@ -140,6 +140,8 @@ export type ConflictChoice = "local" | "remote" | "keep-both" | "markers" | { cu
 
 export interface ConflictInfo {
 	path: string;
+	/** Name of the remote side ("GitHub", "GitLab", …). */
+	remoteLabel?: string;
 	localText: string | null;
 	remoteText: string | null;
 	localSize: number;

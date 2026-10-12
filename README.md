@@ -1,15 +1,48 @@
-# Vault Sync for GitHub
+# Vault Sync for Git
 
-Sync and back up an Obsidian vault across **desktop and mobile** (Windows, macOS, Linux, iOS, Android) using a private Git repository on **GitHub**, **GitLab** (beta) or **Gitea / Forgejo / Codeberg** (beta), optionally **end-to-end encrypted**.
+**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab or Gitea.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
 
-- **No dependencies.** No git install, no `.git` folder, no native code. It talks to the GitHub API through Obsidian's own network layer, so it behaves the same on every device.
-- **Real merging.** If two devices edit different parts of the same note, the changes are merged line by line. If they edit the same lines, both versions are kept (or you choose).
-- **Safe by default.** Edits always win over deletions, deleted files go to the trash, and a delete guard stops accidental mass deletions.
-- **Backups built in.** Every sync is one commit, so the full history lives on GitHub. Per-file version history and restore, recovery of deleted files, and manual or daily snapshot tags.
-- **Grows with you (v0.5).** Share a folder with a team through its own repository, keep big media in Git LFS, and use the interface in your language.
-- **Private by design (v0.4).** Optional end-to-end encryption: the host only ever stores unreadable data, including file names. Tokens are kept in Obsidian's secure storage.
-- **Understands your vault (v0.3).** Renames travel as renames, canvases and frontmatter merge by structure, each device can sync only what it needs, and a setup wizard gets a new device running in a minute.
-- **See before you sync (v0.2).** Visual diffs everywhere, review-and-pick before syncing, change-by-change conflict resolution, a sync health panel, and point-in-time restore of the whole vault or one folder.
+Your vault lives in a repository you own, on the host you choose:
+
+| Host | Status | Notes |
+|---|---|---|
+| **GitHub** (github.com and GitHub Enterprise) | Stable | Every sync is one atomic commit with fast-forward-only updates. |
+| **GitLab** (gitlab.com and self-managed) | Beta | Atomic multi-file commits with per-file locking. |
+| **Gitea / Forgejo** (including **Codeberg** and self-hosted servers) | Beta | Atomic multi-file commits with per-file locking. Needs Gitea or Forgejo 1.20+. |
+
+Every device syncs through that repository, which also gives you a full history of every change. Switch hosts at any time in the setup wizard or settings.
+
+## Highlights
+
+- **No Git install.**
+  - No `git` binary, no `.git` folder, no native code.
+  - The plugin talks to your host's API through Obsidian's own network layer, so it behaves the same on every device.
+- **Real merging.**
+  - Two devices editing different parts of a note are merged line by line.
+  - Canvases and frontmatter merge by structure; tags added on two devices are combined.
+  - When the same lines change, both versions are kept, or you pick change by change.
+- **Safe by default.**
+  - Edits always win over deletions, and deleted files go to the trash.
+  - A delete guard stops accidental mass deletions.
+  - A file you are editing during a sync is never overwritten.
+- **Backups built in.**
+  - Every sync is one commit.
+  - Restore a single file, a folder or the whole vault to any earlier point.
+  - Recover deleted files and take snapshot tags.
+- **Private by design.**
+  - Optional end-to-end encryption: the host only ever stores unreadable data, including file names.
+  - Tokens are kept in Obsidian's secure storage.
+- **See before you sync.**
+  - Visual diffs everywhere and a review step with checkboxes.
+  - A status panel shows what's pending and how to fix problems.
+- **Fits every device.**
+  - Each device can sync only the folders it needs and skip big downloads.
+  - Renames travel as renames.
+  - A setup wizard gets a new device running in a minute.
+- **Grows with you.**
+  - Share a folder with a team through its own repository, on any of the three hosts.
+  - Keep big media in Git LFS.
+  - Use the interface in your language.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for the comparison with existing plugins and the gaps this one closes.
 
@@ -17,14 +50,14 @@ See [docs/RESEARCH.md](docs/RESEARCH.md) for the comparison with existing plugin
 
 The quickest way is the **setup wizard**. It opens automatically on first launch, or run **Setup wizard** from settings or the command palette. It connects your account, lets you pick or create a private repository, asks whether this device should upload, download or merge, and runs the first sync with progress.
 
-Manual setup:
+Manual setup (GitHub shown; GitLab and Gitea work the same way, and the wizard shows host-specific token steps):
 
-1. Create a **private** repository on GitHub, or use **Create private repo** in the settings.
+1. Create a **private** repository on your host, or use **Create private repo** in the settings.
 2. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
    - Repository access: *Only select repositories* → your vault repo
    - Permissions → Repository → **Contents: Read and write** (Metadata read is added automatically)
    - Add **Administration: Read and write** only if you want the plugin to create the repo for you.
-3. In Obsidian: Settings → Vault Sync for GitHub → paste the token, set owner and repository → **Test connection**.
+3. In Obsidian: Settings → Vault Sync for Git → choose the host, paste the token, set owner and repository → **Test connection**.
 4. Run **Sync now** (ribbon icon, status bar, or command palette).
 
 Repeat on each device: install the plugin, paste the token, same owner/repo. An existing vault on a second device is safe: the first sync never deletes anything, and any file that differs is kept in both versions.
@@ -126,9 +159,9 @@ Sync now · Review changes and sync · Open sync status panel · Run setup wizar
 
 ## Install
 
-**Community plugins:** once listed, search for "Vault Sync for GitHub" in Settings → Community plugins.
+**Community plugins:** once listed, search for "Vault Sync for Git" in Settings → Community plugins.
 
-**Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<vault>/.obsidian/plugins/vault-sync-github/`, then enable the plugin under Community plugins.
+**Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<vault>/.obsidian/plugins/vault-sync-git/`, then enable the plugin under Community plugins.
 
 **BRAT:** add this repository in the BRAT plugin to get the latest release on each device.
 

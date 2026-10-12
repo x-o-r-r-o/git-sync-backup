@@ -155,15 +155,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	private localKey(name: string): string {
 		const id = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
-		return `vault-sync-github:${id}:${name}`;
+		return `vault-sync-git:${id}:${name}`;
 	}
 	/** Device-local, vault-scoped values (Obsidian's local storage API; never synced). */
 	private localGet(name: string): string | null {
-		const v = this.app.loadLocalStorage(`vault-sync-github:${name}`) as unknown;
+		const v = this.app.loadLocalStorage(`vault-sync-git:${name}`) as unknown;
 		return typeof v === "string" ? v : null;
 	}
 	private localSet(name: string, value: string | null) {
-		this.app.saveLocalStorage(`vault-sync-github:${name}`, value);
+		this.app.saveLocalStorage(`vault-sync-git:${name}`, value);
 	}
 	// Secrets go to Obsidian's SecretStorage (1.11.4+, encrypted by the OS keychain where available),
 	// falling back to the vault-scoped local storage on older versions.
@@ -315,7 +315,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.syncing = true;
 		try {
 			const removed = await this.engine.removeUnencryptedFiles((files) =>
-				confirmPlan(this.app, "Remove unencrypted copies", "Delete these unencrypted files from the repository in one commit. Your notes stay safe: their encrypted copies are already uploaded. Note: older versions remain in the repository's history.", [{ title: "Delete from GitHub", items: files }], "Remove", true),
+				confirmPlan(this.app, "Remove unencrypted copies", "Delete these unencrypted files from the repository in one commit. Your notes stay safe: their encrypted copies are already uploaded. Note: older versions remain in the repository's history.", [{ title: `Delete from ${this.hostLabel()}`, items: files }], "Remove", true),
 			);
 			new Notice(removed.length ? `Removed ${removed.length} unencrypted file(s) from the repository.` : "No unencrypted files found.");
 		} catch (e) {
@@ -413,12 +413,12 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				confirmPlan(
 					this.app,
 					"Free up space on this device",
-					`Remove ${p.files.length} local file(s) (${(p.bytes / 1048576).toFixed(1)} MB) that this device doesn't sync (outside its folders or above its download limit). Each one is identical to the copy on GitHub, which is kept. They go to the trash.`,
+					`Remove ${p.files.length} local file(s) (${(p.bytes / 1048576).toFixed(1)} MB) that this device doesn't sync (outside its folders or above its download limit). Each one is identical to the copy in the repository, which is kept. They go to the trash.`,
 					[{ title: "Remove from this device", items: p.files }],
 					"Free up space",
 				),
 			);
-			if (!plan.files.length) new Notice("Nothing to remove: no local files outside this device's scope are safely on GitHub.");
+			if (!plan.files.length) new Notice("Nothing to remove: no local files outside this device's scope are safely in the repository.");
 			else new Notice(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB.`);
 		} catch (e) {
 			if (!(e instanceof SyncCancelled)) new Notice(`Could not free up space: ${errMsg(e)}`);
@@ -578,7 +578,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// ---------------- sync ----------------
 
 	private configProblem(): string | null {
-		if (!this.getToken()) return "Add a GitHub token in Settings → Vault Sync for GitHub.";
+		if (!this.getToken()) return "Add an access token in Settings → Vault Sync for Git.";
 		if (!this.settings.owner || !this.settings.repo) return "Set the repository owner and name in the plugin settings.";
 		return null;
 	}
@@ -719,23 +719,24 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				const remoteSha = pv.remoteShas.get(d.path);
 				let oldData: ArrayBuffer | null;
 				let newData: ArrayBuffer | null;
-				let oldLabel = "GitHub";
+				const H = this.hostLabel();
+				let oldLabel = H;
 				let newLabel = "This device";
 				if (d.kind === "move-local") {
 					oldData = await local(d.from);
 					newData = await blobOf(d.path, remoteSha);
 					oldLabel = `This device (${d.from})`;
-					newLabel = `GitHub (${d.path})`;
+					newLabel = `${H} (${d.path})`;
 				} else if (d.kind === "adopt-remote-edit") {
 					oldData = await local(d.path);
 					newData = await blobOf(d.path, d.sha);
 					oldLabel = `This device (${d.path})`;
-					newLabel = `GitHub (${d.from})`;
+					newLabel = `${H} (${d.from})`;
 				} else if (d.kind === "download" || d.kind === "delete-local") {
 					oldData = await local(d.path);
 					newData = await blobOf(d.path, remoteSha);
 					oldLabel = "This device";
-					newLabel = "GitHub";
+					newLabel = H;
 				} else {
 					oldData = await blobOf(d.path, remoteSha);
 					newData = await local(d.path);
@@ -757,7 +758,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const localData = await this.app.vault.readBinary(file);
 			const o = await this.textOf(file.path, remote);
 			const n = await this.textOf(file.path, localData);
-			return { oldLabel: remote ? "GitHub" : "GitHub (file not there)", newLabel: "This device", oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
+			return { oldLabel: remote ? this.hostLabel() : `${this.hostLabel()} (file not there)`, newLabel: "This device", oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
 		}).open();
 	}
 
@@ -858,19 +859,19 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const plan = await this.engine.resetToRemote((p) =>
 				confirmPlan(
 					this.app,
-					"Make this device match GitHub",
-					"Discard this device's unsynced changes and make it an exact copy of GitHub. Replaced and removed files are moved to the trash first, so you can still recover them.",
+					"Make this device match the repository",
+					"Discard this device's unsynced changes and make it an exact copy of the repository. Replaced and removed files are moved to the trash first, so you can still recover them.",
 					[
-						{ title: "Replaced with the GitHub version", items: p.overwrite },
+						{ title: `Replaced with the ${this.hostLabel()} version`, items: p.overwrite },
 						{ title: "Downloaded", items: p.download },
-						{ title: "Removed (not on GitHub)", items: p.remove },
+						{ title: "Removed (not in the repository)", items: p.remove },
 					],
-					"Match GitHub",
+					"Match repository",
 					true,
 				),
 			);
 			const n = plan.overwrite.length + plan.download.length + plan.remove.length;
-			new Notice(n ? `This device now matches GitHub (${n} file(s) changed).` : "This device already matches GitHub.");
+			new Notice(n ? `This device now matches the repository (${n} file(s) changed).` : "This device already matches the repository.");
 			this.fullScanNeeded = true;
 			this.dirty.clear();
 		} catch (err) {

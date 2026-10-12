@@ -13,18 +13,18 @@ export interface FriendlyError {
 }
 
 /** Turns raw error messages into plain language with a suggested fix. */
-export function friendlyError(msg: string): FriendlyError {
+export function friendlyError(msg: string, host = "the repository host"): FriendlyError {
 	const m = msg.toLowerCase();
-	if (m.includes("no github token")) return { title: "Not connected yet", hint: "Add a GitHub token in the plugin settings.", action: "settings" };
+	if (/no (github )?token/.test(m)) return { title: "Not connected yet", hint: `Add a ${host} access token in the plugin settings.`, action: "settings" };
 	if (m.includes("invalid or expired") || m.includes("401"))
-		return { title: "GitHub didn't accept your token", hint: "It may have expired or been revoked. Create a new token and paste it in settings.", action: "settings" };
+		return { title: `${host} didn't accept your token`, hint: "It may have expired or been revoked. Create a new token and paste it in settings.", action: "settings" };
 	if (m.includes("not found or the token cannot access") || (m.includes("not found") && m.includes("repos")))
 		return { title: "Repository not found", hint: "Check the owner and repository name, and that the token has access to this repo.", action: "settings" };
-	if (m.includes("rate limit")) return { title: "GitHub rate limit reached", hint: "GitHub allows a fixed number of requests per hour. Sync will work again shortly.", action: "none" };
+	if (m.includes("rate limit")) return { title: `${host} rate limit reached`, hint: `${host} allows a limited number of requests per hour. Sync will work again shortly.`, action: "none" };
 	if (m.includes("outdated branch state") || m.includes("another device pushed"))
-		return { title: "GitHub was busy", hint: "Another device was syncing at the same moment. Try again.", action: "retry" };
+		return { title: `${host} was busy`, hint: "Another device was syncing at the same moment. Try again.", action: "retry" };
 	if (m.includes("network") || m.includes("failed to fetch") || m.includes("err_") || m.includes("offline") || m.includes("timed out"))
-		return { title: "Can't reach GitHub", hint: "Check your internet connection. Sync will retry automatically.", action: "retry" };
+		return { title: `Can't reach ${host}`, hint: "Check your internet connection. Sync will retry automatically.", action: "retry" };
 	if (m.includes("end-to-end encrypted")) return { title: "This vault is encrypted", hint: "Enter the passphrase to sync on this device.", action: "encryption" };
 	if (m.includes("different passphrase")) return { title: "Different encryption key", hint: "The repository was encrypted with another passphrase. Unlock it again.", action: "encryption" };
 	if (m.includes("pull-only")) return { title: "Not available in pull-only mode", hint: "Switch the mode in settings to push changes.", action: "settings" };
@@ -144,7 +144,7 @@ export class HealthView extends ItemView {
 		this.button(acts, "↻", () => this.refresh(true)).setAttr("aria-label", "Refresh");
 
 		if (p.lastError) {
-			const f = friendlyError(p.lastError);
+			const f = friendlyError(p.lastError, p.hostLabel());
 			const s = this.section(f.title, "alert-octagon");
 			s.addClass("vsg-h-error");
 			s.createDiv({ text: f.hint });
@@ -220,7 +220,7 @@ export class HealthView extends ItemView {
 		// ---- GitHub ----
 		const gh = this.section(p.hostLabel(), "server");
 		gh.createDiv({ cls: "vsg-muted", text: `API budget: ${this.remoteInfo?.budget ?? "…"}` });
-		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: `Could not check GitHub: ${this.remoteInfo.error}` });
+		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: `Could not check ${p.hostLabel()}: ${this.remoteInfo.error}` });
 
 		// ---- tools ----
 		const tools = this.section(t("health.tools"), "wrench");

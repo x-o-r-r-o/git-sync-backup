@@ -132,13 +132,13 @@ test("config dir sync respects excludes; out-of-scope remote files survive", asy
 	const { gh, a, b } = setup({ syncConfigDir: true });
 	a.fs.put(".obsidian/app.json", "{}");
 	a.fs.put(".obsidian/workspace.json", "{layout}");
-	a.fs.put(".obsidian/plugins/vault-sync-github/sync-state.json", "{}");
+	a.fs.put(".obsidian/plugins/vault-sync-git/sync-state.json", "{}");
 	a.fs.put("n.md", "n\n");
 	await a.sync();
 	const head = gh.headFiles();
 	assert.ok(head.has(".obsidian/app.json"));
 	assert.ok(!head.has(".obsidian/workspace.json"));
-	assert.ok(!head.has(".obsidian/plugins/vault-sync-github/sync-state.json"));
+	assert.ok(!head.has(".obsidian/plugins/vault-sync-git/sync-state.json"));
 	// A file only on GitHub that the plugin does not manage (e.g. a workflow) must never be deleted.
 	await gh.createTree; // no-op reference
 	const t = gh.trees.get(gh.commits.get(gh.refs.get("main")!)!.tree)!;
