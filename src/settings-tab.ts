@@ -48,6 +48,71 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 
 	private openGroups = new Set<string>();
 
+	/** Backup mirror: a second repository every sync also uploads to (push only). */
+	private mirrorItems(): Item[] {
+		const p = this.plugin;
+		const s = p.settings;
+		const m = s.mirror ?? { enabled: false, provider: s.provider, owner: "", repo: "", branch: "main" };
+		// Merge into the current value: fields save without redrawing, so `m` may be stale.
+		const save = async (patch: Partial<typeof m>) => {
+			s.mirror = { ...(s.mirror ?? m), ...patch };
+			await p.saveSettings();
+		};
+		const def = { id: "mirror", provider: m.provider, folder: "", owner: m.owner, repo: m.repo, branch: m.branch, enabled: m.enabled };
+		const text = (get: () => string, set: (v: string) => Partial<typeof m>) => (st: Setting): unknown =>
+			st.addText((c) => onCommit(c.setValue(get()), async (v) => save(set(v.trim()))));
+		return [
+			{ name: "", desc: t("s.mirrorIntro"), render: () => undefined, searchable: false },
+			{
+				name: t("s.mirrorOn"),
+				render: (st) =>
+					st.addToggle((c) =>
+						c.setValue(m.enabled).onChange(async (v) => {
+							await save({ enabled: v });
+							this.refresh();
+						}),
+					),
+			},
+			{
+				name: t("s.host"),
+				render: (st) =>
+					st.addDropdown((d) => {
+						for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label);
+						d.setValue(m.provider).onChange(async (v) => {
+							await save({ provider: v as HostKind });
+							this.refresh();
+						});
+					}),
+			},
+			{ name: t("s.owner"), render: text(() => m.owner, (v) => ({ owner: v })) },
+			{ name: t("s.repo"), render: text(() => m.repo, (v) => ({ repo: v })) },
+			{ name: t("s.branch"), render: text(() => m.branch, (v) => ({ branch: v || "main" })) },
+			{
+				name: t("s.mirrorToken"),
+				desc: t("s.mirrorTokenDesc"),
+				render: (st) =>
+					st
+						.addText((c) => {
+							c.inputEl.type = "password";
+							onCommit(c.setValue(p.mirrorToken(def)), async (v) => p.setSharedToken(def, v.trim()));
+						})
+						.addButton((b) =>
+							b.setButtonText(t("s.test")).onClick(async () => {
+								try {
+									const h = await p.mirror();
+									if (!h) return void new Notice(t("s.mirrorIncomplete"));
+									const repo = await h.gh.getRepo();
+									const cur = s.mirror ?? m;
+									new Notice(repo ? t("s.mirrorOk", { repo: `${cur.owner}/${cur.repo}` }) : t("s.testNotFound", { user: cur.owner, repo: `${cur.owner}/${cur.repo}` }));
+								} catch (e) {
+									new Notice(t("s.testFailed", { error: errMsg(e) }));
+								}
+							}),
+						),
+			},
+		];
+	}
+
 	/** Closing settings with a field still focused fires no change event: blur it first so it saves. */
 	hide(): void {
 		const active = this.containerEl.ownerDocument.activeElement;
@@ -86,7 +151,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		/** GitHub refuses files over 100 MB without large file storage. */
 		const maxSizeCap = () => (s.lfsThresholdMB > 0 ? 2000 : 100);
 
-		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges";
+		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges" | "keepEmptyFolders";
 		const toggle = (key: ToggleKey, reschedule = false, redraw = false) => (st: Setting): unknown =>
 			st.addToggle((c) =>
 				c.setValue(s[key]).onChange(async (v) => {
@@ -97,7 +162,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					if (redraw) this.refresh();
 				}),
 			);
-		const cfgToggle = (key: "appearance" | "snippets" | "hotkeys" | "core" | "pluginList" | "pluginCode" | "pluginSettings") => (st: Setting): unknown =>
+		const cfgToggle = (key: "appearance" | "snippets" | "hotkeys" | "core" | "pluginList" | "pluginCode" | "pluginSettings" | "installFromReleases") => (st: Setting): unknown =>
 			st.addToggle((c) =>
 				c.setValue(s.configSync[key]).onChange(async (v) => {
 					s.configSync = { ...s.configSync, [key]: v };
@@ -112,6 +177,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{ name: t("s.cfgCore"), desc: t("s.cfgCoreDesc"), cls: "vsg-indent", render: cfgToggle("core") },
 					{ name: t("s.cfgPluginList"), desc: t("s.cfgPluginListDesc"), cls: "vsg-indent", render: cfgToggle("pluginList") },
 					{ name: t("s.cfgPluginCode"), desc: t("s.cfgPluginCodeDesc"), cls: "vsg-indent", render: cfgToggle("pluginCode") },
+					{ name: t("s.cfgInstall"), desc: t("s.cfgInstallDesc"), cls: "vsg-indent", render: cfgToggle("installFromReleases") },
 					{ name: t("s.cfgPluginSettings"), desc: t("s.cfgPluginSettingsDesc"), cls: "vsg-indent", render: cfgToggle("pluginSettings") },
 					{
 						name: t("s.cfgPerPlugin"),
@@ -222,7 +288,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					...auth,
 					{
 						name: t("s.owner"),
-						desc: s.provider === "gitlab" ? t("s.ownerDescGitlab") : s.provider === "bitbucket" ? t("s.ownerDescBitbucket") : t("s.ownerDesc"),
+						desc: s.provider === "gitlab" ? t("s.ownerDescGitlab") : s.provider === "bitbucket" ? t("s.ownerDescBitbucket") : s.provider === "azure" ? t("s.ownerDescAzure") : t("s.ownerDesc"),
 						render: (st) =>
 							st.addText((c) =>
 								onCommit(c.setPlaceholder(t("s.ownerPlaceholder")).setValue(s.owner), async (v) => {
@@ -244,14 +310,26 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					},
 					{
 						name: t("s.branch"),
+						desc: t("s.branchDesc"),
 						render: (st) =>
-							st.addText((c) =>
-								onCommit(c.setValue(s.branch), async (v) => {
-									s.branch = v.trim() || "main";
-									c.setValue(s.branch);
-									await save();
-								}),
-							),
+							st
+								.addText((c) =>
+									onCommit(c.setValue(s.branch), async (v) => {
+										s.branch = v.trim() || "main";
+										c.setValue(s.branch);
+										await save();
+									}),
+								)
+								.addButton((b) =>
+									b.setButtonText(t("s.branchChoose")).onClick(() => {
+										if (!p.isConfigured()) return void new Notice(t("m.needRepo"));
+										new BranchModal(this.app, p, async (name) => {
+											s.branch = name;
+											await save();
+											this.refresh();
+										}).open();
+									}),
+								),
 					},
 					{
 						name: t("s.check"),
@@ -382,6 +460,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					...cfgItems,
 					{ name: t("s.hidden"), desc: t("s.hiddenDesc"), render: toggle("syncHidden") },
 					{ name: t("s.gitignore"), desc: t("s.gitignoreDesc"), render: toggle("useGitignore") },
+					{ name: t("s.emptyFolders"), desc: t("s.emptyFoldersDesc"), render: toggle("keepEmptyFolders") },
 					{
 						name: t("s.exclude"),
 						desc: t("s.excludeDesc"),
@@ -483,10 +562,45 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				],
 			},
 			{
+				heading: t("s.hMirror"),
+				collapsed: true,
+				items: this.mirrorItems(),
+			},
+			{
 				heading: t("s.hDevice"),
 				collapsed: true,
 				items: [
 					{ name: "", desc: t("s.deviceIntro"), render: () => undefined, searchable: false },
+					{
+						name: t("s.battery"),
+						desc: t("s.batteryDesc"),
+						render: (st) => st.addToggle((c) => c.setValue(p.batterySaver()).onChange((v) => p.setBatterySaver(v))),
+					},
+					{
+						name: t("s.pause"),
+						desc: p.isPaused() ? t("s.pauseDescOn") : t("s.pauseDesc"),
+						render: (st) =>
+							p.isPaused()
+								? st.addButton((b) =>
+										b.setButtonText(t("h.resume")).setCta().onClick(() => {
+											p.resumeSync();
+											this.refresh();
+										}),
+									)
+								: st
+										.addButton((b) =>
+											b.setButtonText(t("h.pause")).onClick(() => {
+												p.pauseSync(60);
+												this.refresh();
+											}),
+										)
+										.addButton((b) =>
+											b.setButtonText(t("s.pauseUntilResumed")).onClick(() => {
+												p.pauseSync(null);
+												this.refresh();
+											}),
+										),
+					},
 					{
 						name: t("s.include"),
 						desc: t("s.includeDesc"),
@@ -617,6 +731,27 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 									await save();
 								}),
 							),
+					},
+					{
+						name: t("s.author"),
+						desc: t("s.authorDesc"),
+						render: (st) =>
+							st
+								.addText((c) => {
+									c.setPlaceholder(t("s.authorName"));
+									onCommit(c.setValue(s.authorName ?? ""), async (v) => {
+										s.authorName = v.trim();
+										await save();
+									});
+								})
+								.addText((c) => {
+									c.inputEl.type = "email";
+									c.setPlaceholder(t("s.authorEmail"));
+									onCommit(c.setValue(s.authorEmail ?? ""), async (v) => {
+										s.authorEmail = v.trim();
+										await save();
+									});
+								}),
 					},
 					{
 						name: t("s.fullScan"),
@@ -758,5 +893,68 @@ class PluginSyncModal extends Modal {
 	onClose() {
 		this.contentEl.empty();
 		this.onDone();
+	}
+}
+
+/** Pick a branch of the repository, or create a new one from the current branch. */
+class BranchModal extends Modal {
+	private plugin: VaultSyncPlugin;
+	private onPick: (name: string) => Promise<void>;
+
+	constructor(app: App, plugin: VaultSyncPlugin, onPick: (name: string) => Promise<void>) {
+		super(app);
+		this.plugin = plugin;
+		this.onPick = onPick;
+	}
+
+	async onOpen() {
+		const { contentEl } = this;
+		const p = this.plugin;
+		this.titleEl.setText(t("s.branchChoose"));
+		contentEl.createEl("p", { cls: "vsg-muted", text: t("s.branchIntro") });
+		const status = contentEl.createDiv({ cls: "vsg-muted", text: t("w.loadingRepos") });
+		let newName = "";
+		new Setting(contentEl)
+			.setName(t("s.branchNew"))
+			.addText((c) => c.onChange((v) => (newName = v.trim())))
+			.addButton((b) =>
+				b.setButtonText(t("w.create")).onClick(async () => {
+					if (!/^[\w./-]+$/.test(newName) || newName.includes("..")) return void new Notice(t("s.branchInvalid"));
+					try {
+						const head = await p.gh.getRef(p.settings.branch);
+						if (!head) throw new Error(t("s.branchNoHead", { branch: p.settings.branch }));
+						await p.gh.createRef(`refs/heads/${newName}`, head);
+						await this.onPick(newName);
+						this.close();
+					} catch (e) {
+						new Notice(t("w.createFailed", { error: errMsg(e) }), 8000);
+					}
+				}),
+			);
+		try {
+			const branches = (await p.gh.listBranches?.()) ?? [];
+			status.remove();
+			if (!branches.length) contentEl.createEl("p", { text: t("s.branchNone") });
+			for (const br of branches.sort((a, b) => a.name.localeCompare(b.name))) {
+				new Setting(contentEl)
+					.setName(br.name)
+					.setDesc(br.name === p.settings.branch ? t("s.branchCurrent") : br.sha.slice(0, 7))
+					.addButton((b) =>
+						b
+							.setButtonText(t("s.branchUse"))
+							.setDisabled(br.name === p.settings.branch)
+							.onClick(async () => {
+								await this.onPick(br.name);
+								this.close();
+							}),
+					);
+			}
+		} catch (e) {
+			status.setText(t("w.listFailed", { error: errMsg(e) }));
+		}
+	}
+
+	onClose() {
+		this.contentEl.empty();
 	}
 }

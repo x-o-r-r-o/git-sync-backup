@@ -44,7 +44,7 @@ function ago(ts: number): string {
 
 export class HealthView extends ItemView {
 	private plugin: VaultSyncPlugin;
-	private remoteInfo: { ahead: boolean | null; budget: string; devices: [string, number][]; error?: string } | null = null;
+	private remoteInfo: { ahead: boolean | null; budget: string; devices: [string, number][]; versions: Map<string, string>; error?: string } | null = null;
 	private loadingRemote = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultSyncPlugin) {
@@ -83,18 +83,24 @@ export class HealthView extends ItemView {
 				p.gh.listCommits(p.settings.branch, undefined, 50).catch(() => []),
 			]);
 			const devices = new Map<string, number>();
+			const versions = new Map<string, string>();
 			for (const c of commits) {
 				const trailer = /^Device: (.+)$/m.exec(c.message)?.[1];
 				const name = trailer ?? /^([^:\n]{1,40}):/.exec(c.message)?.[1];
-				if (name && !devices.has(name)) devices.set(name, Date.parse(c.date));
+				if (name && !devices.has(name)) {
+					devices.set(name, Date.parse(c.date));
+					const v = /^Plugin: (.+)$/m.exec(c.message)?.[1];
+					if (v) versions.set(name, v.trim());
+				}
 			}
 			this.remoteInfo = {
 				ahead: head ? head !== p.state.head : null,
 				budget: rl ? t("h.budgetValue", { left: rl.remaining, limit: rl.limit, time: new Date(rl.reset * 1000).toLocaleTimeString() }) : t("h.unknown"),
 				devices: [...devices],
+				versions,
 			};
 		} catch (e) {
-			this.remoteInfo = { ahead: null, budget: t("h.unknown"), devices: [], error: e instanceof Error ? e.message : String(e) };
+			this.remoteInfo = { ahead: null, budget: t("h.unknown"), devices: [], versions: new Map(), error: e instanceof Error ? e.message : String(e) };
 		} finally {
 			this.loadingRemote = false;
 			this.render();
@@ -144,6 +150,7 @@ export class HealthView extends ItemView {
 		let cls = "ok";
 		if (!p.isConfigured()) [headline, ico, cls] = [t("health.notSetUp"), "settings", "warn"];
 		else if (p.isSyncing()) [headline, ico, cls] = [t("health.syncing"), "refresh-cw", "busy"];
+		else if (p.isPaused()) [headline, ico, cls] = [t("m.pausedStatus"), "pause-circle", "warn"];
 		else if (p.lastError) [headline, ico, cls] = [t("health.failed"), "alert-octagon", "err"];
 		else if (p.conflictCopies().length) [headline, ico, cls] = [t("health.attention"), "alert-triangle", "warn"];
 		else if (!p.state.lastSync) [headline, ico, cls] = [t("health.notSynced"), "cloud", "warn"];
@@ -157,6 +164,16 @@ export class HealthView extends ItemView {
 		const acts = el.createDiv({ cls: "vsg-h-actions" });
 		if (!p.isConfigured()) this.button(acts, t("health.wizard"), () => p.openWizard(), true);
 		else this.button(acts, t("health.syncNow"), () => p.sync("manual"), true);
+		if (p.isConfigured()) {
+			if (p.isPaused()) this.button(acts, t("h.resume"), () => {
+				p.resumeSync();
+				this.refresh();
+			});
+			else this.button(acts, t("h.pause"), () => {
+				p.pauseSync(60);
+				this.refresh();
+			});
+		}
 		this.button(acts, t("health.review"), () => p.openReview());
 		this.button(acts, "↻", () => this.refresh(true)).setAttr("aria-label", t("h.refresh"));
 		if (!p.isConfigured()) {
@@ -188,7 +205,7 @@ export class HealthView extends ItemView {
 		const pend = this.section(t("health.pending"), "clock");
 		const edited = p.pendingLocalCount();
 		pend.createDiv({ text: edited ? t("health.editedN", { n: edited }) : t("health.noEdits") });
-		if (this.remoteInfo?.ahead) pend.createDiv({ text: t("health.remoteAhead"), cls: "vsg-h-accent" });
+		if (this.remoteInfo?.ahead || p.remoteAhead) pend.createDiv({ text: t("health.remoteAhead"), cls: "vsg-h-accent" });
 		else if (this.remoteInfo?.ahead === false) pend.createDiv({ text: t("health.remoteSame"), cls: "vsg-muted" });
 		else if (this.loadingRemote) pend.createDiv({ text: t("health.checking"), cls: "vsg-muted" });
 		const ds = p.deviceScope();
@@ -196,6 +213,11 @@ export class HealthView extends ItemView {
 			const bits = [ds.include.length && t("h.only", { list: ds.include.join(", ") }), ds.exclude.length && t("h.excluding", { list: ds.exclude.join(", ") }), ds.maxDownloadMB && t("h.noDownloadsOver", { mb: ds.maxDownloadMB })].filter(Boolean);
 			pend.createDiv({ cls: "vsg-muted", text: t("h.deviceScope", { what: bits.join("; ") }) });
 		}
+		if (p.isPaused()) {
+			const until = p.pausedUntil();
+			pend.createDiv({ cls: "vsg-h-accent", text: until === Infinity ? t("h.pausedUntilResumed") : t("h.pausedUntil", { time: new Date(until).toLocaleTimeString() }) });
+		}
+		if (p.batterySaver()) pend.createDiv({ cls: "vsg-muted", text: t("h.batterySaverOn") });
 		const next = p.nextScheduledSync();
 		pend.createDiv({ cls: "vsg-muted", text: next ? t("health.nextSync", { time: new Date(next).toLocaleTimeString() }) : t("health.noSchedule") });
 
@@ -246,6 +268,15 @@ export class HealthView extends ItemView {
 			this.button(row, t("s.onDemandBrowse"), () => p.openRemoteOnly());
 		}
 
+		// ---- names other devices can't store ----
+		const badNames = p.unportableNames();
+		if (badNames.length) {
+			const s = this.section(t("h.badNames", { n: badNames.length }), "file-warning");
+			s.createDiv({ cls: "vsg-muted", text: t("h.badNamesHint") });
+			const ul = s.createEl("ul", { cls: "vsg-list" });
+			for (const x of badNames.slice(0, 30)) ul.createEl("li", { text: x });
+		}
+
 		// ---- skipped ----
 		const skipped = p.lastReport?.skipped ?? [];
 		if (skipped.length) {
@@ -257,9 +288,13 @@ export class HealthView extends ItemView {
 		// ---- devices ----
 		if (this.remoteInfo?.devices.length) {
 			const s = this.section(t("health.devices"), "monitor-smartphone");
+			const mine = p.pluginVersion;
+			const other = [...this.remoteInfo.versions].filter(([name, v]) => name !== p.deviceName() && v !== mine);
+			if (other.length) s.createDiv({ cls: "vsg-h-accent", text: t("h.versionMismatch", { mine, list: other.map(([n, v]) => `${n} (${v})`).join(", ") }) });
 			for (const [name, ts] of this.remoteInfo.devices) {
 				const row = s.createDiv({ cls: "vsg-h-row" });
-				row.createDiv({ text: name + (name === p.deviceName() ? ` ${t("health.thisDevice")}` : "") });
+				const v = this.remoteInfo.versions.get(name);
+				row.createDiv({ text: name + (name === p.deviceName() ? ` ${t("health.thisDevice")}` : "") + (v ? ` · ${v}` : "") });
 				row.createDiv({ cls: "vsg-muted", text: t("health.lastSynced", { ago: ago(ts) }) });
 			}
 		}
@@ -273,6 +308,13 @@ export class HealthView extends ItemView {
 			this.button(gh, t("h.newToken"), () => p.openTokenPage(), true);
 		}
 		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: t("h.checkFailed", { host: p.hostLabel(), error: this.remoteInfo.error }) });
+		const mirror = p.mirrorStatus();
+		if (mirror) {
+			gh.createDiv({
+				cls: mirror.lastError ? "vsg-h-accent" : "vsg-muted",
+				text: mirror.lastError ? t("h.mirrorFailed", { target: mirror.label, error: mirror.lastError }) : t("h.mirror", { target: mirror.label, ago: ago(mirror.lastSync) }),
+			});
+		}
 
 		// ---- tools ----
 		const tools = this.section(t("health.tools"), "wrench");
@@ -280,10 +322,16 @@ export class HealthView extends ItemView {
 		this.button(tl, t("health.timeline"), () => p.openTimeline());
 		this.button(tl, t("health.snapshot"), () => p.snapshot(true));
 		this.button(tl, t("health.reset"), () => p.resetToGitHub());
+		this.button(tl, t("cmd.overwrite"), () => p.overwriteRemote());
 		this.button(tl, t("health.freeSpace"), () => p.freeUpSpace());
 		this.button(tl, t("link.addDevice"), () => p.openSetupLink());
 		this.button(tl, t("health.wizard"), () => p.openWizard());
 		this.button(tl, t("health.log"), () => p.openLog());
+		this.button(tl, t("cmd.diagnostics"), () => p.copyDiagnostics());
+		this.button(tl, p.batterySaver() ? t("h.batterySaverOff") : t("h.batterySaverTurnOn"), () => {
+			p.setBatterySaver(!p.batterySaver());
+			this.refresh();
+		});
 		this.button(tl, t("health.settings"), () => p.openSettings());
 	}
 }

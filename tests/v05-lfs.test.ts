@@ -106,3 +106,21 @@ test("LFS: a device's download limit uses the real size, not the pointer's", asy
 	await phone.sync();
 	assert.equal(phone.fs.text("video.mp4"), "v".repeat(5000), "downloads once pinned");
 });
+
+test("LFS: files tracked in .gitattributes go to LFS whatever their size", async () => {
+	const { lfsPatternsFrom } = await import("../src/lfs.ts");
+	assert.deepEqual(lfsPatternsFrom("# comment\n*.psd filter=lfs diff=lfs merge=lfs -text\n*.md text\nassets/** filter=lfs\n!x filter=lfs\n"), ["*.psd", "assets/**"]);
+	const gh = new FakeGitHub() as any;
+	gh.gitUrl = () => "https://github.test/me/vault.git";
+	gh.authHeader = () => "Basic dGVzdA==";
+	gh.label = "GitHub";
+	const lfs = fakeLfs();
+	const a = device("A", gh);
+	a.host.codec = () => new Codec([new LfsLayer(gh, 0, lfs.transport, ["*.psd"])]);
+	a.fs.put("small.psd", "tiny");
+	a.fs.put("note.md", "n\n");
+	await a.sync();
+	assert.ok(parsePointer(new TextEncoder().encode(gh.headFiles().get("small.psd")!).buffer as ArrayBuffer), "small .psd stored as an LFS pointer");
+	assert.equal(gh.headFiles().get("note.md"), "n\n", "other files unchanged");
+	assert.equal(lfs.calls.uploads, 1);
+});

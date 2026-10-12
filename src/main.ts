@@ -1,4 +1,4 @@
-import { debounce, Debouncer, normalizePath, Notice, Platform, Plugin, setIcon, TAbstractFile, TFile } from "obsidian";
+import { apiVersion, debounce, Debouncer, normalizePath, Notice, Platform, Plugin, setIcon, TAbstractFile, TFile, TFolder } from "obsidian";
 import { HOSTS, makeRemote } from "./hosts.ts";
 import type { Remote } from "./remote.ts";
 import type { BlobCache, BlobCacheStore } from "./bitbucket.ts";
@@ -16,7 +16,7 @@ import { Codec } from "./codec.ts";
 import { b64, EncryptionLayer, unb64 } from "./crypto.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import { encryptionGuard } from "./encryption.ts";
-import { LfsLayer } from "./lfs.ts";
+import { LfsLayer, lfsPatternsFrom } from "./lfs.ts";
 import type { EncryptionRecord } from "./encryption.ts";
 import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import { DEFAULT_SETTINGS, emptyState } from "./types.ts";
@@ -55,10 +55,13 @@ import { parseSetupPayload, SETUP_ACTION } from "./setuplink.ts";
 import type { SetupPayload } from "./setuplink.ts";
 import { ApplySetupLinkModal, CreateSetupLinkModal } from "./setuplink-ui.ts";
 import { detectOtherSync } from "./othersync.ts";
-import { asText, conflictCopyOriginal, errMsg, restoredCopyPath, sleep, stamp } from "./util.ts";
+import { SharedFolderModal } from "./shared-ui.ts";
+import { MirrorHost } from "./mirror.ts";
+import { fetchRegistry, findPluginNeeds, installPlugin, obsidianFetch } from "./pluginsync.ts";
+import { asText, conflictCopyOriginal, errMsg, portableNameProblem, redactSecrets, restoredCopyPath, sleep, stamp } from "./util.ts";
 
 type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background" | "open";
-type Status = "idle" | "syncing" | "ok" | "error" | "offline" | "conflict";
+type Status = "idle" | "syncing" | "ok" | "error" | "offline" | "conflict" | "paused";
 
 export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	settings!: VaultSyncSettings;
@@ -186,6 +189,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			}),
 		);
 
+		// "Changes on the host": one cheap request every 5 minutes while Obsidian is visible, so a device
+		// that isn't syncing on its own (paused, battery saver, no timer) still shows that something is waiting.
+		this.registerInterval(window.setInterval(() => void this.checkRemoteAhead(), 5 * 60_000));
+
 		this.registerDomEvent(document, "visibilitychange", () => {
 			if (document.visibilityState === "visible" && this.settings.syncOnResume) {
 				if (Date.now() - this.state.lastSync > 60_000) void this.sync("resume");
@@ -205,6 +212,70 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	isUnloaded(): boolean {
 		return this.unloaded;
 	}
+	get pluginVersion(): string {
+		return this.manifest.version;
+	}
+	get windows(): boolean {
+		return Platform.isWin;
+	}
+
+	/** Vault files whose names Windows (and often Android) can't store: they won't sync to such devices. */
+	unportableNames(): string[] {
+		const out: string[] = [];
+		for (const f of this.app.vault.getFiles()) if (portableNameProblem(f.path)) out.push(f.path);
+		return out;
+	}
+
+	/** True when the last check found commits on the host that this device hasn't synced yet. */
+	remoteAhead = false;
+	private async checkRemoteAhead() {
+		if (document.visibilityState !== "visible" || this.syncing || !this.isConfigured() || !navigator.onLine) return;
+		const timerSyncs = this.settings.intervalMin > 0 && this.settings.intervalMin <= 5 && !this.batterySaver() && !this.isPaused();
+		if (timerSyncs) return;
+		try {
+			const head = await this.gh.getRef(this.settings.branch);
+			const ahead = !!head && head !== this.state.head;
+			if (ahead !== this.remoteAhead) {
+				this.remoteAhead = ahead;
+				this.ribbonEl?.toggleClass("vsg-remote-ahead", ahead);
+				this.statusEl?.toggleClass("vsg-remote-ahead", ahead);
+				this.refreshHealth();
+			}
+		} catch {
+			/* offline or no access: the next sync reports it */
+		}
+	}
+
+	// ---------------- pause, battery saver (this device only) ----------------
+
+	/** Automatic syncs are paused until this time (epoch ms; Infinity = until resumed). Manual syncs still run. */
+	pausedUntil(): number {
+		const v = this.localGet("pausedUntil");
+		if (!v) return 0;
+		const n = v === "forever" ? Infinity : Number(v);
+		return n > Date.now() ? n : 0;
+	}
+	isPaused(): boolean {
+		return this.pausedUntil() > 0;
+	}
+	pauseSync(minutes: number | null) {
+		this.localSet("pausedUntil", minutes === null ? "forever" : String(Date.now() + minutes * 60_000));
+		this.setStatus("paused", t("m.pausedStatus"));
+		new Notice(minutes === null ? t("m.paused") : t("m.pausedFor", { n: minutes }));
+	}
+	resumeSync() {
+		this.localSet("pausedUntil", null);
+		new Notice(t("m.resumed"));
+		void this.sync("resume");
+	}
+	/** Battery saver: no timer and no sync after each edit; startup, returning to the app and manual syncs only. */
+	batterySaver(): boolean {
+		return this.localGet("batterySaver") === "1";
+	}
+	setBatterySaver(on: boolean) {
+		this.localSet("batterySaver", on ? "1" : null);
+		this.rescheduleTriggers();
+	}
 	/** Other sync tools found in this vault (checked on load and when the status panel opens). */
 	otherSync: string[] = [];
 	async checkOtherSync(): Promise<string[]> {
@@ -212,6 +283,29 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return this.otherSync;
 	}
 	private gitignoreLines: string[] = [];
+	/** `filter=lfs` patterns from .gitattributes (this vault's, else the repository's). */
+	private lfsPatterns: string[] = [];
+	private gitattributesHead: string | null = null;
+	/** Reads .gitattributes so files tracked with `git lfs track` go to LFS whatever their size. */
+	async loadGitattributes() {
+		try {
+			const a = this.app.vault.adapter;
+			let text = (await a.exists(".gitattributes")) ? await a.read(".gitattributes") : null;
+			if (text === null && this.isConfigured() && !this.isEncrypted()) {
+				// The repository's copy, read once per head (not on every sync).
+				const head = this.state.head;
+				if (head && this.gitattributesHead === head) return;
+				const data = head ? await this.gh.getFileAt(".gitattributes", head) : null;
+				text = data ? new TextDecoder().decode(data) : "";
+				this.gitattributesHead = head;
+			}
+			// The engine rebuilds its layers from codec() on each run; the LFS fingerprint changes with the
+			// patterns, so cached hashes are recomputed once.
+			this.lfsPatterns = lfsPatternsFrom(text ?? "");
+		} catch {
+			/* keep the previous patterns */
+		}
+	}
 	private badgeTimer: Debouncer<[], void> | null = null;
 	gitignorePatterns(): string[] {
 		return this.gitignoreLines;
@@ -319,6 +413,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (bound === null) this.localSet(`token-shared-for:${def.id}`, target);
 		else if (bound !== target) return "";
 		return token;
+	}
+	/** The backup mirror's own token, bound to its host and API URL like the others. */
+	mirrorToken(def: { id: string; provider: HostKind }): string {
+		return this.sharedToken(def as SharedFolder);
 	}
 	setSharedToken(def: SharedFolder, token: string) {
 		this.setSecret(`token-shared-${def.id}`, token);
@@ -551,7 +649,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	// ---------------- encryption ----------------
 
-	private encryptionRecord(): EncryptionRecord | null {
+	/** The encryption layer while the key is on this device (used by the mirror too). */
+	encryptionLayer(): EncryptionLayer | null {
+		return this.encLayer;
+	}
+	encryptionRecord(): EncryptionRecord | null {
 		const raw = this.getSecret("encryption");
 		if (!raw) return null;
 		try {
@@ -627,6 +729,120 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		}
 		return this.shared.hosts;
 	}
+	/**
+	 * Settings-folder sync with "install plugins from official releases": plugins turned on (or updated)
+	 * on another device are installed here from the community registry, after asking. A declined
+	 * version isn't offered again.
+	 */
+	private offeringPlugins = false;
+	private async offerPluginInstalls() {
+		if (this.offeringPlugins) return;
+		this.offeringPlugins = true;
+		try {
+			await this.offerPluginInstallsNow();
+		} finally {
+			this.offeringPlugins = false;
+		}
+	}
+	private async offerPluginInstallsNow() {
+		const cs = this.settings.configSync;
+		if (!this.settings.syncConfigDir || !cs.installFromReleases || !cs.pluginCode || !cs.pluginList) return;
+		const a = this.app.vault.adapter;
+		const cfg = this.app.vault.configDir;
+		const declined = new Set((this.localGet("declinedInstalls") ?? "").split("\n").filter(Boolean));
+		// The community list is only downloaded when a plugin still needs installing and wasn't declined.
+		const { needs } = await findPluginNeeds(
+			{
+				exists: (p) => a.exists(p),
+				read: async (p) => {
+					const text = await a.read(p);
+					if (!p.endsWith("/manifest.json")) return text;
+					try {
+						const m = JSON.parse(text) as { id?: string; version?: string };
+						if (declined.has(`${m.id}@${m.version}`)) throw new Error("declined");
+					} catch (e) {
+						if (e instanceof Error && e.message === "declined") return "{}";
+					}
+					return text;
+				},
+			},
+			cfg,
+			() => fetchRegistry(),
+			new Set((this.localGet("pluginUpdatesPending") ?? "").split("\n").filter(Boolean)),
+		);
+		const offer = needs.filter((n) => !declined.has(`${n.id}@${n.version}`));
+		if (!offer.length) return;
+		const items = offer.map((n) => `${n.name} ${n.version} (${n.repo})`);
+		const ok = await confirmPlan(this.app, t("pi.title"), t("pi.body"), [{ title: t("pi.list"), items }], t("pi.install"));
+		if (!ok) {
+			for (const n of offer) declined.add(`${n.id}@${n.version}`);
+			this.localSet("declinedInstalls", [...declined].join("\n"));
+			return;
+		}
+		const done: string[] = [];
+		for (const n of offer) {
+			try {
+				await installPlugin(n, { transport: obsidianFetch, write: (p, d) => a.writeBinary(p, d), mkdir: async (p) => {
+					if (!(await a.exists(p))) await a.mkdir(p);
+				} }, cfg);
+				done.push(n.name);
+			} catch (e) {
+				this.log(`Installing ${n.id} ${n.version} failed: ${errMsg(e)}`);
+				new Notice(t("pi.failed", { name: n.name, error: errMsg(e) }), 8000);
+			}
+		}
+		if (done.length) new Notice(t("pi.done", { list: done.join(", ") }), 12000);
+		// Installed (or declined above): no longer pending.
+		const pending = (this.localGet("pluginUpdatesPending") ?? "").split("\n").filter((id) => id && !offer.some((n) => n.id === id && done.includes(n.name)));
+		this.localSet("pluginUpdatesPending", pending.join("\n") || null);
+	}
+
+	private mirrorHost: { sig: string; host: MirrorHost } | null = null;
+	/** The backup mirror for the current settings (rebuilt when its target changes). */
+	async mirror(): Promise<MirrorHost | null> {
+		const m = this.settings.mirror;
+		if (!m?.enabled || !m.owner || !m.repo) return null;
+		const sig = JSON.stringify(m);
+		if (!this.mirrorHost || this.mirrorHost.sig !== sig) {
+			const host = new MirrorHost(this, m);
+			await host.loadState();
+			this.mirrorHost = { sig, host };
+		}
+		return this.mirrorHost.host;
+	}
+	/** The mirror's last result, for the status panel (null when no mirror ran yet). */
+	mirrorStatus(): { label: string; lastSync: number; lastError: string | null } | null {
+		const m = this.settings.mirror;
+		const h = this.mirrorHost?.host;
+		if (!m?.enabled) return null;
+		return { label: `${HOSTS[m.provider].label} ${m.owner}/${m.repo}`, lastSync: h?.lastSync ?? 0, lastError: h?.lastError ?? null };
+	}
+	/** Uploads this vault to the backup mirror (push only). Returns an error message, or null. */
+	private async syncMirror(guardKept: string[] = []): Promise<string | null> {
+		const h = await this.mirror();
+		if (!h || this.settings.mode === "pull") return null;
+		try {
+			// Deletions held back at the delete guard are held back on the mirror too.
+			const r = await h.engine.run("push", guardKept.length ? { defer: new Set(guardKept) } : {});
+			// Turning encryption on: the mirror's old plaintext files are removed once (they stay in its history).
+			const fp = this.encLayer?.id ?? "";
+			const key = `mirrorPlainGone:${h.target.provider}:${h.target.owner}/${h.target.repo}`;
+			if (fp && this.localGet(key) !== fp) {
+				await h.engine.removeUnencryptedFiles(async () => true);
+				this.localSet(key, fp);
+			}
+			h.lastError = null;
+			h.lastSync = Date.now();
+			if (!r.upToDate) h.log(`Mirrored: ↑${r.uploaded.length} ✕${r.deletedRemote.length}`);
+			return null;
+		} catch (e) {
+			if (e instanceof SyncCancelled) return null;
+			h.lastError = errMsg(e);
+			h.log(`Mirror failed: ${errMsg(e)}`);
+			return errMsg(e);
+		}
+	}
+
 	private async syncShared(mode: SyncMode): Promise<string[]> {
 		const errors: string[] = [];
 		for (const h of await this.sharedHosts()) {
@@ -636,6 +852,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				h.lastError = null;
 				h.lastSync = Date.now();
 				if (!r.upToDate) h.log(`Synced: ↓${r.downloaded.length} ↑${r.uploaded.length} merged ${r.merged.length}`);
+				for (const url of r.pullRequests ?? []) this.notify(t("m.prOpened", { folder: h.def.folder, url }), true);
 			} catch (e) {
 				if (e instanceof SyncCancelled) continue;
 				h.lastError = errMsg(e);
@@ -648,7 +865,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	codec(): Codec {
 		// LFS is always present for reading pointers; it only uploads when a threshold is set.
-		const lfs = new LfsLayer(this.gh, (this.settings.lfsThresholdMB ?? 0) * 1024 * 1024);
+		const lfs = new LfsLayer(this.gh, (this.settings.lfsThresholdMB ?? 0) * 1024 * 1024, undefined, this.lfsPatterns);
 		return new Codec(this.encLayer ? [this.encLayer, lfs] : [lfs]);
 	}
 	checkEncryption = (markerSha: string | null): Promise<string | null> =>
@@ -812,7 +1029,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (this.intervalId !== null) window.clearInterval(this.intervalId);
 		this.intervalId = null;
 		this.nextIntervalAt = 0;
-		if (this.settings.intervalMin > 0) {
+		if (this.settings.intervalMin > 0 && !this.batterySaver()) {
 			const ms = this.settings.intervalMin * 60_000;
 			this.nextIntervalAt = Date.now() + ms;
 			this.intervalId = window.setInterval(() => {
@@ -851,6 +1068,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			error: "cloud-off",
 			offline: "wifi-off",
 			conflict: "alert-triangle",
+			paused: "pause-circle",
 		};
 		const last = this.state?.lastSync ? t("h.lastSync", { ago: new Date(this.state.lastSync).toLocaleTimeString() }) : t("health.notSynced");
 		const title = detail || (status === "syncing" ? t("health.syncing") : last);
@@ -915,6 +1133,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async sync(trigger: Trigger, mode: SyncMode = this.settings.mode, opts: SyncOptions = {}): Promise<void> {
 		if (this.unloaded) return;
+		if (trigger !== "manual" && this.isPaused()) return void this.setStatus("paused", t("m.pausedStatus"));
+		if (this.batterySaver() && (trigger === "change" || trigger === "interval")) return;
 		if (this.usingGitHubApp() && navigator.onLine) await this.ensureFreshToken();
 		const problem = this.configProblem();
 		if (problem) {
@@ -940,6 +1160,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		}
 		this.syncing = true;
 		await this.loadGitignore();
+		await this.loadGitattributes();
 		this.changedDuringSync = false;
 		this.touchedDuringSync.clear();
 		this.onChangeDebounced?.cancel();
@@ -950,6 +1171,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const r = await this.engine.run(mode, opts);
 			const sharedErrors = opts.defer || opts.only || opts.firstSyncPrefer ? [] : await this.syncShared(mode);
 			if (sharedErrors.length) this.notify(`${t("m.sharedFailed")}\n${sharedErrors.join("\n")}`, true);
+			const mirrorError = opts.defer || opts.only || opts.firstSyncPrefer ? null : await this.syncMirror(r.guardKept ?? []);
+			if (mirrorError) this.notify(t("m.mirrorFailed", { error: mirrorError }), true);
+			// A plugin's manifest.json arriving through sync means it was updated on another device.
+			const cfgDir = this.app.vault.configDir;
+			const updated = r.downloaded.map((p) => new RegExp(`^${cfgDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/plugins/([^/]+)/manifest\\.json$`).exec(p)?.[1]).filter((x): x is string => !!x);
+			if (updated.length) {
+				const pend = new Set((this.localGet("pluginUpdatesPending") ?? "").split("\n").filter(Boolean));
+				for (const id of updated) pend.add(id);
+				this.localSet("pluginUpdatesPending", [...pend].join("\n"));
+			}
+			if (r.downloaded.length || trigger === "startup" || trigger === "manual") void this.offerPluginInstalls().catch((e: unknown) => this.log(`Plugin check failed: ${errMsg(e)}`));
 			written = new Set([...r.downloaded, ...r.merged, ...r.conflictCopies, ...r.deletedLocal]);
 			const now = Date.now();
 			for (const p of written) this.writtenBySync.set(p, now);
@@ -989,6 +1221,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	private afterSync(r: SyncReport, trigger: Trigger, ms: number) {
 		this.warnTokenExpiry();
+		this.remoteAhead = false;
+		this.ribbonEl?.removeClass("vsg-remote-ahead");
+		this.statusEl?.removeClass("vsg-remote-ahead");
 		if (r.upToDate) {
 			this.log(`Up to date (${trigger}).`);
 			this.setStatus(this.conflictCopies().length ? "conflict" : "ok");
@@ -1004,6 +1239,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.log(`Sync done (${trigger}, ${r.mode}, ${ms} ms): ${summary}`);
 		for (const s of r.skipped) this.log(`Skipped ${s}`);
 
+		for (const url of r.pullRequests ?? []) this.notify(t("m.prOpened", { folder: this.app.vault.getName(), url }), true);
 		if (r.errors.length) {
 			this.setStatus("error", t("m.filesFailed", { n: r.errors.length }));
 			this.notify(t("notice.errors", { n: r.errors.length }), true);
@@ -1225,6 +1461,48 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		}
 	}
 
+	/** One forward commit that makes the repository equal to this device (the opposite of reset). */
+	async overwriteRemote() {
+		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
+		if (this.syncing) return void new Notice(t("notice.busy"));
+		this.syncing = true;
+		this.setStatus("syncing", t("m.comparing"));
+		try {
+			await this.loadGitignore();
+			const plan = await this.engine.overwriteRemote((p) =>
+				confirmPlan(
+					this.app,
+					t("ow.title"),
+					t("ow.body", { host: this.hostLabel() }),
+					[
+						{ title: t("ow.upload"), items: p.upload },
+						{ title: t("m.deleteFrom", { host: this.hostLabel() }), items: p.remove },
+					],
+					t("ow.confirm"),
+					true,
+				),
+			);
+			const n = plan.upload.length + plan.remove.length;
+			new Notice(n ? t("ow.done", { n }) : t("m.alreadyMatches"));
+			this.fullScanNeeded = true;
+			this.dirty.clear();
+			this.syncing = false;
+			this.setStatus("ok");
+		} catch (err) {
+			this.syncing = false;
+			if (err instanceof SyncCancelled) this.setStatus("idle");
+			else {
+				new Notice(t("ow.failed", { error: errMsg(err) }), 8000);
+				this.lastError = errMsg(err);
+				this.lastErrorAt = Date.now();
+				this.setStatus("error", errMsg(err));
+			}
+		} finally {
+			this.syncing = false;
+			this.refreshHealth(true);
+		}
+	}
+
 	async resetToGitHub() {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
 		if (this.syncing) return void new Notice(t("notice.busy"));
@@ -1291,7 +1569,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file) return false;
-				if (!checking) this.showFileHistory(file);
+				if (!checking) void this.showFileHistory(file);
 				return true;
 			},
 		});
@@ -1316,6 +1594,24 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			},
 		});
 		this.addCommand({ id: "setup-link", name: t("cmd.setupLink"), callback: () => this.openSetupLink() });
+		this.addCommand({ id: "overwrite-remote", name: t("cmd.overwrite"), callback: () => void this.overwriteRemote() });
+		this.addCommand({ id: "pause", name: t("cmd.pause"), callback: () => (this.isPaused() ? this.resumeSync() : this.pauseSync(null)) });
+		this.addCommand({ id: "pause-hour", name: t("cmd.pauseHour"), callback: () => this.pauseSync(60) });
+		this.addCommand({ id: "copy-diagnostics", name: t("cmd.diagnostics"), callback: () => void this.copyDiagnostics() });
+		const onHost = (id: string, name: string, run: (f: TFile) => void) =>
+			this.addCommand({
+				id,
+				name,
+				checkCallback: (checking) => {
+					const file = this.app.workspace.getActiveFile();
+					if (!file || !this.isConfigured()) return false;
+					if (!checking) run(file);
+					return true;
+				},
+			});
+		onHost("open-on-host", t("cmd.openOnHost"), (f) => void this.openOnHost(f, "file"));
+		onHost("history-on-host", t("cmd.historyOnHost"), (f) => void this.openOnHost(f, "history"));
+		onHost("copy-host-link", t("cmd.copyHostLink"), (f) => void this.openOnHost(f, "copy"));
 		this.addCommand({ id: "recover-deleted", name: t("cmd.recover"), callback: () => void this.showDeletedFiles() });
 		this.addCommand({
 			id: "open-repo",
@@ -1329,14 +1625,79 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
+				if (file instanceof TFolder && file.path && file.path !== "/") {
+					menu.addItem((i) => i.setTitle(t("menu.shareFolder")).setIcon("folder-sync").onClick(() => new SharedFolderModal(this.app, this, () => this.refreshHealth(), file.path).open()));
+					menu.addItem((i) => i.setTitle(t("menu.excludeFolder")).setIcon("eye-off").onClick(() => void this.excludeFolder(file.path)));
+					return;
+				}
 				if (!(file instanceof TFile)) return;
-				menu.addItem((i) => i.setTitle(t("menu.history")).setIcon("history").onClick(() => this.showFileHistory(file)));
+				menu.addItem((i) => i.setTitle(t("menu.history")).setIcon("history").onClick(() => void this.showFileHistory(file)));
 				menu.addItem((i) => i.setTitle(t("menu.compare")).setIcon("file-diff").onClick(() => this.compareWithGitHub(file)));
+				if (this.isConfigured()) {
+					menu.addItem((i) => i.setTitle(t("menu.openOnHost", { host: this.hostLabel() })).setIcon("external-link").onClick(() => void this.openOnHost(file, "file")));
+					menu.addItem((i) => i.setTitle(t("menu.copyHostLink")).setIcon("link").onClick(() => void this.openOnHost(file, "copy")));
+				}
 			}),
 		);
 	}
 
-	private showFileHistory(file: TFile) {
+	/** Opens a file's page (or history) on the host, or copies a link to it at the last synced commit. */
+	private async openOnHost(file: TFile, what: "file" | "history" | "copy") {
+		// A note inside a shared folder lives in that folder's repository.
+		const shared = (await this.sharedHosts()).find((h) => file.path.startsWith(h.def.folder.replace(/\/+$/, "") + "/"));
+		if (!shared && this.isEncrypted()) return void new Notice(t("m.hostLinkEncrypted"));
+		const remote = shared ? shared.gh : this.gh;
+		const path = shared ? await shared.engine.remotePathOf(file.path) : await this.engine.remotePathOf(file.path);
+		const branch = shared ? shared.def.branch || "main" : this.settings.branch;
+		const head = shared ? shared.state.head : this.state.head;
+		const ref = what === "history" ? branch : (head ?? branch);
+		const url = remote.webUrl?.(what === "history" ? "history" : "file", path, ref) ?? null;
+		if (!url) return void new Notice(t("m.hostLinkUnsupported", { host: shared ? remote.label : this.hostLabel() }));
+		if (what === "copy") {
+			try {
+				await navigator.clipboard.writeText(url);
+				new Notice(t("link.copied"));
+			} catch (e) {
+				new Notice(t("m.clipboardFailed", { error: errMsg(e) }));
+			}
+		} else window.open(url);
+	}
+
+	private async excludeFolder(folder: string) {
+		const line = `/${folder}/`;
+		if (this.settings.excludePatterns.split("\n").some((l) => l.trim() === line)) return void new Notice(t("m.alreadyExcluded", { folder }));
+		if (!(await confirmPlan(this.app, t("menu.excludeFolder"), t("m.excludeBody", { folder }), [], t("menu.excludeFolder")))) return;
+		this.settings.excludePatterns = `${this.settings.excludePatterns.trimEnd()}\n${line}`;
+		await this.saveSettings();
+		new Notice(t("m.excluded", { folder }));
+	}
+
+	/** Copies a bug-report summary: versions, settings (no secrets), state and recent log, with tokens hidden. */
+	async copyDiagnostics() {
+		const s = this.settings;
+		const api = this.getApiBase();
+		const lines = [
+			`Vault Sync for Git ${this.manifest.version} · Obsidian ${apiVersion} · ${Platform.isMobile ? "mobile" : "desktop"}${Platform.isIosApp ? " iOS" : Platform.isAndroidApp ? " Android" : Platform.isMacOS ? " macOS" : Platform.isWin ? " Windows" : Platform.isLinux ? " Linux" : ""}`,
+			`Host: ${s.provider} (${/^https?:\/\/([^/]+)/.exec(api)?.[1] ?? "?"}) · sign-in: ${this.usingGitHubApp() ? "GitHub App" : this.getToken() ? "token" : "none"}`,
+			`Mode: ${s.mode} · conflicts: ${s.conflictStrategy} · settings folder: ${s.syncConfigDir} · hidden: ${s.syncHidden} · .gitignore: ${s.useGitignore} · LFS: ${s.lfsThresholdMB} MB · encrypted: ${this.isEncrypted()}`,
+			`Triggers: startup ${s.syncOnStartup}, edits ${s.syncOnChange} (${s.changeDebounceSec}s), every ${s.intervalMin} min, resume ${s.syncOnResume}, background ${s.syncOnBackground}, open ${s.syncOnOpen} · paused: ${this.isPaused()} · battery saver: ${this.batterySaver()}`,
+			`Shared folders: ${s.sharedFolders.length} · mirror: ${s.mirror?.enabled ? s.mirror.provider : "off"}`,
+			`State: head ${this.state.head?.slice(0, 7) ?? "none"} · ${Object.keys(this.state.base).length} files · last sync ${this.state.lastSync ? new Date(this.state.lastSync).toISOString() : "never"} · on demand ${Object.keys(this.state.remoteOnly ?? {}).length}`,
+			`Last error: ${this.lastError ?? "none"}`,
+			"",
+			"Recent log:",
+			...this.logLines.slice(-60),
+		];
+		try {
+			await navigator.clipboard.writeText(redactSecrets(lines.join("\n")));
+			new Notice(t("m.diagnosticsCopied"));
+		} catch (e) {
+			new Notice(t("m.clipboardFailed", { error: errMsg(e) }));
+		}
+	}
+
+	private async showFileHistory(file: TFile) {
+		if (await this.needsUnlock()) return;
 		new CommitListModal(this.app, t("m.history", { path: file.path }), async () => {
 			const commits = await this.gh.listCommits(this.settings.branch, await this.engine.remotePathOf(file.path), 50);
 			return commits.map((c) => ({

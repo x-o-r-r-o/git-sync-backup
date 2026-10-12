@@ -7,7 +7,7 @@ import { normalizeConfigSync } from "./scope-config.ts";
 import type { ConfigSync } from "./scope-config.ts";
 
 export const SETUP_ACTION = "vault-sync-git";
-const PROVIDERS = ["github", "gitlab", "gitea", "bitbucket"] as const;
+const PROVIDERS = ["github", "gitlab", "gitea", "bitbucket", "gitee", "azure"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 export interface SetupPayload {

@@ -87,16 +87,26 @@ export class PrefixLayer implements Layer {
 	readonly id: string;
 	readonly transformsPaths = true;
 	private prefix: string;
-	constructor(folder: string) {
+	/** The vault folder this layer maps (with a trailing slash). */
+	get folderPrefix(): string {
+		return this.prefix;
+	}
+	/** Folder inside the repository ("" = its root), with a trailing slash when set. */
+	private sub: string;
+	constructor(folder: string, subdir = "") {
 		this.prefix = folder.replace(/^\/+|\/+$/g, "") + "/";
-		this.id = `folder:${this.prefix}`;
+		const sub = subdir.replace(/^\/+|\/+$/g, "");
+		this.sub = sub ? sub + "/" : "";
+		this.id = this.sub ? `folder:${this.prefix}=${this.sub}` : `folder:${this.prefix}`;
 	}
 	async encodePath(p: string) {
 		// Defense in depth: a path outside the folder must never reach the shared repository.
 		if (!p.startsWith(this.prefix)) throw new Error(`${p} is outside the shared folder ${this.prefix}`);
-		return p.slice(this.prefix.length);
+		return this.sub + p.slice(this.prefix.length);
 	}
-	async decodePath(raw: string) {
-		return this.prefix + raw;
+	/** Repository paths outside the mapped subfolder are not part of this shared folder (null: ignored). */
+	async decodePath(raw: string): Promise<string | null> {
+		if (this.sub && !raw.startsWith(this.sub)) return null;
+		return this.prefix + raw.slice(this.sub.length);
 	}
 }

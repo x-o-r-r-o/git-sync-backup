@@ -3,7 +3,7 @@
 // hidden files (config dir) go through the adapter, since the vault does not index them.
 
 import { TFile, TFolder } from "obsidian";
-import type { App } from "obsidian";
+import type { App, TAbstractFile } from "obsidian";
 import { isHiddenPath, parentDir } from "./util.ts";
 
 export interface LocalFileInfo {
@@ -76,6 +76,40 @@ export class VaultIO {
 		for (const f of root.files.map(strip)) if (f.startsWith(".")) await addFile(f);
 		for (const d of root.folders.map(strip)) if (d.startsWith(".") && d !== cfg && inScope(d)) await walk(d);
 		return out;
+	}
+
+	/** Empty folders in the vault (indexed by Obsidian), in scope. */
+	listEmptyFolders(inScope: (path: string) => boolean): string[] {
+		const out: string[] = [];
+		const all = (this.app.vault as { getAllLoadedFiles?: () => TAbstractFile[] }).getAllLoadedFiles?.() ?? [];
+		for (const f of all) if (f instanceof TFolder && f.path && f.path !== "/" && f.children.length === 0 && !isHiddenPath(f.path) && inScope(f.path)) out.push(f.path);
+		return out;
+	}
+	/** True if a folder exists and holds files or folders. */
+	async folderHasChildren(path: string): Promise<boolean> {
+		try {
+			const l = await this.adapter.list(path);
+			// Hidden entries (.DS_Store, desktop.ini-style files) don't count: Obsidian doesn't show them either.
+			const visible = (p: string) => !(p.split("/").pop() ?? "").startsWith(".");
+			return l.files.some(visible) || l.folders.some(visible);
+		} catch {
+			return false;
+		}
+	}
+	async makeFolder(path: string): Promise<void> {
+		if (await this.adapter.exists(path)) return;
+		try {
+			await this.app.vault.createFolder(path);
+		} catch {
+			if (!(await this.adapter.exists(path))) await this.adapter.mkdir(path);
+		}
+	}
+	/** Removes a folder only while it is empty (a folder that gained files here is kept). */
+	async removeEmptyFolder(path: string): Promise<void> {
+		if (!(await this.adapter.exists(path)) || (await this.folderHasChildren(path))) return;
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFolder) await this.app.fileManager.trashFile(f);
+		else await this.adapter.rmdir(path, false);
 	}
 
 	/** Every file in scope: indexed vault files, plus the config dir when requested. */

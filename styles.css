@@ -528,3 +528,39 @@
 .setting-item.vsg-indent {
 	padding-inline-start: var(--size-4-6);
 }
+
+/* "Changes on the host" dot on the ribbon icon and status bar */
+.vsg-remote-ahead {
+	position: relative;
+}
+.vsg-remote-ahead::after {
+	content: "";
+	position: absolute;
+	top: 3px;
+	right: 3px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--color-accent);
+}
+
+/* Review: filters */
+.vsg-review-filter {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	align-items: center;
+	margin-bottom: var(--size-4-2);
+}
+.vsg-review-search {
+	flex: 1 1 180px;
+}
+.vsg-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-2-2);
+}
+.vsg-chip.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}

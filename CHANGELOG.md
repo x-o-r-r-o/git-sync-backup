@@ -12,6 +12,18 @@
 - **Notifications:** new "When files changed" level, and a new default, *Automatic*, that shows changes on phones (no status bar) and only errors on desktop. Saved choices are kept.
 - **Simpler settings:** connection and sync behaviour stay open; the other sections are folded.
 
+**Also new (from researching 29 other Git and sync plugins)**
+- **Two more hosts (beta): Azure DevOps** (atomic pushes) **and Gitee** (one commit per file, as its API requires).
+- **Backup mirror:** every sync also uploads the vault to a second repository on any host (push only; encrypted when the vault is).
+- **Conflicts as pull requests** for shared folders: this device's version goes to a branch with a PR/MR instead of a conflict copy (falls back to a copy if the PR can't be opened).
+- **Shared folder → folder inside a repository** (for example `Work/` ↔ `repo/docs/`).
+- **Install plugin code from official releases** instead of syncing it: versions sync, each device installs that exact version from the plugin's GitHub release (community directory only, after confirming).
+- **Make the repository match this device:** one forward commit, the opposite of reset.
+- **Branch picker** with "create a branch"; **.gitattributes LFS rules** (`git lfs track`) honoured; **empty folders** kept across devices.
+- **Pause automatic sync** (an hour or until resumed), **battery saver** per device, and a **"changes on the host" dot** on the ribbon and status bar.
+- **Open / copy a note's link or history on the host**, **exclude a folder** and **share a folder** from the file menu.
+- **Copy diagnostics** with tokens hidden; **commit author** name and email; **plugin-version mismatch** warning between devices; **names Windows can't store** listed (and skipped on Windows); **filters and search** in the review list.
+
 **Fixed (full audit before release: settings, commands, sync engine, host clients)**
 - Sync engine: conflict copies in the settings folder or hidden files no longer bounce between devices; partial syncs (current file, review, push mode, delete-guard "skip") no longer hide remote changes from the next sync; a file moved out of a device's folder scope stays in the repository (remembered, not just for one sync); a case-only rename on another device is applied as a rename (never strands or overwrites a file); names that differ only in Unicode form no longer become duplicates; large numbers in JSON files are never rounded by a structured merge; line-ending-only changes no longer show as pending; encryption can't change under a running sync.
 - Host clients: Gitea history comparison works when the server returns fewer items per page; GitLab now reports file sizes (so size limits apply), remembered on the device; Bitbucket keeps executable bits and API-token LFS access; GitHub Enterprise Cloud (ghe.com) addresses; history and tags beyond the first page; GitHub's secondary rate limit is waited out once; no extra wait after the last network retry.

@@ -87,10 +87,13 @@ Still to verify: real phones, and real GitLab, Gitea and Bitbucket servers (so f
 
 From the 1.2 review list, shipped in 1.3: granular settings-folder sync (1), setup link / QR code and other-sync-tool warning (2), `.gitignore` and hidden files (3), file-explorer status and phone notices (4), sync current file / on open (5), folded settings (6).
 
+Also in 1.3, from researching 29 other plugins: Azure DevOps and Gitee hosts, backup mirror, conflicts as pull requests (shared folders), shared folder to a repository subfolder, plugin installs from official releases, make repository match this device, branch picker, .gitattributes LFS rules, empty folders, pause and battery saver, remote-change indicator, open/copy on host, folder menu actions, diagnostics, commit author, plugin-version warning, Windows-name checks, review filters.
+
 ## Next
 
-1. Real-server verification of GitLab, Gitea and Bitbucket, and real-phone testing (iOS, Android), before dropping "beta".
+1. Real-server verification of GitLab, Gitea, Bitbucket, Gitee and Azure DevOps, and real-phone testing (iOS, Android), before dropping "beta".
 2. Native-speaker review of the machine-assisted translations.
-3. More hosts: Gitee, Azure DevOps, plain HTTPS Git (Gitee's write API is limited).
-4. Conflict branch plus pull request for shared team folders.
-5. Hidden folders inside normal folders, and instant detection of settings-folder changes (today: on full scans).
+3. Inline conflict resolution in the editor (accept this device / repository / both above each block).
+4. GitHub rendering pass for shared folders (wikilinks, callouts, embeds readable on GitHub), opt-in.
+5. Hidden folders inside normal folders; nested ignore files.
+6. GitLab sign-in without a token (device flow, needs a registered OAuth app).

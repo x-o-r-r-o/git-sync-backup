@@ -101,3 +101,27 @@ export const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(
 export function errMsg(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
 }
+
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+/**
+ * Why a path can't be stored on Windows (and often Android), or null when it is fine: characters
+ * < > : " | ? * or control characters, a name ending in a dot or space, or a reserved device name.
+ */
+export function portableNameProblem(path: string): string | null {
+	for (const seg of path.split("/")) {
+		// eslint-disable-next-line no-control-regex -- control characters are not allowed in Windows file names
+		if (/[<>:"|?*\u0000-\u001f]/.test(seg)) return "char";
+		if (/[. ]$/.test(seg)) return "end";
+		if (WINDOWS_RESERVED.test(seg)) return "reserved";
+	}
+	return null;
+}
+
+/** Hides tokens and secrets in text meant for bug reports. */
+export function redactSecrets(text: string): string {
+	return text
+		.replace(/\b(gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{10,}|ATBB[A-Za-z0-9]{10,}|ATATT[A-Za-z0-9_=-]{10,})/g, "[token]")
+		.replace(/\b(Bearer|token|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [token]")
+		.replace(/([?&](access_token|private_token|token)=)[^&\s]+/gi, "$1[token]");
+}

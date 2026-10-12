@@ -12,7 +12,7 @@ import { buildMultipart, compareByWalking, httpRequest, obsidianTransport } from
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
-import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
+import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { gitBlobSha, pool } from "./util.ts";
 
 export interface BlobCache {
@@ -103,10 +103,20 @@ export class Bitbucket implements Remote {
 		return t.includes(":") ? `Basic ${btoa(t)}` : `Bearer ${t}`;
 	}
 
+	private get web() {
+		return this.base.includes("api.bitbucket.org") ? "https://bitbucket.org" : this.base.replace(/\/2\.0$/, "").replace("//api.", "//");
+	}
 	gitUrl(): string {
 		const c = this.cfg();
-		const web = this.base.includes("api.bitbucket.org") ? "https://bitbucket.org" : this.base.replace(/\/2\.0$/, "").replace("//api.", "//");
-		return `${web}/${c.owner}/${c.repo}.git`;
+		return `${this.web}/${c.owner}/${c.repo}.git`;
+	}
+	/** Web pages: /src/<ref>/<path> (file) and /history-node/<ref>/<path> (history). */
+	webUrl(kind: WebLink, path: string, ref: string): string | null {
+		const c = this.cfg();
+		const repo = `${this.web}/${encodeURIComponent(c.owner)}/${encodeURIComponent(c.repo)}`;
+		if (kind === "repo") return repo;
+		const tail = path ? `/${encPath(path)}` : "";
+		return `${repo}/${kind === "file" ? "src" : "history-node"}/${encPath(ref)}${tail}`;
 	}
 	/**
 	 * Git/LFS credentials. App passwords ("username:password") are used as they are; Atlassian API
@@ -337,6 +347,7 @@ export class Bitbucket implements Remote {
 				{ name: "message", value: message },
 				{ name: "branch", value: req.branch },
 				{ name: "parents", value: parent },
+				...(req.author ? [{ name: "author", value: `${req.author.name} <${req.author.email}>` }] : []),
 				...deletes.map((p) => ({ name: "files", value: p })),
 				...fileParts,
 			]);
@@ -382,6 +393,22 @@ export class Bitbucket implements Remote {
 			await this.saveCache({ commit: parent, files, blobs });
 		}
 		return { sha: parent, fastForward };
+	}
+
+	/** All branches (GET /repositories/{workspace}/{repo}/refs/branches), up to 2000. */
+	async listBranches(): Promise<{ name: string; sha: string }[]> {
+		const list = await this.pages<{ name: string; target?: { hash?: string } }>(`${this.repoPath}/refs/branches?pagelen=100`, 20);
+		return list.map((b) => ({ name: b.name, sha: b.target?.hash ?? "" }));
+	}
+
+	async createPullRequest(head: string, base: string, title: string, body: string): Promise<{ url: string }> {
+		const pr = await this.json<{ links?: { html?: { href?: string } } }>("POST", `${this.repoPath}/pullrequests`, {
+			title,
+			description: body,
+			source: { branch: { name: head } },
+			destination: { branch: { name: base } },
+		});
+		return { url: pr.links?.html?.href ?? "" };
 	}
 
 	async compare(base: string, head: string): Promise<Relation> {

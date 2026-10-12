@@ -8,9 +8,11 @@ import type { HostConfig } from "./gitea.ts";
 import { GitLab } from "./gitlab.ts";
 import { Bitbucket } from "./bitbucket.ts";
 import type { BlobCacheStore } from "./bitbucket.ts";
+import { Gitee } from "./gitee.ts";
+import { AzureDevOps } from "./azure.ts";
 import type { Remote } from "./remote.ts";
 
-export type HostKind = "github" | "gitlab" | "gitea" | "bitbucket";
+export type HostKind = "github" | "gitlab" | "gitea" | "bitbucket" | "gitee" | "azure";
 
 export interface HostInfo {
 	label: string;
@@ -76,12 +78,40 @@ export const HOSTS: Record<HostKind, HostInfo> = {
 			{ text: t("hs.bb3") },
 		],
 	},
+	gitee: {
+		label: "Gitee",
+		defaultApi: "https://gitee.com/api/v5",
+		get apiHint() {
+			return t("hs.geApi");
+		},
+		beta: true,
+		tokenSteps: () => [
+			{ text: t("hs.ge1"), link: { label: t("hs.ge1Link"), href: "https://gitee.com/profile/personal_access_tokens/new" } },
+			{ text: t("hs.ge2") },
+			{ text: t("hs.paste") },
+		],
+	},
+	azure: {
+		label: "Azure DevOps",
+		defaultApi: "https://dev.azure.com",
+		get apiHint() {
+			return t("hs.azApi");
+		},
+		beta: true,
+		tokenSteps: () => [
+			{ text: t("hs.az1"), link: { label: t("hs.az1Link"), href: "https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate" } },
+			{ text: t("hs.az2") },
+			{ text: t("hs.paste") },
+		],
+	},
 };
 
 export function makeRemote(kind: HostKind, cfg: () => HostConfig, cacheStore: BlobCacheStore | null = null): Remote {
 	if (kind === "bitbucket") return new Bitbucket(cfg, cacheStore);
 	if (kind === "gitlab") return new GitLab(cfg, undefined, cacheStore);
 	if (kind === "gitea") return new Gitea(cfg);
+	if (kind === "gitee") return new Gitee(cfg);
+	if (kind === "azure") return new AzureDevOps(cfg);
 	return new GitHub(cfg);
 }
 

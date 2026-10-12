@@ -4,6 +4,9 @@ import { arrayBufferToBase64 } from "obsidian";
 import type { App } from "obsidian";
 import { Codec, PLAIN } from "./codec.ts";
 import { MARKER_PATH } from "./crypto.ts";
+
+/** Repository file listing the vault's empty folders (git can't store empty folders). */
+export const FOLDERS_PATH = ".vault-sync/folders.json";
 import { NotFastForward } from "./remote.ts";
 import type { Remote, TreeEntry, Upsert } from "./remote.ts";
 import { compileGlobs } from "./glob.ts";
@@ -22,7 +25,7 @@ import type {
 	SyncState,
 	VaultSyncSettings,
 } from "./types.ts";
-import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath, pool, sleep } from "./util.ts";
+import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath, pool, portableNameProblem, sleep } from "./util.ts";
 import { parsePointer } from "./lfs.ts";
 import { configPatterns } from "./scope-config.ts";
 import { t } from "./i18n.ts";
@@ -50,6 +53,12 @@ export interface SyncHost {
 	progress?(text: string): void;
 	/** True once Obsidian unloaded the plugin (disable, update, reload): a running sync stops at the next safe point. */
 	isUnloaded?(): boolean;
+	/** True on Windows: remote names Windows can't store are skipped instead of failing. */
+	windows?: boolean;
+	/** On a conflict, push this device's version to a branch and open a pull request (instead of a copy). */
+	conflictsAsPullRequest?(): boolean;
+	/** This plugin's version, written into commit trailers. */
+	pluginVersion?: string;
 	/** Lines of the vault's .gitignore (read by the host before each sync). */
 	gitignorePatterns?(): string[];
 	/** Path/content transforms (encryption, folder mapping, LFS). Defaults to none. */
@@ -84,6 +93,12 @@ export interface ResetPlan {
 	remove: string[];
 }
 
+/** "Make the repository match this device": uploads and deletions in one forward commit. */
+export interface OverwritePlan {
+	upload: string[];
+	remove: string[];
+}
+
 export interface RestorePlan {
 	changed: string[];
 	added: string[];
@@ -103,6 +118,10 @@ export interface SyncReport {
 	skipped: string[];
 	errors: string[];
 	commit: string | null;
+	/** Pull/merge requests opened for conflicts (shared folders set to "pull request"). */
+	pullRequests?: string[];
+	/** Deletions the user chose to skip at the delete guard (the mirror must not apply them either). */
+	guardKept?: string[];
 }
 
 export interface Preview {
@@ -123,7 +142,7 @@ export class SyncCancelled extends Error {}
 function hiddenSyncable(p: string, cfg: string): boolean {
 	if (!p.startsWith(".")) return false;
 	const top = p.split("/")[0];
-	if (top === ".git" || top === ".trash" || top === cfg || /^\.obsidian/i.test(top)) return false;
+	if (top === ".git" || top === ".trash" || top === ".vault-sync" || top === cfg || /^\.obsidian/i.test(top)) return false;
 	return !p.split("/").includes(".git");
 }
 class StaleRemote extends Error {}
@@ -170,6 +189,10 @@ export class SyncEngine {
 	/** Set after repeated "behind" answers: the branch really was moved back, so treat it like a rewrite. */
 	private acceptRewind = false;
 	private pinnedRemote: Remote | null = null;
+	/** Conflicts waiting to be sent as a pull request at the end of this run. */
+	private prConflicts: { path: string; local: ArrayBuffer; remote: ArrayBuffer; remoteSha: string }[] = [];
+	/** Repository metadata files (not vault files) and their blob shas at the head last listed. */
+	private metaShas = new Map<string, string>();
 	/** The codec a running sync uses: toggling encryption mid-sync must not switch it under that sync. */
 	private pinnedCodec: Codec | null = null;
 
@@ -279,7 +302,7 @@ export class SyncEngine {
 		]);
 		const includes = (ds?.include ?? []).map((x) => x.trim()).filter((x) => x && !x.startsWith("#"));
 		// A codec that maps a folder (shared folders) only ever handles paths inside that folder.
-		const prefix = this.codec.layers.find((l) => l.id.startsWith("folder:"))?.id.slice("folder:".length);
+		const prefix = (this.codec.layers.find((l) => "folderPrefix" in l) as { folderPrefix?: string } | undefined)?.folderPrefix;
 		const included = includes.length ? compileGlobs(includes.map(sub)) : null;
 		return (p: string) => {
 			if (excluded(p)) return false;
@@ -471,6 +494,135 @@ export class SyncEngine {
 		return ds.maxDownloadMB * 1024 * 1024;
 	}
 
+	/**
+	 * Keeps empty folders across devices with a three-way comparison of folder lists (last sync, this
+	 * device, the repository). Off with encryption or a folder mapping (names would leak / not map).
+	 * Returns the new list to upload, if it changed, and records the new baseline.
+	 */
+	private async syncEmptyFolders(mode: SyncMode, foldersSha: string | null | undefined, scope: (p: string) => boolean): Promise<{ upload: string | null; base: string[] } | null> {
+		if (!this.s.keepEmptyFolders || this.codec.transformsPaths || this.opts.only || this.opts.defer?.size) return null;
+		const state = this.host.state;
+		let remote: string[] = [];
+		if (foldersSha) {
+			try {
+				const parsed = JSON.parse(new TextDecoder().decode(await this.verifiedBlob(foldersSha, FOLDERS_PATH))) as unknown;
+				if (Array.isArray(parsed)) remote = parsed.filter((x): x is string => typeof x === "string" && safePath(x));
+			} catch {
+				remote = [];
+			}
+		}
+		// Entries outside this device's scope (another device's folders) are kept as they are.
+		const base = new Set((state.baseFolders ?? []).filter(scope));
+		const local = new Set(this.io.listEmptyFolders(scope));
+		const R = new Set(remote.filter(scope));
+		const next = new Set(remote);
+		if (mode !== "pull") {
+			for (const f of local) if (!base.has(f)) next.add(f); // made empty here
+			for (const f of base) {
+				// Deleted here, or no longer empty here (its files sync on their own): drop it from the list.
+				if (!local.has(f) && R.has(f)) next.delete(f);
+			}
+		}
+		if (mode !== "push") {
+			for (const f of R) {
+				if (base.has(f) || local.has(f)) continue;
+				// A name this device can't create (Windows) is skipped; it stays in the list for the others.
+				if (this.host.windows && portableNameProblem(f)) continue;
+				try {
+					await this.io.makeFolder(f);
+				} catch (e) {
+					this.host.log(`Couldn't create empty folder ${f}: ${errMsg(e)}`);
+				}
+			}
+			for (const f of base) {
+				if (R.has(f) || !local.has(f)) continue;
+				try {
+					await this.io.removeEmptyFolder(f);
+				} catch (e) {
+					this.host.log(`Couldn't remove empty folder ${f}: ${errMsg(e)}`);
+				}
+			}
+		}
+		const sorted = (x: Iterable<string>) => [...x].sort();
+		const nextList = sorted(next);
+		const changed = JSON.stringify(nextList) !== JSON.stringify(sorted(remote));
+		// The new baseline is only stored together with the rest of the state, after the push succeeded.
+		// The baseline is what this device actually has in common with the list. In push mode, folders that
+		// exist only in the repository were never created here, so they stay out (else they'd look deleted).
+		const newBase = mode === "pull" ? sorted(R) : mode === "push" ? nextList.filter((f) => local.has(f) || base.has(f)) : nextList;
+		// Names this device skips (Windows) never exist here, so they stay out of its baseline too.
+		const here = (f: string) => scope(f) && !(this.host.windows && portableNameProblem(f));
+		return { upload: mode !== "pull" && changed ? JSON.stringify(nextList, null, 1) + "\n" : null, base: newBase.filter(here) };
+	}
+
+	/**
+	 * Pushes this device's side of each conflict to a new branch and opens a pull request; only then is
+	 * the note replaced by the repository's version (the edits live on the branch). If anything fails,
+	 * falls back to a conflict copy, so nothing is ever lost.
+	 */
+	private async sendConflictsAsPullRequest(
+		head: string,
+		remote: Map<string, RemoteEntry>,
+		device: string,
+		next: Record<string, string>,
+		report: SyncReport,
+		recordWrite: (path: string, sha: string, data?: ArrayBuffer) => Promise<void>,
+	): Promise<void> {
+		const items = this.prConflicts;
+		this.prConflicts = [];
+		const gh = this.gh;
+		const d = new Date();
+		const p2 = (n: number) => String(n).padStart(2, "0");
+		const slug = device.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "device";
+		const branch = `vault-sync/conflict-${slug}-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+		let prUrl: string | null = null;
+		try {
+			await gh.createRef(`refs/heads/${branch}`, head);
+			const tree = await gh.getCommitTree(head);
+			const upserts: Upsert[] = [];
+			for (const c of items) {
+				const raw = remote.get(c.path)?.raw ?? (await this.codec.encodePath(c.path));
+				upserts.push({ path: raw, mode: remote.get(c.path)?.mode ?? "100644", load: () => this.codec.encode(c.path, c.local) });
+			}
+			const list = items.map((c) => `- ${c.path}`).join("\n");
+			await gh.commit({ author: this.author(), branch, parent: head, parentTree: tree, message: `${device}: conflicting edits (${items.length})\n\n${list}\n\n${this.trailer(device)}`, upserts, deletes: [] });
+			prUrl = (await gh.createPullRequest!(branch, this.s.branch, `Conflicting edits from ${device}`, `${device} and another device changed the same lines. This branch holds ${device}'s version; review and merge what you need.\n\n${list}`)).url;
+		} catch (e) {
+			this.host.log(`Pull request for conflicts failed (${errMsg(e)}); keeping both versions as copies instead.`);
+		}
+		for (const c of items) {
+			try {
+				await this.assertUnchanged(c.path);
+				if (!prUrl) {
+					// Fallback: the classic conflict copy (uploaded on the next sync).
+					const copy = await this.freeCopyPath(c.path, device);
+					await this.io.write(copy, c.local);
+					report.conflictCopies.push(copy);
+				}
+				await this.io.write(c.path, c.remote);
+				await recordWrite(c.path, c.remoteSha, c.remote);
+				next[c.path] = c.remoteSha;
+			} catch (e) {
+				report.skipped.push(`${c.path} (conflict kept for the next sync: ${errMsg(e)})`);
+			}
+		}
+		if (prUrl) {
+			(report.pullRequests ??= []).push(prUrl);
+			this.host.log(`Conflicts sent as a pull request: ${prUrl}`);
+		}
+	}
+
+	/** Commit trailer: the device, and this plugin's version (the status panel warns about mixed versions). */
+	private trailer(device: string): string {
+		return `Device: ${device}` + (this.host.pluginVersion ? `\nPlugin: ${this.host.pluginVersion}` : "");
+	}
+	/** Commit author from settings, when both name and email are set. */
+	private author(): { name: string; email: string } | undefined {
+		const name = (this.s.authorName ?? "").trim();
+		const email = (this.s.authorEmail ?? "").trim();
+		return name && email ? { name, email } : undefined;
+	}
+
 	private get gh(): Remote {
 		return this.pinnedRemote ?? this.host.gh;
 	}
@@ -642,7 +794,11 @@ export class SyncEngine {
 		// Anything that changes what this device syncs (patterns, folders, limits, on-demand downloads)
 		// must trigger a full comparison, even when nothing changed on either side.
 		const scopeSig = this.scopeSignature();
-		if (!how.noFastPath && head && head === state.head && unchangedLocal && !state.dirty && state.scopeSig === scopeSig) {
+		// A folder emptied or created here is a change too (its list lives in the repository).
+		const foldersSame =
+			!this.s.keepEmptyFolders || this.codec.transformsPaths || how.mode === "pull" || this.s.mode === "pull" ||
+			JSON.stringify(this.io.listEmptyFolders(scope).sort()) === JSON.stringify([...(state.baseFolders ?? [])].filter(scope).sort());
+		if (!how.noFastPath && head && head === state.head && unchangedLocal && foldersSame && !state.dirty && state.scopeSig === scopeSig) {
 			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered, remoteOnly: state.remoteOnly ?? {}, scopeSig, unknownLocal, caseRenames: [] as [string, string][] };
 		}
 
@@ -651,6 +807,9 @@ export class SyncEngine {
 		const remoteOnly: SyncState["remoteOnly"] = {};
 		let treeSha: string | null = null;
 		let markerSha: string | null = null;
+		let foldersSha: string | null = null;
+		const winSkipped = new Set<string>();
+		this.metaShas = new Map();
 		// Local files renamed on another device by letter case only: [local path, new remote path].
 		const caseRenames: [string, string][] = [];
 		if (head) {
@@ -664,6 +823,8 @@ export class SyncEngine {
 			const listed: { raw: TreeEntry; vp: string }[] = [];
 			for (const raw of await this.gh.listTree(treeSha)) {
 				if (raw.path === MARKER_PATH) markerSha = raw.sha;
+				if (raw.path === FOLDERS_PATH) foldersSha = raw.sha;
+				if (raw.path === MARKER_PATH || raw.path === FOLDERS_PATH) this.metaShas.set(raw.path, raw.sha);
 				if (raw.type !== "blob" || (raw.mode !== "100644" && raw.mode !== "100755")) continue;
 				// Map the repository path back to a vault path (decrypt names, strip folder prefix).
 				const vp = this.codec.transformsPaths ? await this.codec.decodePath(raw.path) : raw.path;
@@ -675,6 +836,12 @@ export class SyncEngine {
 				if (!baseScope(e.path)) continue;
 				if (!safePath(e.path)) {
 					skipped.push(`${e.path} (unsafe path)`);
+					continue;
+				}
+				if (this.host.windows && portableNameProblem(e.path)) {
+					// Windows can't create this name; writing it would fail on every sync.
+					skip(e.path, "name not allowed on Windows; rename it on another device");
+					winSkipped.add(e.sha);
 					continue;
 				}
 				if ((e.size ?? 0) > maxBytes) {
@@ -719,6 +886,13 @@ export class SyncEngine {
 		// Encryption: refuse to read an encrypted repo without the key, or to mix keys.
 		if (this.host.checkEncryption && !readOnly) this.markerToAdd = await this.host.checkEncryption(head ? markerSha : null);
 		else if (this.host.checkEncryption) await this.host.checkEncryption(head ? markerSha : null);
+		// Renamed elsewhere to a name Windows can't store: the old name looks deleted remotely. Keep the
+		// note here (skip its old path too) instead of trashing it.
+		if (winSkipped.size) {
+			for (const [p, sha] of Object.entries(base)) {
+				if (!remoteShas.has(p) && winSkipped.has(sha) && !skipPaths.has(p)) skip(p, "renamed elsewhere to a name Windows can't store; kept here");
+			}
+		}
 		if (opts.only) {
 			// "Sync current file": every other path keeps its baseline and is left for a later sync.
 			for (const p of new Set([...localShas.keys(), ...remoteShas.keys(), ...Object.keys(base)])) if (!opts.only.has(p)) skipPaths.add(p);
@@ -728,7 +902,7 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames };
+		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames, foldersSha };
 	}
 
 	private async initRemote(): Promise<string> {
@@ -751,6 +925,7 @@ export class SyncEngine {
 	private async runOnce(mode: SyncMode, opts: SyncOptions): Promise<SyncReport> {
 		const host = this.host;
 		const state = host.state;
+		this.prConflicts = [];
 		this.opts = opts;
 		this.loadCodec();
 		this.markerToAdd = null;
@@ -842,6 +1017,7 @@ export class SyncEngine {
 			const choice = await host.confirmDeletes(delLocal, delRemote);
 			if (choice === "cancel") throw new SyncCancelled("Sync cancelled by delete guard.");
 			if (choice === "skip") {
+				report.guardKept = [...delLocal, ...delRemote];
 				for (const d of decisions) {
 					if ((d.kind === "delete-local" || d.kind === "delete-remote") && state.base[d.path]) next[d.path] = state.base[d.path];
 				}
@@ -994,6 +1170,12 @@ export class SyncEngine {
 			}
 		}
 
+		// ---- empty folders (.vault-sync/folders.json) ----
+		const foldersUpdate = await this.syncEmptyFolders(mode, ctx.foldersSha, ctx.scope).catch((e: unknown) => {
+			host.log(`Empty folders not synced: ${errMsg(e)}`);
+			return null;
+		});
+
 		// ---- push one atomic commit ----
 		// Content identical to GitHub (e.g. a merge that equals the remote) needs no upload.
 		for (let i = uploads.length - 1; i >= 0; i--) {
@@ -1004,9 +1186,10 @@ export class SyncEngine {
 			}
 		}
 		let newHead = ctx.head;
-		if (mode !== "pull" && (uploads.length || remoteDeletes.length) && ctx.head && ctx.treeSha) {
+		const folderUpsert = foldersUpdate?.upload ?? null;
+		if (mode !== "pull" && (uploads.length || remoteDeletes.length || folderUpsert !== null) && ctx.head && ctx.treeSha) {
 			this.checkAlive();
-			const pushed = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, remote, device, renames);
+			const pushed = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, remote, device, renames, folderUpsert);
 			newHead = pushed.sha;
 			// If the host merged us onto a newer head, our baseline is incomplete: compare fully next time.
 			if (!pushed.fastForward) state.dirty = true;
@@ -1022,6 +1205,9 @@ export class SyncEngine {
 				if (!renamedSources.has(p)) report.deletedRemote.push(p);
 			}
 		}
+
+		// ---- conflicts sent as a pull request (team shared folders) ----
+		if (this.prConflicts.length && newHead) await this.sendConflictsAsPullRequest(newHead, remote, device, next, report, recordWrite);
 
 		// Anything whose new baseline isn't what the repository holds (e.g. remote edits kept out in push
 		// mode) still has to be synced: never let the "nothing changed" fast path hide it.
@@ -1041,6 +1227,7 @@ export class SyncEngine {
 
 		state.head = newHead;
 		state.base = next;
+		if (foldersUpdate) state.baseFolders = foldersUpdate.base;
 		state.remoteOnly = ctx.remoteOnly;
 		state.scopeSig = ctx.scopeSig;
 		state.codecFingerprint = this.codec.fingerprint;
@@ -1137,6 +1324,13 @@ export class SyncEngine {
 		};
 		const keepBoth = async (uploadCopy: boolean) => {
 			await this.assertUnchanged(d.path);
+			// Team flow: this device's version goes to a branch with a pull request after the main push;
+			// the note is only replaced once that branch holds it (see sendConflictsAsPullRequest).
+			if (uploadCopy && this.gh.createPullRequest && this.host.conflictsAsPullRequest?.()) {
+				this.prConflicts.push({ path: d.path, local: localData, remote: remoteData, remoteSha: d.remote });
+				if (host.state.base[d.path]) next[d.path] = host.state.base[d.path];
+				return;
+			}
 			const copy = await this.freeCopyPath(d.path, device);
 			await this.io.write(copy, localData);
 			// Recorded like any scanned file (see renameMerge), so the copy never reads as deleted later.
@@ -1249,6 +1443,7 @@ export class SyncEngine {
 		remote: Map<string, RemoteEntry>,
 		device: string,
 		renames: string[] = [],
+		foldersJson: string | null = null,
 	): Promise<{ sha: string; fastForward: boolean }> {
 		const codec = this.codec;
 		const upserts: Upsert[] = [];
@@ -1272,17 +1467,20 @@ export class SyncEngine {
 			const content = this.markerToAdd;
 			upserts.push({ path: MARKER_PATH, mode: "100644", load: async () => encodeText(content), text: () => content });
 		}
+		if (foldersJson !== null) upserts.push({ path: FOLDERS_PATH, mode: "100644", load: async () => encodeText(foldersJson), text: () => foldersJson });
 		const rawDeletes: string[] = [];
 		for (const p of deletes) rawDeletes.push(remote.get(p)?.raw ?? (await codec.encodePath(p)));
 
 		const res = await this.gh.commit({
+			author: this.author(),
 			branch: this.s.branch,
 			parent: head,
 			parentTree: baseTree,
 			message: this.commitMessage(uploads, deletes, device, renames),
 			upserts,
 			deletes: rawDeletes,
-			existing: new Map([...remote.values()].map((e) => [e.raw, e.sha])),
+			// Metadata files too: hosts that create-or-update per file (GitLab, Gitea, Gitee, Azure) must update them.
+			existing: new Map([...[...remote.values()].map((e): [string, string] => [e.raw, e.sha]), ...this.metaShas]),
 			progress: (done, total) => this.host.progress?.(t("p.uploading", { done, total })),
 		});
 		this.host.log(`Pushed commit ${res.sha.slice(0, 7)} (${uploads.length} changed, ${deletes.length} deleted).`);
@@ -1309,10 +1507,11 @@ export class SyncEngine {
 		if (!(await confirm(foreign))) throw new SyncCancelled("Cancelled.");
 		const device = this.host.deviceName();
 		await gh.commit({
+			author: this.author(),
 			branch: this.s.branch,
 			parent: head,
 			parentTree: tree,
-			message: `${device}: remove ${foreign.length} unencrypted file(s)\n\nDevice: ${device}`,
+			message: `${device}: remove ${foreign.length} unencrypted file(s)\n\n${this.trailer(device)}`,
 			upserts: [],
 			deletes: foreign,
 		});
@@ -1432,6 +1631,47 @@ export class SyncEngine {
 	}
 
 	/**
+	 * The opposite of resetToRemote: one new commit that makes the repository equal to this device
+	 * (within scope). History is kept, nothing is force-pushed. Files only in the repository that this
+	 * device chose not to download (on demand) or kept after moving them out of scope are left alone.
+	 */
+	async overwriteRemote(confirm: (plan: OverwritePlan) => Promise<boolean>): Promise<OverwritePlan> {
+		const state = this.host.state;
+		this.loadCodec();
+		if (this.s.mode === "pull") throw new Error(t("ow.pullOnly"));
+		// Not read-only: like a normal sync, this run must publish the encryption marker if it is the first
+		// encrypted push (checkEncryption sets markerToAdd).
+		this.markerToAdd = null;
+		const ctx = await this.gather(true, {}, false, { noFastPath: true });
+		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
+		const plan: OverwritePlan = { upload: [], remove: [] };
+		for (const [p, l] of ctx.localShas) if (ctx.remoteShas.get(p) !== (ctx.cacheNext[p]?.h ?? l)) plan.upload.push(p);
+		for (const p of ctx.remoteShas.keys()) if (!ctx.localShas.has(p) && !state.keptMoved?.[p]) plan.remove.push(p);
+		if (!plan.upload.length && !plan.remove.length) return plan;
+		if (!(await confirm(plan))) throw new SyncCancelled("Cancelled.");
+		const uploads: Upload[] = [];
+		for (const p of plan.upload) uploads.push({ path: p, sha: ctx.cacheNext[p]?.h ?? ctx.localShas.get(p)!, mode: remote.get(p)?.mode ?? "100644" });
+		const device = this.host.deviceName();
+		const head = ctx.head;
+		let newHead = head;
+		if (head && ctx.treeSha) newHead = (await this.push(head, ctx.treeSha, uploads, plan.remove, remote, device)).sha;
+		else throw new Error(t("ow.emptyBranch"));
+		// The repository now equals this device: that is the new baseline.
+		const base: Record<string, string> = {};
+		for (const [p, sha] of ctx.remoteShas) if (!plan.remove.includes(p)) base[p] = sha;
+		for (const u of uploads) base[u.path] = u.sha;
+		for (const p of ctx.skipPaths) if (state.base[p]) base[p] = state.base[p];
+		state.head = newHead;
+		state.base = base;
+		state.cache = ctx.cacheNext;
+		state.lastSync = Date.now();
+		state.dirty = true; // compare fully once more, to settle line-ending and encoding details
+		await this.host.saveState();
+		this.host.log(`Repository set to this device: ${plan.upload.length} uploaded, ${plan.remove.length} removed (still in history).`);
+		return plan;
+	}
+
+	/**
 	 * Restore the whole vault, or one folder, to how it was at `commit`. Local changes are synced
 	 * first, then the restore is pushed as a new commit on top (history is never rewritten), then
 	 * pulled down to this device.
@@ -1471,10 +1711,10 @@ export class SyncEngine {
 		if (!(await confirm(plan))) throw new SyncCancelled("Restore cancelled.");
 
 		const what = prefix ? `"${prefix}"` : "vault";
-		const message = `${this.host.deviceName()}: restore ${what} to ${commit.slice(0, 7)}\n\n${plan.changed.length} restored, ${plan.added.length} brought back, ${plan.removed.length} removed\n\nDevice: ${this.host.deviceName()}`;
+		const message = `${this.host.deviceName()}: restore ${what} to ${commit.slice(0, 7)}\n\n${plan.changed.length} restored, ${plan.added.length} brought back, ${plan.removed.length} removed\n\n${this.trailer(this.host.deviceName())}`;
 		let newCommit: string;
 		try {
-			newCommit = (await gh.commit({ branch: this.s.branch, parent: head, parentTree: headTree, message, upserts, deletes })).sha;
+			newCommit = (await gh.commit({ author: this.author(), branch: this.s.branch, parent: head, parentTree: headTree, message, upserts, deletes })).sha;
 		} catch (e) {
 			if (e instanceof NotFastForward) throw new Error("Another device pushed during the restore. Nothing was changed; please try again.");
 			throw e;
@@ -1509,6 +1749,6 @@ export class SyncEngine {
 		const total = renames.length + uploads.filter((u) => !targets.has(u.path)).length + deleted;
 		const more = total - files.length;
 		const list = `${files.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- …and ${more} more` : ""}`;
-		return `${subject}\n\n${list}\n\nDevice: ${device}`;
+		return `${subject}\n\n${list}\n\n${this.trailer(device)}`;
 	}
 }

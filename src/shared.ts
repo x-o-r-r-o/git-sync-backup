@@ -95,7 +95,16 @@ export class SharedFolderHost implements SyncHost {
 	isUnloaded(): boolean {
 		return this.plugin.isUnloaded();
 	}
+	get windows(): boolean {
+		return this.plugin.windows;
+	}
+	conflictsAsPullRequest(): boolean {
+		return this.def.conflicts === "pr";
+	}
+	get pluginVersion(): string {
+		return this.plugin.pluginVersion;
+	}
 	codec(): Codec {
-		return new Codec([new PrefixLayer(this.def.folder), new LfsLayer(this.remote, (this.plugin.settings.lfsThresholdMB ?? 0) * 1024 * 1024)]);
+		return new Codec([new PrefixLayer(this.def.folder, this.def.subdir ?? ""), new LfsLayer(this.remote, (this.plugin.settings.lfsThresholdMB ?? 0) * 1024 * 1024)]);
 	}
 }

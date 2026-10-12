@@ -1,6 +1,6 @@
 # Vault Sync for Git
 
-**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Gitea or Bitbucket.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
+**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Gitea, Bitbucket, Gitee or Azure DevOps.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
 
 Your vault lives in a repository you own, on the host you choose. Every device syncs through that repository, which also keeps a full history of every change. You can switch hosts at any time in the setup wizard or settings.
 
@@ -10,6 +10,8 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 | **GitLab** (gitlab.com and self-managed) | Beta | Atomic multi-file commits with per-file locking. |
 | **Gitea / Forgejo** (including **Codeberg** and self-hosted servers) | Beta | Atomic multi-file commits with per-file locking. Needs Gitea or Forgejo 1.20+. |
 | **Bitbucket Cloud** | Beta | Multi-file commits checked against the expected parent. The first sync downloads each file once to index it. |
+| **Azure DevOps** (Services and Server) | Beta | Atomic multi-file pushes checked against the expected commit. |
+| **Gitee** | Beta | One commit per changed file (Gitee's API has no multi-file commits), each checked against the file's last version. |
 
 ## Highlights
 
@@ -21,7 +23,8 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 - **See before you sync.** Visual diffs, a review step with checkboxes, and a status panel that shows what's pending and how to fix problems.
 - **Fits every device.** Each device can sync only the folders it needs, and big attachments can stay in the repository and be downloaded on demand. Choose which parts of the settings folder sync, down to single plugins. Renames travel as renames, even when the file was also edited.
 - **A new device in seconds.** Scan a QR code or open a setup link from a device that already syncs. The plugin warns when another sync tool (Obsidian Sync, iCloud, Obsidian Git, …) is active on the same vault.
-- **Grows with you.** Share a folder with a team through its own repository, keep big media in Git LFS, and use the interface in English, Simplified Chinese, German, Spanish, French, Japanese, Korean or Portuguese.
+- **Grows with you.** Share a folder with a team through its own repository (conflicts can become pull requests), keep big media in Git LFS, mirror everything to a second repository as a backup, and use the interface in English, Simplified Chinese, German, Spanish, French, Japanese, Korean or Portuguese.
+- **You stay in control.** Pause syncing, save battery on phones, pick the branch, open any note on the host, and make the repository match this device in one forward commit when you need to.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for how this compares with other sync plugins.
 
@@ -49,7 +52,7 @@ Access renews automatically. Signing in is per device and can be undone with **S
 
 For GitLab, Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on GitHub:
 
-1. Create a **private** repository on your host, or use **Create private repo** in the settings.
+1. Create a **private** repository on your host, or use **Create private repository** in the settings.
 2. Create an access token (the wizard and settings link straight to the right page):
 
    | Host | Token |
@@ -147,7 +150,7 @@ Settings → *End-to-end encryption*, or in the setup wizard.
 Settings → *This device only*. These are stored on the device and never synced.
 
 - Sync only some folders (for example `Daily/` on your phone) and exclude more patterns.
-- **Attachments on demand:** files above a size limit stay in the repository and are listed instead of downloaded. Phones default to 25 MB. On GitLab the limit can't apply, because GitLab doesn't report file sizes. Download them from the status panel, from **Download files that aren't on this device**, or from the **Download** button that reading view shows in place of a missing embed. A downloaded file then stays in sync on that device.
+- **Attachments on demand:** files above a size limit stay in the repository and are listed instead of downloaded. Phones default to 25 MB. Download them from the status panel, from **Download files that aren't on this device**, or from the **Download** button that reading view shows in place of a missing embed. A downloaded file then stays in sync on that device.
 - **Free up space** removes local copies this device doesn't need, but only when they are identical to the repository copy.
 - Changing any of these triggers a full comparison on the next sync.
 
@@ -155,7 +158,9 @@ Settings → *This device only*. These are stored on the device and never synced
 
 Settings → *Shared folders*. Sync one folder with its own repository, for example `Work/` ↔ `team/notes`, while the rest of your vault stays in your private repository.
 
-- The folder maps to the root of the shared repository, so collaborators can use it as a normal vault or repository.
+- The folder maps to the root of the shared repository, so collaborators can use it as a normal vault or repository, or to a folder inside it (for example `docs/`), leaving the rest of the repository alone.
+- **Conflicts as pull requests** (optional, per shared folder): when two people change the same lines, this device's version goes to a new branch with a pull request (merge request on GitLab) for the team to review, instead of a conflict copy. If the pull request can't be opened, it falls back to a conflict copy.
+- Right-click a folder → **Share this folder with a repository…** to start.
 - Each shared folder has its own state, can use its own host and token, and syncs after the main vault. Its status appears in the status panel.
 - The main repository never touches shared folders.
 
@@ -164,6 +169,7 @@ Settings → *Shared folders*. Sync one folder with its own repository, for exam
 Settings → *Large file storage threshold*. Files at least this big go to the host's large-file storage, and the repository keeps a small pointer.
 
 - Works with GitHub, GitLab and Gitea through the standard LFS batch API. Bitbucket uses the same API but is untested.
+- Files the repository's `.gitattributes` marks `filter=lfs` (as set up by `git lfs track`) also go to LFS, whatever their size.
 - Every device reads LFS files correctly, even if it doesn't upload with LFS.
 - Turning it on converts existing large files on the next sync, without conflicts.
 - Check your host's LFS quota.
@@ -172,9 +178,28 @@ Settings → *Large file storage threshold*. Files at least this big go to the h
 
 The interface follows Obsidian's language. Every screen is available in English, Simplified Chinese, German, Spanish, French, Japanese, Korean and Portuguese (Brazil). Corrections are welcome, and adding a language is one file: see [docs/TRANSLATING.md](docs/TRANSLATING.md). On Obsidian 1.13+ the plugin's settings appear in Obsidian's settings search.
 
-### Other
+### Backup mirror
 
-Custom API URL for GitHub Enterprise and self-hosted servers, commit message template, and device names (shown in commits and on conflict copies).
+Settings → *Backup mirror*. Every sync also uploads this vault to a second repository, on the same or another host (for example GitHub plus Codeberg). Push only: the mirror is never read back, and it follows the main repository's scope. With end-to-end encryption on, the mirror is encrypted too. It can use its own token.
+
+### Plugins from official releases
+
+With settings-folder sync on, *Install plugin code from official releases* keeps plugin versions in sync without syncing the code itself. When another device turns on or updates a community plugin, this device offers to install that exact version from the plugin's official GitHub release, as listed in Obsidian's community directory. Nobody can push plugin code to your devices through the repository.
+
+### Control and convenience
+
+- **Pause automatic sync** (command, status panel, or Settings → *This device only*): for an hour or until you resume. Manual sync keeps working.
+- **Battery saver** (this device): no timer and no sync after each edit; syncs on startup, when you come back to Obsidian, and manually.
+- **Changes on the host**: a dot on the ribbon icon and status bar when another device pushed and this device hasn't synced yet (checked every 5 minutes while Obsidian is open).
+- **Branch picker** (Settings → Branch → *Choose*): switch branches or create one, for example a drafts branch. Switching starts a fresh comparison; nothing is deleted.
+- **Open or copy a note's link on the host**: file menu or commands; links point at the last synced commit. History pages too.
+- **Make the repository match this device**: one forward commit that uploads this device's versions and deletes what isn't here (it stays in history). The opposite of *Make this device match the repository*.
+- **Keep empty folders** across devices (off with encryption).
+- **Exclude a folder** from the file menu.
+- **Names Windows can't store** (such as `a:b.md`) are listed in the status panel; a Windows device skips them instead of failing.
+- **Plugin versions**: commits record the plugin version, and the status panel warns when devices run different versions.
+- **Copy diagnostics** for a bug report, with tokens hidden.
+- Commit author name and email, custom API URL for GitHub Enterprise and self-hosted servers, commit message template, and device names (shown in commits and on conflict copies).
 
 ## Commands
 
@@ -198,21 +223,27 @@ Custom API URL for GitHub Enterprise and self-hosted servers, commit message tem
 | Recover deleted files | Restore files deleted in earlier syncs |
 | Show sync log | Recent sync activity |
 | Open repository in browser | Open the repository on your host |
+| Open current file on the host / Open history of current file on the host / Copy link to current file on the host | The note's page, history or permalink on the host |
+| Pause or resume automatic sync / Pause automatic sync for an hour | Stop automatic syncs on this device |
+| Make the repository match this device | One forward commit that sets the repository to this device's files |
+| Copy diagnostics (for a bug report) | Versions, settings and recent log, with tokens hidden |
 | Sync current file now | Sync only the open note |
 | Add another device (setup link) | Show a QR code and setup link for a new device |
 
 ## Requirements
 
 - Obsidian 1.11.4 or newer, on desktop (Windows, macOS, Linux) or mobile (iOS, Android).
-- An account with a supported Git host and an access token.
+- An account with a supported Git host, and an access token (or Sign in with GitHub on github.com).
 
 ## Network use, accounts and privacy
 
 This section covers the disclosures Obsidian's developer policies require.
 
-- **Account required.** You need an account with a Git host (GitHub, GitLab, Bitbucket, or a Gitea / Forgejo / Codeberg server) and an access token. The plugin itself is free; no payment.
+- **Account required.** You need an account with a Git host (GitHub, GitLab, Bitbucket, Gitee, Azure DevOps, or a Gitea / Forgejo / Codeberg server) and an access token (or Sign in with GitHub). The plugin itself is free; no payment.
 - **Network use.** The plugin only connects to the Git host **you configure**, to read and write your repository:
-  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), your Gitea / Forgejo / Codeberg server, or `api.bitbucket.org`
+  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), your Gitea / Forgejo / Codeberg server, `api.bitbucket.org`, `gitee.com`, or `dev.azure.com` (or your Azure DevOps Server)
+  - the backup mirror's host, if you set up a mirror
+  - with *Install plugin code from official releases* on: `raw.githubusercontent.com` (Obsidian's community plugin list, read only when a plugin turned on elsewhere is missing or outdated here) and `github.com` (the plugin's release files, only after you confirm an install)
   - with Sign in with GitHub, also `github.com/login/device/code` and `github.com/login/oauth/access_token` to sign in and renew access
   - the same host's Git LFS endpoint, if you turn on large file storage
   - for GitHub LFS, the file-storage address GitHub returns for each upload or download
@@ -226,7 +257,7 @@ This section covers the disclosures Obsidian's developer policies require.
 - Use a token limited to the vault repository. If it leaks, the damage is limited to that one repository.
 - **Sign in with GitHub** uses the *Vault Sync for Git* GitHub App with only *Contents: read and write* on the repositories you choose. Its access token lasts 8 hours and is renewed on the device; no client secret exists in the plugin, and the author never sees your tokens or data. Revoke it any time in GitHub → Settings → Applications.
 - For pasted GitHub tokens, the status panel warns two weeks before the token expires, and a notice appears in the last week.
-- With **settings-folder sync** on, plugin code (`.obsidian/plugins/*/main.js`) syncs too. Anyone who can push to the repository can then run code on your devices. Keep the repository private and don't give others write access.
+- With **settings-folder sync** on, plugin code (`.obsidian/plugins/*/main.js`) syncs too. Anyone who can push to the repository can then run code on your devices. Keep the repository private and don't give others write access, or turn on *Install plugin code from official releases* so code only ever comes from the plugin's official release, after you confirm.
 - Remote paths are validated (no `..`, no absolute paths, no empty segments) before anything is written.
 - **Setup links** contain the host, repository, branch and sync choices, and no secrets unless you include the token, which is encrypted with a one-time code (AES-GCM, key from PBKDF2-SHA256) that is never part of the link. Opening a link only shows what it would change; nothing is applied until you confirm. Only open links you created yourself.
 - **End-to-end encryption limits.**
@@ -242,9 +273,11 @@ This section covers the disclosures Obsidian's developer policies require.
 ## Host notes
 
 - **GitHub:** stable. Every sync is one atomic commit with fast-forward-only updates.
-- **GitLab:** beta. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's API doesn't report file sizes, so the size limits can't skip large files there; use LFS for big media.
+- **GitLab:** beta. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's file listing has no sizes, so the plugin looks each new file's size up once and remembers it on the device.
 - **Gitea / Forgejo (1.20+), Codeberg:** beta. Atomic multi-file commits with per-file locking. Very large uploads are split into several commits. The server's API refuses files above its blob limit (10 MB by default); such files are reported instead of synced, so use Git LFS for them.
 - **Bitbucket Cloud:** beta. Commits carry the expected parent, so a concurrent push is detected. Bitbucket's API has no file hashes, so the plugin keeps a hash index of the repository on each device (in its plugin folder, never synced); after the first sync only changed files are fetched.
+- **Azure DevOps:** beta. Owner is `organization/project`. Every sync is one atomic push checked against the expected commit (very large uploads are split into several pushes). Use a personal access token with *Code: Read & write*.
+- **Gitee:** beta. Gitee's API writes one file per commit, so a sync of several files makes several commits (still checked against each file's last version; another device's push in between is detected). Gitee refuses large files through its API.
 - Snapshots are tags on every host. The API budget is shown for GitHub only.
 
 ## Limits
@@ -253,8 +286,10 @@ This section covers the disclosures Obsidian's developer policies require.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
 - Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. Only hidden files at the top of the vault are synced, not hidden folders inside normal folders.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
-- Sign in with GitHub works on github.com. GitLab, Gitea and Bitbucket use access tokens.
-- GitHub is tested against the real API on every release. GitLab, Gitea and Bitbucket are tested against simulated servers, which is why they are marked beta. Reports from real servers and phones are welcome.
+- Sign in with GitHub works on github.com. The other hosts use access tokens.
+- GitHub is tested against the real API on every release. GitLab, Gitea, Bitbucket, Gitee and Azure DevOps are tested against simulated servers, which is why they are marked beta. Reports from real servers and phones are welcome.
+- Conflicts as pull requests are available for shared folders. Empty folders aren't kept while end-to-end encryption is on.
+- On Windows, a note renamed elsewhere to a name Windows can't store (such as `a:b.md`) is kept under its old name here. If it was also edited at the same time, the old copy goes to the trash; the edited note stays in the repository under its new name.
 
 ## Development
 

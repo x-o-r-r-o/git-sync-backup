@@ -4,7 +4,7 @@
 import { b64decode, b64encode, compareByWalking, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import { NotFastForward } from "./remote.ts";
-import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
+import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 
 export interface HostConfig {
 	token: string;
@@ -20,7 +20,7 @@ const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
 // Shapes of the Gitea API responses this client reads (only the fields used).
 interface GtUser { login?: string; username?: string }
 interface GtRepo { private?: boolean; default_branch?: string; html_url: string; size?: number; name: string; updated_at: string; owner?: GtUser }
-interface GtBranch { commit?: { id?: string } }
+interface GtBranch { name?: string; commit?: { id?: string } }
 interface GtCommit { sha: string; commit?: { tree?: { sha: string }; message?: string; author?: { name?: string; date?: string } }; tree?: { sha: string }; created?: string; parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
 interface GtTree { tree?: TreeEntry[]; truncated?: boolean }
 interface GtBlob { content?: string }
@@ -54,6 +54,15 @@ export class Gitea implements Remote {
 	}
 	authHeader(): string {
 		return `Basic ${btoa(`oauth2:${this.cfg().token}`)}`;
+	}
+	/** Web pages: /src/{commit|branch}/<ref>/<path> and /commits/{commit|branch}/<ref>/<path>. */
+	webUrl(kind: WebLink, path: string, ref: string): string | null {
+		const c = this.cfg();
+		const repo = `${this.base.replace(/\/api\/v1$/i, "")}/${encodeURIComponent(c.owner)}/${encodeURIComponent(c.repo)}`;
+		if (kind === "repo") return repo;
+		const refPart = /^[0-9a-f]{40}$/i.test(ref) ? `commit/${ref}` : `branch/${encPath(ref)}`;
+		const tail = path ? `/${encPath(path)}` : "";
+		return `${repo}/${kind === "file" ? "src" : "commits"}/${refPart}${tail}`;
 	}
 
 	async request(method: string, path: string, body?: unknown, opts: { accept?: string; okStatuses?: number[] } = {}): Promise<HttpResponse> {
@@ -148,7 +157,8 @@ export class Gitea implements Remote {
 			part++;
 			const [subject, ...rest] = req.message.split("\n");
 			const message = part > 1 || !last ? `${subject} (part ${part})\n${rest.join("\n")}` : req.message;
-			const res = await this.request("POST", `${this.repoPath}/contents`, { branch: req.branch, message, files }, { okStatuses: [409, 422] });
+			const author = req.author ? { author: { name: req.author.name, email: req.author.email } } : {};
+			const res = await this.request("POST", `${this.repoPath}/contents`, { branch: req.branch, message, files, ...author }, { okStatuses: [409, 422] });
 			if (res.status === 409) throw new NotFastForward();
 			if (res.status === 422) {
 				const m = String((res.json as { message?: string } | null)?.message ?? "");
@@ -186,6 +196,22 @@ export class Gitea implements Remote {
 		}
 		await send(batch, true);
 		return { sha: parent, fastForward };
+	}
+
+	/** All branches (GET /repos/{owner}/{repo}/branches). Pages may be clamped: only an empty page ends the list. */
+	async listBranches(): Promise<{ name: string; sha: string }[]> {
+		const out: { name: string; sha: string }[] = [];
+		for (let page = 1; page <= 60; page++) {
+			const list = (await this.json<GtBranch[] | null>("GET", `${this.repoPath}/branches?limit=50&page=${page}`)) ?? [];
+			if (!list.length) break;
+			for (const b of list) if (b.name) out.push({ name: b.name, sha: b.commit?.id ?? "" });
+		}
+		return out;
+	}
+
+	async createPullRequest(head: string, base: string, title: string, body: string): Promise<{ url: string }> {
+		const pr = await this.json<{ html_url: string }>("POST", `${this.repoPath}/pulls`, { head, base, title, body });
+		return { url: pr.html_url };
 	}
 
 	async compare(base: string, head: string): Promise<Relation> {

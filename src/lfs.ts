@@ -6,6 +6,7 @@
 // the baseline. Large files are simply re-stored in the new form on their next upload.
 
 import type { Layer } from "./codec.ts";
+import { compileGlobs } from "./glob.ts";
 import { httpRequest, obsidianTransport } from "./http.ts";
 import type { Transport } from "./http.ts";
 import type { Remote } from "./remote.ts";
@@ -30,6 +31,18 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 const hex = (b: ArrayBuffer) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
 
+/** Patterns from .gitattributes lines that set `filter=lfs` (e.g. `*.psd filter=lfs diff=lfs merge=lfs -text`). */
+export function lfsPatternsFrom(gitattributes: string): string[] {
+	const out: string[] = [];
+	for (const raw of gitattributes.split(/\r?\n/)) {
+		const line = raw.trim();
+		if (!line || line.startsWith("#")) continue;
+		const [pattern, ...attrs] = line.split(/\s+/);
+		if (attrs.includes("filter=lfs") && !pattern.startsWith("!")) out.push(pattern);
+	}
+	return out;
+}
+
 export function pointerFor(oid: string, size: number): string {
 	return `${SPEC}\noid sha256:${oid}\nsize ${size}\n`;
 }
@@ -47,29 +60,36 @@ export class LfsLayer implements Layer {
 	readonly id = "";
 	readonly transformsContent = true;
 	get fingerprint() {
-		return this.threshold > 0 ? `lfs:${this.threshold}` : "";
+		const parts = [this.threshold > 0 ? `lfs:${this.threshold}` : "", this.patterns.length ? `attr:${this.patterns.join("|")}` : ""].filter(Boolean);
+		return parts.join(";");
 	}
 	private remote: Remote;
 	private threshold: number;
 	private transport: Transport;
+	/** Patterns marked `filter=lfs` in .gitattributes (repos set up with `git lfs track`). */
+	private patterns: string[];
+	private tracked: (path: string) => boolean;
 
-	constructor(remote: Remote, thresholdBytes: number, transport: Transport = obsidianTransport) {
+	constructor(remote: Remote, thresholdBytes: number, transport: Transport = obsidianTransport, lfsPatterns: string[] = []) {
 		this.remote = remote;
 		this.threshold = thresholdBytes;
 		this.transport = transport;
+		this.patterns = lfsPatterns;
+		this.tracked = lfsPatterns.length ? compileGlobs(lfsPatterns) : () => false;
 	}
 
-	private big(data: ArrayBuffer) {
+	private big(path: string, data: ArrayBuffer) {
+		if (data.byteLength > 0 && this.tracked(path)) return true;
 		return this.threshold > 0 && data.byteLength >= this.threshold;
 	}
 
-	async storedForm(_path: string, data: ArrayBuffer): Promise<ArrayBuffer> {
-		if (!this.big(data)) return data;
+	async storedForm(path: string, data: ArrayBuffer): Promise<ArrayBuffer> {
+		if (!this.big(path, data)) return data;
 		return encodeText(pointerFor(hex(await crypto.subtle.digest("SHA-256", data)), data.byteLength));
 	}
 
 	async encode(path: string, data: ArrayBuffer): Promise<ArrayBuffer> {
-		if (!this.big(data)) return data;
+		if (!this.big(path, data)) return data;
 		const oid = hex(await crypto.subtle.digest("SHA-256", data));
 		await this.upload(path, oid, data);
 		return encodeText(pointerFor(oid, data.byteLength));

@@ -176,6 +176,8 @@ export function clickable(el: HTMLElement, fn: () => void, label?: string) {
 	if (label) el.setAttr("aria-label", label);
 	el.onClickEvent(fn);
 	el.addEventListener("keydown", (ev) => {
+		// Keys on a button inside the row belong to that button.
+		if (ev.target !== el) return;
 		if (ev.key === "Enter" || ev.key === " ") {
 			ev.preventDefault();
 			fn();

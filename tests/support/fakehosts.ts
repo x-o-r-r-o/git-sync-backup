@@ -15,6 +15,10 @@ export class FakeRepo {
 	tags = new Map<string, string>();
 	n = 0;
 	interject: (() => void) | null = null;
+	/** Author sent with the last multi-file commit, as the host received it (undefined = none sent). */
+	lastAuthor: unknown = undefined;
+	/** Pull/merge requests opened, as the host received them. */
+	prs: Record<string, unknown>[] = [];
 
 	async blob(data: Uint8Array) {
 		const sha = await gitBlobSha(toAB(data));
@@ -79,6 +83,15 @@ export function giteaTransport(repo: FakeRepo) {
 		if (path === "/user") return ok({ login: "me" });
 		if (path === R && req.method === "GET") return ok({ private: true, default_branch: "main", html_url: "https://gitea.test/me/vault", size: 0 });
 		let m: RegExpExecArray | null;
+		if (path === `${R}/branches`) {
+			const limit = Number(q.get("limit") ?? 30);
+			const page = Number(q.get("page") ?? 1);
+			return ok([...repo.branches].slice((page - 1) * limit, page * limit).map(([name, id]) => ({ name, commit: { id } })));
+		}
+		if (path === `${R}/pulls` && req.method === "POST") {
+			repo.prs.push(body);
+			return { ...ok({ number: repo.prs.length, html_url: `https://gitea.test/me/vault/pulls/${repo.prs.length}` }), status: 201 };
+		}
 		if ((m = /^\/repos\/me\/vault\/branches\/(.+)$/.exec(path))) {
 			const h = repo.head(m[1]);
 			return h ? ok({ name: m[1], commit: { id: h } }) : err(404);
@@ -116,6 +129,7 @@ export function giteaTransport(repo: FakeRepo) {
 		if (path === `${R}/contents` && req.method === "POST") {
 			repo.interject?.();
 			repo.interject = null;
+			repo.lastAuthor = body.author;
 			const headFiles = repo.commits.get(repo.head(body.branch)!)!.files;
 			for (const f of body.files) if (f.operation !== "create" && headFiles.get(f.path) !== f.sha) return err(409, "sha mismatch");
 			const parent = repo.head(body.branch)!;
@@ -149,9 +163,19 @@ export function gitlabTransport(repo: FakeRepo, calls = { head: 0 }) {
 		const P = "/projects/me%2Fvault";
 		if (enc === "/user") return ok({ username: "me" });
 		if (enc === P) return ok({ visibility: "private", default_branch: "main", web_url: "https://gitlab.test/me/vault" });
+		if (enc === P + "/merge_requests" && req.method === "POST") {
+			repo.prs.push(body);
+			return { ...ok({ iid: repo.prs.length, web_url: `https://gitlab.test/me/vault/-/merge_requests/${repo.prs.length}` }), status: 201 };
+		}
 		if (!enc.startsWith(P + "/repository/")) return err(404, `fake gitlab: no route ${enc}`);
 		const rest = enc.slice((P + "/repository/").length);
 		let m: RegExpExecArray | null;
+		if (rest === "branches") {
+			const per = Number(q.get("per_page") ?? 20);
+			const page = Number(q.get("page") ?? 1);
+			const all = [...repo.branches];
+			return ok(all.slice((page - 1) * per, page * per).map(([name, id]) => ({ name, commit: { id } })), { "X-Next-Page": page * per < all.length ? String(page + 1) : "" });
+		}
 		if ((m = /^branches\/(.+)$/.exec(rest))) {
 			const h = repo.head(decodeURIComponent(m[1]));
 			return h ? ok({ commit: { id: h } }) : err(404);
@@ -190,6 +214,7 @@ export function gitlabTransport(repo: FakeRepo, calls = { head: 0 }) {
 		if (rest === "commits" && req.method === "POST") {
 			repo.interject?.();
 			repo.interject = null;
+			repo.lastAuthor = body.author_name || body.author_email ? { name: body.author_name, email: body.author_email } : undefined;
 			const parent = repo.head(body.branch)!;
 			const head = repo.head(body.branch)!;
 			for (const a of body.actions) {
@@ -258,6 +283,17 @@ export function bitbucketTransport(repo: FakeRepo) {
 		let m: RegExpExecArray | null;
 		if (path === "/user") return ok({ username: "me" });
 		if (path === R && req.method === "GET") return ok({ is_private: true, mainbranch: { name: "main" }, links: { html: { href: "https://bitbucket.test/me/vault" } } });
+		if (path === `${R}/refs/branches` && req.method === "GET") {
+			const per = Number(q.get("pagelen") ?? 10);
+			const page = Number(q.get("page") ?? 1);
+			const all = [...repo.branches];
+			const next = page * per < all.length ? `https://bb.test/2.0${R}/refs/branches?pagelen=${per}&page=${page + 1}` : undefined;
+			return ok({ values: all.slice((page - 1) * per, page * per).map(([name, hash]) => ({ name, target: { hash } })), ...(next ? { next } : {}) });
+		}
+		if (path === `${R}/pullrequests` && req.method === "POST") {
+			repo.prs.push(JSON.parse(req.body as string));
+			return { ...ok({ id: repo.prs.length, links: { html: { href: `https://bitbucket.test/me/vault/pull-requests/${repo.prs.length}` } } }), status: 201 };
+		}
 		if ((m = /^\/repositories\/me\/vault\/refs\/branches\/(.+)$/.exec(path))) {
 			const h = repo.head(decodeURIComponent(m[1]));
 			return h ? ok({ target: { hash: h } }) : err(404);
@@ -275,6 +311,7 @@ export function bitbucketTransport(repo: FakeRepo) {
 			const field = (n: string) => new TextDecoder().decode(parts.find((p) => p.name === n)?.value ?? new Uint8Array());
 			const branch = field("branch");
 			const parents = field("parents");
+			repo.lastAuthor = parts.some((p) => p.name === "author") ? field("author") : undefined;
 			const head = repo.head(branch);
 			if (parents && head && parents !== head) return err(409, "parent is not the branch tip");
 			const ops: { op: string; path: string; content?: string }[] = [];

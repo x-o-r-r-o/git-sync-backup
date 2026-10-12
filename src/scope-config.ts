@@ -20,6 +20,11 @@ export interface ConfigSync {
 	pluginSettings: boolean;
 	/** Per-plugin overrides by plugin id (folder name). */
 	plugins: Record<string, PluginSyncMode>;
+	/**
+	 * Install plugin code from the official community releases instead of syncing it: main.js and
+	 * styles.css stay local, manifest.json (the version) syncs, and each device installs that version.
+	 */
+	installFromReleases: boolean;
 }
 
 export const DEFAULT_CONFIG_SYNC: ConfigSync = {
@@ -31,6 +36,7 @@ export const DEFAULT_CONFIG_SYNC: ConfigSync = {
 	pluginCode: true,
 	pluginSettings: true,
 	plugins: {},
+	installFromReleases: false,
 };
 
 const CODE = ["main.js", "manifest.json", "styles.css"];
@@ -61,6 +67,7 @@ export function configPatterns(input: Partial<ConfigSync> | undefined): string[]
 	if (!c.hotkeys) out.push(cfg("hotkeys.json"));
 	if (!c.pluginList) out.push(cfg("community-plugins.json"));
 	if (!c.pluginCode) out.push(...CODE.map((f) => cfg(`plugins/*/${f}`)));
+	else if (c.installFromReleases) out.push(cfg("plugins/*/main.js"), cfg("plugins/*/styles.css"));
 	if (!c.pluginSettings) out.push(cfg("plugins/*/data.json"));
 	// Per-plugin choices come last among these, so they override the switches above.
 	for (const [id, mode] of Object.entries(c.plugins).sort(([a], [b]) => a.localeCompare(b))) {

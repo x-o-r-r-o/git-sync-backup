@@ -31,9 +31,9 @@ class FolderInputSuggest extends AbstractInputSuggest<TFolder> {
 export class SharedFolderModal extends Modal {
 	private def: SharedFolder;
 	private token = "";
-	constructor(app: App, private plugin: VaultSyncPlugin, private done: () => void) {
+	constructor(app: App, private plugin: VaultSyncPlugin, private done: () => void, folder = "") {
 		super(app);
-		this.def = { id: Math.random().toString(36).slice(2, 10), folder: "", provider: plugin.settings.provider, owner: "", repo: "", branch: "main", enabled: true };
+		this.def = { id: Math.random().toString(36).slice(2, 10), folder, provider: plugin.settings.provider, owner: "", repo: "", branch: "main", enabled: true };
 	}
 	onOpen() {
 		const { contentEl } = this;
@@ -43,7 +43,9 @@ export class SharedFolderModal extends Modal {
 			text: tr("sh.intro"),
 		});
 		new Setting(contentEl).setName(tr("sh.folder")).addText((t) => {
-			t.setPlaceholder(tr("sh.folderPlaceholder")).onChange((v) => (this.def.folder = v.trim().replace(/^\/+|\/+$/g, "")));
+			t.setPlaceholder(tr("sh.folderPlaceholder"))
+				.setValue(this.def.folder)
+				.onChange((v) => (this.def.folder = v.trim().replace(/^\/+|\/+$/g, "")));
 			new FolderInputSuggest(this.app, t.inputEl, (f) => (this.def.folder = f));
 		});
 		new Setting(contentEl).setName(tr("s.host")).addDropdown((d) => {
@@ -53,6 +55,19 @@ export class SharedFolderModal extends Modal {
 		new Setting(contentEl).setName(tr("s.owner")).setDesc(tr("sh.ownerDesc")).addText((t) => t.onChange((v) => (this.def.owner = v.trim())));
 		new Setting(contentEl).setName(tr("s.repo")).addText((t) => t.onChange((v) => (this.def.repo = v.trim())));
 		new Setting(contentEl).setName(tr("s.branch")).addText((t) => t.setValue("main").onChange((v) => (this.def.branch = v.trim() || "main")));
+		new Setting(contentEl)
+			.setName(tr("sh.subdir"))
+			.setDesc(tr("sh.subdirDesc"))
+			.addText((t) => t.onChange((v) => (this.def.subdir = v.trim().replace(/^\/+|\/+$/g, "") || undefined)));
+		new Setting(contentEl)
+			.setName(tr("sh.conflicts"))
+			.setDesc(tr("sh.conflictsDesc"))
+			.addDropdown((d) =>
+				d
+					.addOptions({ copy: tr("sh.conflictsCopy"), pr: tr("sh.conflictsPr") })
+					.setValue(this.def.conflicts ?? "copy")
+					.onChange((v) => (this.def.conflicts = v === "pr" ? "pr" : undefined)),
+			);
 		new Setting(contentEl)
 			.setName(tr("sh.token"))
 			.setDesc(tr("sh.tokenDesc"))

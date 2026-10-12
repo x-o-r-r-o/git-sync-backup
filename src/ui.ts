@@ -200,6 +200,9 @@ export class ReviewModal extends Modal {
 		const footer = new Setting(contentEl.createDiv());
 		const syncBtnRef: { set?: (n: number) => void } = {};
 		const refresh = () => syncBtnRef.set?.([...this.checked.values()].filter(Boolean).length);
+		// Long lists (first sync, imports): filter by kind and search by name. Hidden rows keep their tick.
+		const filterBar = this.decisions.length > 8 ? contentEl.createDiv({ cls: "vsg-review-filter" }) : null;
+		const shown: { h: HTMLElement; ul: HTMLElement; kind: Decision["kind"]; rows: { el: HTMLElement; path: string }[] }[] = [];
 
 		for (const [title, kind] of groups()) {
 			const items = this.decisions.filter((d) => d.kind === kind);
@@ -211,10 +214,12 @@ export class ReviewModal extends Modal {
 			all.toggleClass("vsg-hidden", preview);
 			h.createSpan({ text: ` ${title} (${items.length})`, cls: "vsg-review-title" });
 			const ul = contentEl.createDiv({ cls: "vsg-review-list" });
+			shown.push({ h, ul, kind, rows: [] });
 			const boxes: HTMLInputElement[] = [];
 			for (const d of items) {
 				this.checked.set(d.path, true);
 				const row = ul.createDiv({ cls: "vsg-review-row" });
+				shown[shown.length - 1]?.rows.push({ el: row, path: ("from" in d ? `${d.from} ` : "") + d.path });
 				const cb = row.createEl("input", { type: "checkbox" });
 				cb.setAttr("aria-label", tr("u.includeFile", { path: d.path }));
 				cb.checked = true;
@@ -236,6 +241,45 @@ export class ReviewModal extends Modal {
 				});
 				refresh();
 			};
+		}
+		if (filterBar) {
+			const kinds: Record<string, Decision["kind"][]> = {
+				all: [],
+				up: ["upload"],
+				down: ["download", "move-local", "adopt-remote-edit"],
+				del: ["delete-local", "delete-remote"],
+				conflict: ["conflict", "rename-merge"],
+			};
+			let current = "all";
+			const search = filterBar.createEl("input", { type: "search", cls: "vsg-review-search", placeholder: tr("u.filterSearch") });
+			const chips = filterBar.createDiv({ cls: "vsg-chips" });
+			const apply = () => {
+				const q = search.value.toLowerCase();
+				for (const g of shown) {
+					const kindOk = current === "all" || kinds[current].includes(g.kind);
+					let any = false;
+					for (const r of g.rows) {
+						const ok = kindOk && (!q || r.path.toLowerCase().includes(q));
+						r.el.toggleClass("vsg-hidden", !ok);
+						any ||= ok;
+					}
+					g.h.toggleClass("vsg-hidden", !any);
+					g.ul.toggleClass("vsg-hidden", !any);
+				}
+			};
+			const labels: [string, string][] = [["all", tr("u.filterAll")], ["up", tr("u.filterUploads")], ["down", tr("u.filterDownloads")], ["del", tr("u.filterDeletes")], ["conflict", tr("u.filterConflicts")]];
+			for (const [key, label] of labels) {
+				const n = key === "all" ? this.decisions.length : this.decisions.filter((d) => kinds[key].includes(d.kind)).length;
+				if (key !== "all" && !n) continue;
+				const chip = chips.createEl("button", { text: `${label} (${n})`, cls: key === current ? "vsg-chip is-active" : "vsg-chip" });
+				chip.onClickEvent(() => {
+					current = key;
+					chips.querySelectorAll(".vsg-chip").forEach((c) => c.removeClass("is-active"));
+					chip.addClass("is-active");
+					apply();
+				});
+			}
+			search.oninput = apply;
 		}
 		if (this.skipped.length) {
 			contentEl.createEl("h4", { text: tr("u.skipped", { n: this.skipped.length }) });

@@ -116,3 +116,17 @@ test("globs: negation (last match wins), literal brackets, escapes", () => {
 	assert.equal(forced("secret/a.md"), true);
 	assert.equal(compileGlobs(["a\\n.md"])("an.md"), true, "escaped letters stay literal");
 });
+
+test("portable names and secret redaction", async () => {
+	const { portableNameProblem, redactSecrets } = await import("../src/util.ts");
+	assert.equal(portableNameProblem("Notes/plan.md"), null);
+	assert.equal(portableNameProblem("Notes/a:b.md"), "char");
+	assert.equal(portableNameProblem("Notes/what?.md"), "char");
+	assert.equal(portableNameProblem("Folder./x.md"), "end");
+	assert.equal(portableNameProblem("x/name .md "), "end");
+	assert.equal(portableNameProblem("CON.md"), "reserved");
+	assert.equal(portableNameProblem("lpt1"), "reserved");
+	assert.equal(portableNameProblem("console.md"), null);
+	const r = redactSecrets("Authorization: Bearer abcdefghijklmnop ghp_ABCDEFGHIJKLMNOPQRSTUV glpat-xxxxxxxxxxxxxxx ?access_token=s3cr3t&x=1");
+	assert.ok(!/abcdefghijklmnop|ghp_ABC|glpat-x|s3cr3t/.test(r), r);
+});

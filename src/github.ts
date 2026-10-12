@@ -5,7 +5,7 @@ import { arrayBufferToBase64, requestUrl } from "obsidian";
 import type { RequestUrlResponse } from "obsidian";
 import { webBase } from "./auth.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
-import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
+import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { pool, sleep } from "./util.ts";
 
 export type { CommitInfo, TreeEntry } from "./remote.ts";
@@ -63,6 +63,7 @@ interface GhTree { tree: TreeEntry[]; truncated: boolean }
 interface GhCommitListItem { sha: string; commit: { message: string; author?: { date?: string; name?: string }; committer?: { date?: string } } }
 interface GhCommitDetail { parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
 interface GhTag { name: string; commit: { sha: string } }
+interface GhBranch { name: string; commit: { sha: string } }
 interface GhRateLimit { resources: { core: { limit: number; remaining: number; reset: number } } }
 
 function safeJson(res: RequestUrlResponse): { message?: string } | null {
@@ -144,7 +145,7 @@ export class GitHub implements Remote {
 			if (chunk.length >= TREE_CHUNK_ENTRIES) await flush();
 		}
 		await flush();
-		const sha = await this.createCommit(req.message, tree, [req.parent]);
+		const sha = await this.createCommit(req.message, tree, [req.parent], req.author);
 		if (!(await this.updateRef(req.branch, sha))) throw new NotFastForward();
 		return { sha, fastForward: true, blobShas };
 	}
@@ -391,8 +392,10 @@ export class GitHub implements Remote {
 		return (await this.json<GhSha>("POST", `${this.repoPath}/git/trees`, body)).sha;
 	}
 
-	async createCommit(message: string, tree: string, parents: string[]): Promise<string> {
-		return (await this.json<GhSha>("POST", `${this.repoPath}/git/commits`, { message, tree, parents })).sha;
+	async createCommit(message: string, tree: string, parents: string[], author?: { name: string; email: string }): Promise<string> {
+		const body: Record<string, unknown> = { message, tree, parents };
+		if (author) body.author = { name: author.name, email: author.email, date: new Date().toISOString() };
+		return (await this.json<GhSha>("POST", `${this.repoPath}/git/commits`, body)).sha;
 	}
 
 	/** Creates the first commit in an empty repo (the Git Data API refuses to work on empty repos). */
@@ -413,6 +416,30 @@ export class GitHub implements Remote {
 			if (list.length < 100) break;
 		}
 		return out;
+	}
+
+	/** All branches (GET /repos/{owner}/{repo}/branches), up to 3000. */
+	async listBranches(): Promise<{ name: string; sha: string }[]> {
+		const out: { name: string; sha: string }[] = [];
+		for (let page = 1; page <= 30; page++) {
+			const list = await this.json<GhBranch[]>("GET", `${this.repoPath}/branches?per_page=100&page=${page}`);
+			for (const b of list) out.push({ name: b.name, sha: b.commit.sha });
+			if (list.length < 100) break;
+		}
+		return out;
+	}
+
+	webUrl(kind: WebLink, path: string, ref: string): string | null {
+		const c = this.cfg();
+		const repo = `${webBase(c.apiBase)}/${encodeURIComponent(c.owner)}/${encodeURIComponent(c.repo)}`;
+		if (kind === "repo") return repo;
+		const tail = path ? `/${encPath(path)}` : "";
+		return `${repo}/${kind === "file" ? "blob" : "commits"}/${encPath(ref)}${tail}`;
+	}
+
+	async createPullRequest(head: string, base: string, title: string, body: string): Promise<{ url: string }> {
+		const pr = await this.json<{ html_url: string }>("POST", `${this.repoPath}/pulls`, { title, head, base, body });
+		return { url: pr.html_url };
 	}
 
 	// ---- history ----

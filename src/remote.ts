@@ -37,7 +37,12 @@ export interface CommitRequest {
 	existing?: Map<string, string>;
 	/** Called as upload batches complete. */
 	progress?: (done: number, total: number) => void;
+	/** Commit author (the host's default identity when absent). */
+	author?: { name: string; email: string };
 }
+
+/** Kind of web page for a file on the host. */
+export type WebLink = "file" | "history" | "repo";
 
 export interface CommitResult {
 	sha: string;
@@ -64,7 +69,7 @@ export class RemoteError extends Error {
 }
 
 export interface Remote {
-	readonly kind: "github" | "gitea" | "gitlab" | "bitbucket";
+	readonly kind: "github" | "gitea" | "gitlab" | "bitbucket" | "gitee" | "azure";
 	readonly label: string;
 
 	getUser(): Promise<{ login: string }>;
@@ -98,4 +103,13 @@ export interface Remote {
 	authHeader(): string;
 	/** When the token expires (epoch ms), if the host reports it; null = unknown or never. */
 	tokenExpiresAt?(): number | null;
+	/** Branches of the repository (name → head commit). */
+	listBranches?(): Promise<{ name: string; sha: string }[]>;
+	/**
+	 * Web address of a repository path: the file at `ref` (a commit sha or branch), its history on
+	 * branch `ref`, or the repository itself (path ignored). Null when the host has no such page.
+	 */
+	webUrl?(kind: WebLink, path: string, ref: string): string | null;
+	/** Opens a pull/merge request from branch `head` into `base`; returns its web address. */
+	createPullRequest?(head: string, base: string, title: string, body: string): Promise<{ url: string }>;
 }

@@ -78,6 +78,7 @@ export class FakeFS {
 			},
 			trashLocal: async (p: string) => {
 				fs.files.delete(p);
+				fs.dirs.delete(p);
 				fs.trash.push(p);
 			},
 			read: async (p: string) => {
@@ -93,6 +94,19 @@ export class FakeFS {
 				adapter,
 				getName: () => "Test",
 				getFiles: () => [...fs.files.keys()].filter((p) => !hidden(p)).map((p) => fs.tfile(p)),
+				// Folders (explicit ones and those implied by files), each with its direct children.
+				getAllLoadedFiles: () => {
+					const dirs = new Set<string>(fs.dirs);
+					for (const f of fs.files.keys()) {
+						const parts = f.split("/");
+						for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+					}
+					return [...dirs].filter((d) => !hidden(d)).map((d) => {
+						const folder = new TFolder(d) as TFolder & { children: unknown[] };
+						folder.children = [...fs.files.keys(), ...dirs].filter((p) => p !== d && p.startsWith(d + "/") && !p.slice(d.length + 1).includes("/"));
+						return folder;
+					});
+				},
 				getAbstractFileByPath: (p: string) => {
 					if (hidden(p)) return null;
 					if (fs.files.has(p)) return fs.tfile(p);

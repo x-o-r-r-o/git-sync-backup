@@ -5,14 +5,15 @@ import { b64encode, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward } from "./remote.ts";
-import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
+import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { gitBlobSha, pool } from "./util.ts";
 
 const BATCH_BYTES = 8 * 1024 * 1024;
+const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
 
 // Shapes of the GitLab API responses this client reads (only the fields used).
 interface GlProject { visibility?: string; default_branch?: string; web_url: string; path: string; path_with_namespace: string; last_activity_at: string; namespace?: { full_path?: string } }
-interface GlBranch { commit?: { id?: string } }
+interface GlBranch { name?: string; commit?: { id?: string } }
 interface GlTreeItem { path: string; mode: string; type: "blob" | "tree" | "commit"; id: string }
 interface GlCommit { id: string; message?: string; title?: string; authored_date?: string; created_at?: string; author_name?: string; parent_ids?: string[] }
 interface GlDiff { new_path: string; old_path: string; new_file?: boolean; deleted_file?: boolean }
@@ -60,6 +61,14 @@ export class GitLab implements Remote {
 	gitUrl(): string {
 		const c = this.cfg();
 		return `${this.base.replace(/\/api\/v4$/i, "")}/${c.owner}/${c.repo}.git`;
+	}
+	/** Web address of a project page: owner may be "group/subgroup". */
+	webUrl(kind: WebLink, path: string, ref: string): string | null {
+		const c = this.cfg();
+		const project = `${this.base.replace(/\/api\/v4$/i, "")}/${encPath(c.owner)}/${encodeURIComponent(c.repo)}`;
+		if (kind === "repo") return project;
+		const tail = path ? `/${encPath(path)}` : "";
+		return `${project}/-/${kind === "file" ? "blob" : "commits"}/${encPath(ref)}${tail}`;
 	}
 	authHeader(): string {
 		return `Basic ${btoa(`oauth2:${this.cfg().token}`)}`;
@@ -198,7 +207,8 @@ export class GitLab implements Remote {
 			part++;
 			const [subject, ...rest] = req.message.split("\n");
 			const commit_message = part > 1 || !last ? `${subject} (part ${part})\n${rest.join("\n")}` : req.message;
-			const res = await this.request("POST", `${this.project}/repository/commits`, { branch: req.branch, commit_message, actions }, { okStatuses: [400, 409] });
+			const author = req.author ? { author_name: req.author.name, author_email: req.author.email } : {};
+			const res = await this.request("POST", `${this.project}/repository/commits`, { branch: req.branch, commit_message, actions, ...author }, { okStatuses: [400, 409] });
 			if (res.status === 409) throw new NotFastForward();
 			if (res.status === 400) {
 				const m = String((res.json as { message?: string } | null)?.message ?? "");
@@ -230,6 +240,24 @@ export class GitLab implements Remote {
 		for (const p of req.deletes) if (existing.has(p)) batch.push({ action: "delete", file_path: p, last_commit_id: await lastCommit(p) });
 		await send(batch, true);
 		return { sha: parent, fastForward };
+	}
+
+	/** All branches (GET /projects/:id/repository/branches), up to 3000. */
+	async listBranches(): Promise<{ name: string; sha: string }[]> {
+		const out: { name: string; sha: string }[] = [];
+		for (let page = 1; page <= 30; page++) {
+			const res = await this.request("GET", `${this.project}/repository/branches?per_page=100&page=${page}`);
+			const list = (res.json as GlBranch[] | null) ?? [];
+			for (const b of list) if (b.name) out.push({ name: b.name, sha: b.commit?.id ?? "" });
+			const next = header(res, "x-next-page");
+			if (!list.length || (next !== undefined ? !next : list.length < 100)) break;
+		}
+		return out;
+	}
+
+	async createPullRequest(head: string, base: string, title: string, body: string): Promise<{ url: string }> {
+		const mr = await this.json<{ web_url: string }>("POST", `${this.project}/merge_requests`, { source_branch: head, target_branch: base, title, description: body });
+		return { url: mr.web_url };
 	}
 
 	async compare(base: string, head: string): Promise<Relation> {

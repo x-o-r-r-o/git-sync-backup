@@ -322,3 +322,204 @@ test("case rename never strands or overwrites a separate file with the new spell
 	const texts = names.map((p) => b.fs.text(p));
 	assert.ok(texts.includes("a different file on B\n") && texts.includes("lower\n"), "both contents kept");
 });
+
+test("shared folder mapped to a subfolder of the repository: only that subfolder is touched", async () => {
+	const { Codec, PrefixLayer } = await import("../src/codec.ts");
+	const gh = new FakeGitHub();
+	const owner = device("Owner", gh);
+	owner.fs.put("README.md", "repo readme\n");
+	owner.fs.put("docs/guide.md", "guide\n");
+	await owner.sync();
+	const a = device("A", gh);
+	a.host.codec = () => new Codec([new PrefixLayer("Work", "docs")]);
+	a.host.deviceScope = () => ({ include: ["/Work/"], exclude: [], maxDownloadMB: 0 });
+	a.fs.put("Private.md", "never shared\n");
+	await a.sync();
+	assert.equal(a.fs.text("Work/guide.md"), "guide\n", "docs/ appears as Work/");
+	assert.ok(!a.fs.files.has("Work/README.md") && !a.fs.files.has("README.md"), "files outside docs/ are ignored");
+	a.fs.put("Work/new.md", "new\n");
+	await a.sync();
+	const remote = gh.headFiles();
+	assert.equal(remote.get("docs/new.md"), "new\n");
+	assert.equal(remote.get("README.md"), "repo readme\n", "untouched");
+	assert.ok(!remote.has("Private.md") && !remote.has("Work/new.md"));
+});
+
+test("empty folders travel between devices, and are removed only while still empty", async () => {
+	const gh = new FakeGitHub();
+	const a = device("A", gh);
+	const b = device("B", gh);
+	a.fs.put("note.md", "n\n");
+	await a.sync();
+	await b.sync();
+	a.fs.dirs.add("Projects/Empty");
+	await a.sync();
+	assert.match(gh.headFiles().get(".vault-sync/folders.json") ?? "", /Projects\/Empty/);
+	await b.sync();
+	assert.ok(b.fs.dirs.has("Projects/Empty"), "created on the other device");
+	assert.equal((await b.sync()).upToDate, true, "and then nothing to do");
+
+	// A deletes the folder: B removes its empty copy.
+	a.fs.dirs.delete("Projects/Empty");
+	await a.sync();
+	assert.doesNotMatch(gh.headFiles().get(".vault-sync/folders.json") ?? "", /Projects\/Empty/);
+	await b.sync();
+	assert.ok(!b.fs.dirs.has("Projects/Empty"), "removed while empty");
+
+	// A folder that gained a file on B is never removed.
+	a.fs.dirs.add("Keep");
+	await a.sync();
+	await b.sync();
+	b.fs.put("Keep/new.md", "x\n");
+	a.fs.dirs.delete("Keep");
+	await a.sync();
+	await b.sync();
+	assert.equal(b.fs.text("Keep/new.md"), "x\n");
+});
+
+test("make the repository match this device: one forward commit, on-demand files untouched", async () => {
+	const gh = new FakeGitHub();
+	const a = device("A", gh);
+	const b = device("B", gh);
+	a.fs.put("keep.md", "same\n");
+	a.fs.put("edit.md", "old\n");
+	a.fs.put("gone.md", "remove me\n");
+	a.fs.put("big.bin", "x".repeat(4000));
+	await a.sync();
+	b.host.deviceScope = () => ({ include: [], exclude: [], maxDownloadMB: 0.001 });
+	await b.sync(); // big.bin stays on demand on B
+	b.fs.put("edit.md", "B's version\n");
+	b.fs.files.delete("gone.md");
+	b.fs.put("new.md", "new\n");
+	const before = gh.refs.get("main");
+	const plan = await b.engine.overwriteRemote(async () => true);
+	assert.deepEqual(plan.upload.sort(), ["edit.md", "new.md"]);
+	assert.deepEqual(plan.remove, ["gone.md"]);
+	const files = gh.headFiles();
+	assert.equal(files.get("edit.md"), "B's version\n");
+	assert.ok(!files.has("gone.md") && files.has("new.md") && files.has("keep.md"));
+	assert.ok(files.has("big.bin"), "on-demand file left alone");
+	assert.notEqual(gh.refs.get("main"), before);
+	assert.deepEqual((await b.engine.overwriteRemote(async () => true)).upload, [], "nothing left to do");
+	await a.sync();
+	assert.equal(a.fs.text("edit.md"), "B's version\n");
+	assert.ok(!a.fs.files.has("gone.md"));
+});
+
+test("team flow: a conflict goes to a branch with a pull request instead of a copy", async () => {
+	const gh = new FakeGitHub() as FakeGitHub & { createPullRequest?: unknown };
+	const prs: { head: string; base: string; title: string }[] = [];
+	gh.createPullRequest = async (head: string, base: string, title: string) => {
+		prs.push({ head, base, title });
+		return { url: "https://host.test/pr/1" };
+	};
+	const a = device("A", gh);
+	const b = device("B", gh);
+	b.host.conflictsAsPullRequest = () => true;
+	a.fs.put("team.md", "same\n");
+	await a.sync();
+	await b.sync();
+	a.fs.put("team.md", "from A\n");
+	b.fs.put("team.md", "from B\n");
+	await a.sync();
+	const r = await b.sync();
+	assert.deepEqual(r.conflictCopies, [], "no conflict copy");
+	assert.deepEqual(r.pullRequests, ["https://host.test/pr/1"]);
+	assert.equal(prs.length, 1);
+	assert.equal(prs[0].base, "main");
+	assert.match(prs[0].head, /^vault-sync\/conflict-b-/);
+	// The branch holds B's version; main and B's note hold A's.
+	const branchHead = gh.refs.get(prs[0].head)!;
+	const branchTree = gh.trees.get(gh.commits.get(branchHead)!.tree)!;
+	assert.equal(new TextDecoder().decode(gh.blobs.get(branchTree.get("team.md")!.sha)!), "from B\n");
+	assert.equal(b.fs.text("team.md"), "from A\n");
+	assert.equal(gh.headFiles().get("team.md"), "from A\n");
+	assert.equal((await b.sync()).upToDate, true);
+
+	// When the pull request can't be opened, it falls back to a conflict copy (nothing lost).
+	gh.createPullRequest = async () => {
+		throw new Error("no permission");
+	};
+	a.fs.put("team.md", "A again\n");
+	b.fs.put("team.md", "B again\n");
+	await a.sync();
+	const r2 = await b.sync();
+	assert.equal(r2.conflictCopies.length, 1);
+	assert.equal(b.fs.text(r2.conflictCopies[0]), "B again\n");
+});
+
+test("Windows: a rename elsewhere to a name Windows can't store keeps the note here", async () => {
+	const gh = new FakeGitHub();
+	const mac = device("Mac", gh);
+	const win = device("Win", gh);
+	win.host.windows = true;
+	mac.fs.put("Meeting.md", "notes\n");
+	await mac.sync();
+	await win.sync();
+	mac.fs.files.set("Meeting: notes.md", mac.fs.files.get("Meeting.md")!);
+	mac.fs.files.delete("Meeting.md");
+	await mac.sync();
+	const r = await win.sync();
+	assert.deepEqual(r.deletedLocal, [], "not trashed");
+	assert.equal(win.fs.text("Meeting.md"), "notes\n");
+	assert.ok(r.skipped.some((x) => x.startsWith("Meeting: notes.md")));
+	assert.ok(gh.headFiles().has("Meeting: notes.md"), "the repository keeps the new name");
+	assert.ok(!gh.headFiles().has("Meeting.md"), "and Windows doesn't push the old one back");
+});
+
+test("empty folders: the list survives a failed push, can be updated on create-or-update hosts, and keeps other devices' entries", async () => {
+	const gh = new FakeGitHub();
+	const a = device("A", gh);
+	a.fs.put("n.md", "n\n");
+	a.fs.dirs.add("One");
+	await a.sync();
+	// A push that fails once (another device pushed): the new folder must still be listed afterwards.
+	a.fs.dirs.add("Two");
+	const realCommit = gh.commit.bind(gh);
+	let failOnce = true;
+	gh.commit = async (req: Parameters<typeof realCommit>[0]) => {
+		if (failOnce) {
+			failOnce = false;
+			throw new Error("network down");
+		}
+		assert.ok((req.existing as Map<string, string>).has(".vault-sync/folders.json"), "the list is known to exist (update, not create)");
+		return realCommit(req);
+	};
+	await a.sync().catch(() => undefined);
+	await a.sync();
+	assert.match(gh.headFiles().get(".vault-sync/folders.json") ?? "", /"Two"/);
+	assert.ok(a.fs.dirs.has("Two"), "not removed locally after the failed attempt");
+	// A phone that only syncs Notes/ must not drop A's folders from the list.
+	gh.commit = realCommit;
+	const phone = device("Phone", gh);
+	phone.host.deviceScope = () => ({ include: ["Notes/"], exclude: [], maxDownloadMB: 0 });
+	phone.fs.dirs.add("Notes/Empty");
+	await phone.sync();
+	const list = gh.headFiles().get(".vault-sync/folders.json") ?? "";
+	assert.match(list, /"One"/);
+	assert.match(list, /"Notes\/Empty"/);
+});
+
+test("empty folders: a push-only device keeps other devices' folders; a name Windows can't create doesn't block anything", async () => {
+	const gh = new FakeGitHub();
+	const a = device("A", gh);
+	a.fs.put("n.md", "n\n");
+	a.fs.dirs.add("FromA");
+	a.fs.dirs.add("Q?");
+	await a.sync();
+	const backup = device("Backup", gh);
+	await backup.sync("push");
+	backup.fs.put("b.md", "b\n");
+	await backup.sync("push");
+	await backup.sync("push");
+	const list = gh.headFiles().get(".vault-sync/folders.json") ?? "";
+	assert.match(list, /"FromA"/, "a push-only device never drops folders it doesn't have");
+
+	const win = device("Win", gh);
+	win.host.windows = true;
+	win.fs.dirs.add("Mine");
+	await win.sync();
+	assert.ok(win.fs.dirs.has("FromA") && !win.fs.dirs.has("Q?"), "creatable folders made, the other skipped");
+	assert.match(gh.headFiles().get(".vault-sync/folders.json") ?? "", /"Mine"/, "its own folders still uploaded");
+	assert.equal((await win.sync()).upToDate, true, "and the quick path works again");
+});

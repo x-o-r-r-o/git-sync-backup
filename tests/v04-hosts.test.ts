@@ -39,7 +39,7 @@ for (const h of hosts) {
 		assert.deepEqual(ra.renamed, ["Notes/two.md → Archive/two.md"]);
 		assert.deepEqual(ra.deletedLocal, ["Old/gone.md"]);
 		assert.equal(a.fs.text("Notes/one.md"), "hello from A\n\nworld from B\n");
-		assert.deepEqual([...repo.files().keys()].sort(), [".gitattributes", "Archive/two.md", "Notes/one.md", "img/x.png"]);
+		assert.deepEqual([...repo.files().keys()].filter((p) => !p.startsWith(".vault-sync/")).sort(), [".gitattributes", "Archive/two.md", "Notes/one.md", "img/x.png"]);
 	});
 
 	test(`${h.name}: concurrent push is detected and retried`, async () => {

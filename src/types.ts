@@ -12,8 +12,10 @@ export type NoticeLevel = "auto" | "all" | "changes" | "errors" | "silent";
 // Stored in data.json. Safe to sync between devices: no secrets in here.
 // The token, API base URL and device name live in device-local storage instead, so a
 // synced data.json can never redirect a device's token to another server.
+export type Provider = "github" | "gitlab" | "gitea" | "bitbucket" | "gitee" | "azure";
+
 export interface VaultSyncSettings {
-	provider: "github" | "gitlab" | "gitea" | "bitbucket";
+	provider: Provider;
 	owner: string;
 	repo: string;
 	branch: string;
@@ -50,6 +52,13 @@ export interface VaultSyncSettings {
 	dailySnapshot: boolean;
 
 	commitTemplate: string;
+	/** Commit author (empty = the host's default identity for the token). */
+	authorName: string;
+	authorEmail: string;
+	/** Keep empty folders across devices (stored in .vault-sync/folders.json; off with encryption). */
+	keepEmptyFolders: boolean;
+	/** Backup mirror: every sync also uploads this vault to a second repository (push only). */
+	mirror: MirrorTarget | null;
 	noticeLevel: NoticeLevel;
 	/** Sync when a note is opened (at most every 30 seconds), to fetch its latest version. */
 	syncOnOpen: boolean;
@@ -60,10 +69,22 @@ export interface VaultSyncSettings {
 	sharedFolders: SharedFolder[];
 }
 
+export interface MirrorTarget {
+	enabled: boolean;
+	provider: Provider;
+	owner: string;
+	repo: string;
+	branch: string;
+}
+
 export interface SharedFolder {
 	id: string;
 	folder: string;
-	provider: "github" | "gitlab" | "gitea" | "bitbucket";
+	/** Folder inside the repository the shared folder maps to ("" = the repository root). */
+	subdir?: string;
+	/** On a conflict: keep both versions (copy), or push this device's version to a branch and open a pull request. */
+	conflicts?: "copy" | "pr";
+	provider: Provider;
 	owner: string;
 	repo: string;
 	branch: string;
@@ -114,6 +135,10 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	dailySnapshot: false,
 
 	commitTemplate: "{{device}}: {{summary}}",
+	authorName: "",
+	authorEmail: "",
+	keepEmptyFolders: true,
+	mirror: null,
 	noticeLevel: "auto",
 	syncOnOpen: false,
 	explorerBadges: true,
@@ -144,6 +169,8 @@ export interface SyncState {
 	 * path → blob sha. Their repository copy is kept, without rescanning on every sync.
 	 */
 	keptMoved?: Record<string, string>;
+	/** Empty folders as of the last sync (three-way base for .vault-sync/folders.json). */
+	baseFolders?: string[];
 	/** Remote files this device chose not to download (over its size limit), available on demand. */
 	remoteOnly: Record<string, { sha: string; size: number }>;
 	lastSync: number;
