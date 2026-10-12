@@ -106,6 +106,11 @@ export interface Preview {
 
 export class SyncCancelled extends Error {}
 class StaleRemote extends Error {}
+class EditedDuringSync extends Error {
+	constructor(path: string) {
+		super(`${path} was edited during sync`);
+	}
+}
 
 interface RemoteEntry {
 	sha: string;
@@ -140,14 +145,18 @@ export class SyncEngine {
 	private opts: SyncOptions = {};
 	private codec: Codec = PLAIN;
 	private markerToAdd: string | null = null;
+	private assertUnchanged: (path: string) => Promise<void> = async () => {};
 
 	constructor(host: SyncHost) {
 		this.host = host;
 		this.io = new VaultIO(host.app);
 	}
 
-	private get s() {
-		return this.host.settings;
+	// Settings are snapshotted for the duration of a sync, so edits in the settings tab can't switch
+	// repository or branch halfway through.
+	private snap: VaultSyncSettings | null = null;
+	private get s(): VaultSyncSettings {
+		return this.snap ?? this.host.settings;
 	}
 
 	private get repoKey() {
@@ -199,6 +208,7 @@ export class SyncEngine {
 
 	/** Which paths this plugin manages. With `device` (default) the device-local scope applies too. */
 	buildScope(device = true): (path: string) => boolean {
+		this.loadCodec();
 		const cfg = this.host.app.vault.configDir;
 		const sub = (l: string) => l.split("{config}").join(cfg);
 		const patterns = this.s.excludePatterns.split("\n").map(sub);
@@ -210,12 +220,15 @@ export class SyncEngine {
 			".git/",
 			this.host.stateFilePath,
 			// Every engine's state files live in the plugin folder.
-			this.host.stateFilePath.replace(/[^/]+$/, "sync-state*.json"),
+			this.host.stateFilePath.replace(/[^/]+$/, "sync-state*"),
 		]);
 		const includes = (ds?.include ?? []).map((x) => x.trim()).filter((x) => x && !x.startsWith("#"));
+		// A codec that maps a folder (shared folders) only ever handles paths inside that folder.
+		const prefix = this.codec.layers.find((l) => l.id.startsWith("folder:"))?.id.slice("folder:".length);
 		const included = includes.length ? compileGlobs(includes.map(sub)) : null;
 		return (p: string) => {
 			if (excluded(p)) return false;
+			if (prefix && !p.startsWith(prefix)) return false;
 			if (included && !included(p) && !p.startsWith(cfg + "/")) return false;
 			if (!isHiddenPath(p)) return true;
 			if (!this.s.syncConfigDir || !p.startsWith(cfg + "/")) return false;
@@ -265,6 +278,16 @@ export class SyncEngine {
 	}
 
 	async run(mode: SyncMode, opts: SyncOptions = {}): Promise<SyncReport> {
+		const outer = this.snap === null;
+		if (outer) this.snap = { ...this.host.settings };
+		try {
+			return await this.runWithRetries(mode, opts);
+		} finally {
+			if (outer) this.snap = null;
+		}
+	}
+
+	private async runWithRetries(mode: SyncMode, opts: SyncOptions): Promise<SyncReport> {
 		for (let attempt = 0; ; attempt++) {
 			try {
 				return await this.runOnce(mode, opts);
@@ -367,6 +390,11 @@ export class SyncEngine {
 		// ---- remote ----
 		this.host.progress?.("Checking GitHub…");
 		let head = await this.host.gh.getRef(this.s.branch);
+		// A branch we synced before has vanished (deleted, renamed, or the token lost access). Never treat
+		// that as "the remote is empty": it would delete everything locally.
+		if (!head && (state.head || Object.keys(state.base).length)) {
+			throw new Error(`The branch "${this.s.branch}" was not found in ${this.s.owner}/${this.s.repo}. It may have been deleted or renamed, or the token lost access. Nothing was changed.`);
+		}
 		if (!head && initIfEmpty) head = await this.initRemote();
 
 		// Safety: never act on a remote state older than the one we already synced, and never
@@ -407,7 +435,8 @@ export class SyncEngine {
 		if (head) {
 			treeSha = await this.host.gh.getCommitTree(head);
 			const deviceMax = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
-			const lowerLocal = new Map([...localShas.keys()].map((p) => [p.toLowerCase(), p]));
+			const fold = (p: string) => p.normalize("NFC").toLowerCase();
+			const lowerLocal = new Map([...localShas.keys()].map((p) => [fold(p), p]));
 			const seenLower = new Set<string>();
 			for (const raw of await this.host.gh.listTree(treeSha)) {
 				if (raw.path === MARKER_PATH) markerSha = raw.sha;
@@ -429,7 +458,7 @@ export class SyncEngine {
 					skip(e.path, "larger than this device's download limit");
 					continue;
 				}
-				const lower = e.path.toLowerCase();
+				const lower = fold(e.path);
 				const localTwin = lowerLocal.get(lower);
 				if (seenLower.has(lower) || (localTwin && localTwin !== e.path && !state.base[e.path])) {
 					skip(e.path, "differs only by letter case from another file");
@@ -530,6 +559,18 @@ export class SyncEngine {
 			}
 		}
 
+		// The user may keep editing while a sync runs. Before replacing or deleting a local file, check it
+		// is still exactly what was scanned; otherwise leave it for the next sync (where it becomes a
+		// normal conflict) instead of overwriting the new edit.
+		const scanned: SyncState["cache"] = { ...cacheNext };
+		let editedDuringSync = false;
+		this.assertUnchanged = async (path: string) => {
+			const st = await this.io.stat(path);
+			const c = scanned[path];
+			const changed = c ? !st || st.mtime !== c.m || st.size !== c.s : st !== null;
+			if (changed) throw new EditedDuringSync(path);
+		};
+
 		const uploads: Upload[] = [];
 		const remoteDeletes: string[] = [];
 		const renames: string[] = [];
@@ -546,6 +587,13 @@ export class SyncEngine {
 			uploads.push({ path, data, sha: hash, mode: remote.get(path)?.mode ?? "100644" });
 		};
 		const fail = (path: string, e: unknown) => {
+			if (e instanceof EditedDuringSync) {
+				editedDuringSync = true;
+				report.skipped.push(`${path} (edited during sync, will sync next time)`);
+				if (state.base[path]) next[path] = state.base[path];
+				else delete next[path];
+				return;
+			}
 			report.errors.push(`${path}: ${errMsg(e)}`);
 			host.log(`Error on ${path}: ${errMsg(e)}`);
 			if (state.base[path]) next[path] = state.base[path];
@@ -560,12 +608,14 @@ export class SyncEngine {
 			try {
 				switch (d.kind) {
 					case "move-local": {
+						await this.assertUnchanged(d.path);
 						if (!(await this.io.stat(d.from))) {
 							// The old file vanished meanwhile: fall back to a plain download.
 							const data = await this.blob(d.path, d.sha);
 							await this.io.write(d.path, data);
 							await recordWrite(d.path, d.sha, data);
 						} else {
+							await this.assertUnchanged(d.from);
 							await this.io.rename(d.from, d.path);
 							const old = cacheNext[d.from];
 							const st = await this.io.stat(d.path);
@@ -580,6 +630,7 @@ export class SyncEngine {
 					}
 					case "adopt-remote-edit": {
 						const data = await this.blob(d.path, d.sha);
+						await this.assertUnchanged(d.path);
 						await this.io.write(d.path, data);
 						await recordWrite(d.path, d.sha, data);
 						await queueUpload(d.path, data, d.sha);
@@ -591,6 +642,7 @@ export class SyncEngine {
 					}
 					case "download": {
 						const data = await this.blob(d.path, d.sha);
+						await this.assertUnchanged(d.path);
 						await this.io.write(d.path, data);
 						await recordWrite(d.path, d.sha, data);
 						next[d.path] = d.sha;
@@ -599,6 +651,7 @@ export class SyncEngine {
 						break;
 					}
 					case "delete-local":
+						await this.assertUnchanged(d.path);
 						await this.io.remove(d.path);
 						delete next[d.path];
 						delete cacheNext[d.path];
@@ -671,7 +724,7 @@ export class SyncEngine {
 		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
 		state.lastSync = Date.now();
-		state.dirty = state.dirty || report.errors.length > 0;
+		state.dirty = state.dirty || editedDuringSync || report.errors.length > 0;
 		await host.saveState();
 		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
@@ -687,6 +740,7 @@ export class SyncEngine {
 		recordWrite: (path: string, sha: string, data?: ArrayBuffer) => Promise<void>,
 	): Promise<void> {
 		const host = this.host;
+		await this.assertUnchanged(d.path);
 		const localData = await this.io.read(d.path);
 		const remoteData = await this.blob(d.path, d.remote);
 		const localText = asText(d.path, localData);
@@ -709,7 +763,13 @@ export class SyncEngine {
 		if (mode === "pull") return keepBoth(false);
 
 		// First sync with an existing vault on both sides: the setup wizard may say which side wins.
-		if (!d.base && this.opts.firstSyncPrefer === "remote") return void (await writeRemote());
+		// "The repository wins": the local version was never uploaded, so move it to the trash first.
+		const replaceWithRemote = async () => {
+			await this.assertUnchanged(d.path);
+			await this.io.remove(d.path);
+			await writeRemote();
+		};
+		if (!d.base && this.opts.firstSyncPrefer === "remote") return void (await replaceWithRemote());
 		if (!d.base && this.opts.firstSyncPrefer === "local") return void (await queueUpload(d.path, localData));
 
 		// Structure-aware merge first (canvas/JSON by key and id, Markdown frontmatter by key).
@@ -757,7 +817,7 @@ export class SyncEngine {
 				host.log(`Conflict on ${d.path}: kept this device's version.`);
 				return;
 			case "remote":
-				await writeRemote();
+				await replaceWithRemote();
 				host.log(`Conflict on ${d.path}: took the GitHub version.`);
 				return;
 			case "keep-both":
@@ -830,6 +890,7 @@ export class SyncEngine {
 			message: this.commitMessage(uploads, deletes, device, renames),
 			upserts,
 			deletes: rawDeletes,
+			existing: new Map([...remote.values()].map((e) => [e.raw, e.sha])),
 			progress: (done, total) => this.host.progress?.(`Uploading ${done}/${total}`),
 		});
 		this.host.log(`Pushed commit ${res.sha.slice(0, 7)} (${uploads.length} changed, ${deletes.length} deleted).`);
@@ -898,6 +959,9 @@ export class SyncEngine {
 		for (const p of plan.files) {
 			await this.io.remove(p);
 			delete state.cache[p];
+			// Forget the baseline too: a missing local file must never later read as "deleted here".
+			delete state.base[p];
+			delete state.baseNorm[p];
 		}
 		await this.host.saveState();
 		this.host.log(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB: removed ${plan.files.length} local copies that are safe on GitHub.`);

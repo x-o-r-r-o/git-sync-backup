@@ -106,9 +106,9 @@ export class HealthView extends ItemView {
 		return s;
 	}
 
-	private button(parent: HTMLElement, label: string, fn: () => void, cta = false) {
+	private button(parent: HTMLElement, label: string, fn: () => unknown, cta = false) {
 		const b = parent.createEl("button", { text: label, cls: cta ? "mod-cta" : "" });
-		b.onClickEvent(fn);
+		b.onClickEvent(() => void fn());
 		return b;
 	}
 
@@ -151,7 +151,7 @@ export class HealthView extends ItemView {
 			s.createDiv({ cls: "vsg-muted", text: `${ago(p.lastErrorAt)} · ${p.lastError}` });
 			if (f.action === "settings") this.button(s, t("health.openSettings"), () => p.openSettings(), true);
 			if (f.action === "retry") this.button(s, t("health.tryAgain"), () => p.sync("manual"), true);
-			if (f.action === "encryption") this.button(s, t("health.enterPassphrase"), () => p.openEncryption(() => p.sync("manual")), true);
+			if (f.action === "encryption") this.button(s, t("health.enterPassphrase"), () => p.openEncryption(() => void p.sync("manual")), true);
 		}
 
 		// ---- pending ----

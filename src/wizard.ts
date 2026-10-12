@@ -3,6 +3,7 @@
 
 import { App, Modal, Notice, Platform, Setting } from "obsidian";
 import { HOSTS } from "./hosts.ts";
+import { confirmPlan } from "./ui.ts";
 import type { HostKind } from "./hosts.ts";
 import { createEncryption, passphraseStrength } from "./crypto.ts";
 import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
@@ -116,7 +117,7 @@ export class SetupWizard extends Modal {
 			.setName("Token")
 			.addText((t) => {
 				t.inputEl.type = "password";
-				t.setPlaceholder("github_pat_… or ghp_…").onChange((v) => (value = v.trim()));
+				t.setPlaceholder("Paste your token").onChange((v) => (value = v.trim()));
 			})
 			.addButton((b) =>
 				b.setButtonText("Continue").onClick(() => {
@@ -172,8 +173,8 @@ export class SetupWizard extends Modal {
 					const row = listEl.createDiv({ cls: "vsg-wz-repo" });
 					row.createSpan({ text: `${r.owner}/${r.name}` });
 					row.createSpan({ text: r.private ? "private" : "PUBLIC", cls: r.private ? "vsg-badge" : "vsg-badge vsg-badge-warn" });
-					row.onClickEvent(() => {
-						if (!r.private && !confirm(`${r.owner}/${r.name} is public: anyone could read your notes. Use it anyway?`)) return;
+					row.onClickEvent(async () => {
+						if (!r.private && !(await confirmPlan(this.app, "Public repository", `${r.owner}/${r.name} is public: anyone on the internet could read your notes. Use a private repository unless you mean to publish them.`, [], "Use it anyway", true))) return;
 						void pick(r.owner, r.name, r.defaultBranch);
 					});
 				}
@@ -270,7 +271,7 @@ export class SetupWizard extends Modal {
 						if (marker && !p.isEncrypted()) return void new Notice("Unlock the encrypted repository first.");
 						if (encWanted) {
 							if (!passphraseStrength(encPass).ok) return void new Notice(passphraseStrength(encPass).hint);
-							if (!confirm("Have you saved this passphrase somewhere safe? Without it your notes on GitHub can't be read.")) return;
+							if (!(await confirmPlan(this.app, "Save your passphrase", "Have you saved this passphrase somewhere safe? There is no way to recover it, and without it the copy in the repository can't be read.", [], "I have saved it"))) return;
 							const { meta, master } = await createEncryption(encPass);
 							await p.saveEncryption({ meta, master });
 						}

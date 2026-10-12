@@ -29,7 +29,7 @@ Manual setup:
 
 Repeat on each device: install the plugin, paste the token, same owner/repo. An existing vault on a second device is safe: the first sync never deletes anything, and any file that differs is kept in both versions.
 
-The token is stored only on the device (local storage). It is never written to `data.json`, so it is never uploaded, even with settings-folder sync on.
+The token is stored only on the device, in Obsidian's secure SecretStorage. It is never written to `data.json`, so it is never uploaded, even with settings-folder sync on.
 
 ## How a sync works
 
@@ -77,7 +77,7 @@ The token is stored only on the device (local storage). It is never written to `
   - **There is no passphrase recovery.** Keep it in a password manager.
 - **GitLab and Gitea / Forgejo / Codeberg** support (beta). Choose the host in the wizard or settings, with host-specific token instructions. Commits use GitLab's Commits API and Gitea's multi-file ChangeFiles API, so every sync is still one commit (very large uploads are split into parts).
 - **Safer tokens.**
-  - Tokens are stored in Obsidian's SecretStorage (1.11.4+), with a fallback to device-local storage on older versions.
+  - Tokens are stored in Obsidian's SecretStorage.
   - The GitHub token link prefills name, expiry and `contents=write`.
   - "Sign in with GitHub" (GitHub App device flow) has been researched and planned: see [docs/AUTH.md](docs/AUTH.md).
 
@@ -119,11 +119,18 @@ The token is stored only on the device (local storage). It is never written to `
 
 Sync now · Review changes and sync · Open sync status panel · Run setup wizard · End-to-end encryption: turn on or unlock · Free up space on this device · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Timeline: restore vault or folder to an earlier point · Make this device match GitHub · Create backup snapshot on GitHub · Show sync log · Show history of current file · Compare current file with GitHub · Recover deleted files · Open repository on GitHub
 
+## Requirements
+
+- Obsidian 1.11.4 or newer, on desktop (Windows, macOS, Linux) or mobile (iOS, Android). Tokens and encryption keys are kept in Obsidian's SecretStorage.
+- Phones default to not downloading files over 25 MB (Settings → *This device only*), because very large files are memory-heavy on mobile.
+
 ## Install
 
-**Manual:** copy `main.js`, `manifest.json` and `styles.css` into `<vault>/.obsidian/plugins/vault-sync-github/`, then enable the plugin under Community plugins. On mobile, copy the folder in with the Files app or a file manager, or let the first desktop sync bring it over with settings-folder sync turned on.
+**Community plugins:** once listed, search for "Vault Sync for GitHub" in Settings → Community plugins.
 
-**BRAT:** push this repo to GitHub, tag a version (for example `0.1.0`) so the release workflow publishes the files, then add the repo in BRAT on each device.
+**Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<vault>/.obsidian/plugins/vault-sync-github/`, then enable the plugin under Community plugins.
+
+**BRAT:** add this repository in the BRAT plugin to get the latest release on each device.
 
 ## Development
 
@@ -133,9 +140,23 @@ npm run dev      # watch build
 npm test         # unit tests + two-device simulation against an in-memory GitHub (90 tests, including fake GitLab, Gitea and LFS servers)
 VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API (13 tests, including encrypted sync)
 npm run build    # type-check + production bundle
+npm run lint     # Obsidian's official review rules (eslint-plugin-obsidianmd)
 ```
 
 Source layout: `src/sync.ts` (engine), `src/plan.ts` (three-way decisions), `src/merge.ts` (diff3), `src/github.ts` (REST client on `requestUrl`), `src/io.ts` (vault access), `src/ui.ts` and `src/settings-tab.ts`.
+
+## Network use, accounts and privacy
+
+This section covers the disclosures Obsidian's developer policies require.
+
+- **Account required.** You need an account with a Git host (GitHub, GitLab, or a Gitea / Forgejo / Codeberg server) and an access token. The plugin itself is free; no payment.
+- **Network use.** The plugin only connects to the Git host **you configure**, to read and write your repository:
+  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), or your Gitea / Forgejo / Codeberg server
+  - the same host's Git LFS endpoint, if you turn on large file storage
+  - for GitHub LFS, the file-storage address GitHub returns for each upload or download
+- **No telemetry, no ads, no third-party services.** Nothing is sent anywhere except your own repository host. The author runs no servers.
+- **Files.** The plugin reads and writes only files inside your vault, including the vault's settings folder if you turn on settings sync. It keeps its own state in its plugin folder.
+- **Your data stays in your repository.** With end-to-end encryption on, the host only stores encrypted content and encrypted file names.
 
 ## Security notes
 
@@ -143,12 +164,21 @@ Source layout: `src/sync.ts` (engine), `src/plan.ts` (three-way decisions), `src
 - Use a fine-grained token scoped to the vault repo only. If it leaks, the damage is limited to that one repo.
 - With **settings-folder sync** on, plugin code (`.obsidian/plugins/*/main.js`) syncs too. Anyone who can push to the repo can then run code on your devices. Keep the repo private and don't give others write access.
 - Remote paths are validated (no `..`, no absolute paths, no empty segments) before anything is written.
+- **End-to-end encryption limits.**
+  - Ciphertext reveals approximate file sizes and path lengths, and whether two files are identical.
+  - Content isn't bound to its path, so someone with write access to the repository could swap or roll back encrypted files. They still can't read or forge content.
+  - Shared folders are never encrypted, because collaborators must read them.
+- **Deleting files.** Local deletions follow Obsidian's *Deleted files* setting (system trash, `.trash` folder, or permanent). Keep a trash option on if you want local deletions recoverable; everything also stays in the repository's history.
+- **Data-safety guarantees.**
+  - A file you are editing while a sync runs is never overwritten; it waits for the next sync.
+  - A missing or renamed branch never reads as "everything was deleted".
+  - Sync state copied in from another device (for example by iCloud) is ignored.
 
 ## Host notes
 
 - **GitHub:** fully supported. Every sync is one atomic commit with fast-forward-only updates.
 - **Gitea / Forgejo (1.20+), Codeberg:** beta. Atomic multi-file commits with per-file optimistic locking.
-- **GitLab:** beta. Atomic multi-file commits. If two devices push the *same* file within the same instant, the later commit can win at the branch head; the earlier version stays in history.
+- **GitLab:** beta. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's API doesn't report file sizes, so the size limits can't skip large files there; use LFS for big media.
 - Snapshots are tags on every host. The API budget is shown for GitHub only.
 
 ## Limits

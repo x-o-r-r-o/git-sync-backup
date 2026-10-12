@@ -1,4 +1,4 @@
-import { App, FuzzySuggestModal, Modal, Notice, Setting, TFolder } from "obsidian";
+import { App, ButtonComponent, FuzzySuggestModal, Modal, Notice, Setting, TFolder } from "obsidian";
 import { renderDiff, renderHunkPicker } from "./diffview.ts";
 import type { CommitInfo } from "./github.ts";
 import type { Decision } from "./plan.ts";
@@ -11,6 +11,12 @@ function list(el: HTMLElement, items: string[], max = 200) {
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** Destructive (red) button style. */
+export function destructive(b: ButtonComponent): ButtonComponent {
+	// setDestructive needs 1.13; setWarning works on every supported version (deprecated, not removed).
+	return b.setWarning();
+}
 
 /** Content of the two sides of a diff; null text means binary. */
 export interface DiffSides {
@@ -79,7 +85,7 @@ export class ConflictModal extends Modal {
 				pane.empty();
 				tabs.querySelectorAll("button").forEach((b, i) => b.toggleClass("is-active", (i === 0) === (which === "pick")));
 				if (which === "pick") {
-					pane.createEl("p", { cls: "vsg-muted", text: "For each change, choose which version to keep. \"Both\" keeps this device's lines followed by GitHub's." });
+					pane.createEl("p", { cls: "vsg-muted", text: "For each change, choose which version to keep. Choosing both keeps the lines from this device first." });
 					build = renderHunkPicker(pane, info.localText!, info.remoteText!, { a: "This device", b: "GitHub" });
 				} else {
 					build = null;
@@ -138,7 +144,7 @@ export class DeleteGuardModal extends Modal {
 		new Setting(contentEl)
 			.addButton((b) => b.setButtonText("Cancel sync").onClick(() => this.pick("cancel")))
 			.addButton((b) => b.setButtonText("Sync but skip deletions").setCta().onClick(() => this.pick("skip")))
-			.addButton((b) => b.setButtonText("Delete them").setWarning().onClick(() => this.pick("proceed")));
+			.addButton((b) => destructive(b.setButtonText("Delete them")).onClick(() => this.pick("proceed")));
 	}
 	private pick(c: DeleteGuardChoice) {
 		this.choice = c;
@@ -228,7 +234,9 @@ export class ReviewModal extends Modal {
 		contentEl.appendChild(footer.settingEl.parentElement!);
 		footer.addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()));
 		footer.addButton((b) => {
-			syncBtnRef.set = (n) => b.setButtonText(n === this.checked.size ? "Sync all" : `Sync ${n} selected`).setDisabled(n === 0);
+			syncBtnRef.set = (n) => {
+				b.setButtonText(n === this.checked.size ? "Sync all" : `Sync ${n} selected`).setDisabled(n === 0);
+			};
 			b.setCta().onClick(() => {
 				// A rename involves two paths: defer both so neither half runs alone.
 				const deferred = new Set<string>();
@@ -308,7 +316,7 @@ export class FileVersionModal extends Modal {
 		private text: string | null,
 		private size: number,
 		private currentText: string | null | undefined,
-		private onRestore: (asCopy: boolean) => void,
+		private onRestore: (asCopy: boolean) => void | Promise<void>,
 	) {
 		super(app);
 	}
@@ -341,7 +349,7 @@ export class FileVersionModal extends Modal {
 			.addButton((b) =>
 				b.setButtonText("Restore as copy").onClick(() => {
 					this.close();
-					this.onRestore(true);
+					void this.onRestore(true);
 				}),
 			)
 			.addButton((b) =>
@@ -350,7 +358,7 @@ export class FileVersionModal extends Modal {
 					.setCta()
 					.onClick(() => {
 						this.close();
-						this.onRestore(false);
+						void this.onRestore(false);
 					}),
 			);
 	}
@@ -388,7 +396,7 @@ export class ConfirmPlanModal extends Modal {
 					this.ok = true;
 					this.close();
 				});
-				if (this.warning) b.setWarning();
+				if (this.warning) destructive(b);
 				else b.setCta();
 			});
 	}

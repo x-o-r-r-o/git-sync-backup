@@ -43,7 +43,9 @@ export class EncryptionModal extends Modal {
 		new Setting(contentEl).setName("Passphrase").addText((t) => {
 			t.inputEl.type = "password";
 			t.onChange((v) => (pass = v));
-			t.inputEl.addEventListener("keydown", (e) => e.key === "Enter" && unlock());
+			t.inputEl.addEventListener("keydown", (e) => {
+				if (e.key === "Enter") void unlock();
+			});
 		});
 		const unlock = async () => {
 			msg.setText("Unlocking… (this takes a second on purpose)");
@@ -83,7 +85,7 @@ export class EncryptionModal extends Modal {
 			t.inputEl.type = "password";
 			t.onChange((v) => (again = v));
 		});
-		new Setting(contentEl).setName("I've saved the passphrase somewhere safe (e.g. a password manager)").addToggle((t) => t.onChange((v) => (ack = v)));
+		new Setting(contentEl).setName("I have saved the passphrase somewhere safe, for example in a password manager").addToggle((t) => t.onChange((v) => (ack = v)));
 		const msg = contentEl.createDiv({ cls: "vsg-muted" });
 		new Setting(contentEl).addButton((b) =>
 			b

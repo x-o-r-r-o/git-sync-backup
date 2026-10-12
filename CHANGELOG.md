@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.0 (2026-10-12) First public release
+
+Full audit (independent code review plus Obsidian's official lint rules), with these fixes:
+
+- **Critical:** a shared folder now matches only its top-level folder. A nested folder with the same name (e.g. `Projects/Work/`) could previously leak to the shared repository. The folder mapping also refuses any path outside its folder.
+- **High:** a missing or renamed branch, or lost access, now stops the sync instead of being read as an empty repository, which could have deleted local files.
+- **High:** "Free up space" also forgets the baseline, so a freed file can never later be read as deleted locally.
+- **High:** files edited while a sync is running are never overwritten or deleted; they sync next time.
+- **High:** GitLab commits lock each file (`last_commit_id`). Concurrent edits from two devices are merged instead of overwritten. Real API errors are no longer mistaken for "another device pushed" (GitHub, Gitea, GitLab).
+- Gitea: deep ancestry walk, so devices that were offline for a long time don't trigger mass conflict copies.
+- Sync state is stamped with a device id and written atomically. State copied in by iCloud or another tool is ignored.
+- "Repository wins" conflict choices move the local version to the trash before replacing it.
+- Settings are snapshotted per sync; owner, repository and branch apply when you leave the field.
+- Maintenance actions are blocked while a sync runs. Phones default to a 25 MB download limit. Commits reuse the known file list (much faster on GitLab and Gitea). Unicode-normalized case checks.
+- Obsidian compliance: zero errors under `eslint-plugin-obsidianmd`; no browser storage (Obsidian's vault-scoped storage and SecretStorage); `getLanguage()`; `fileManager.trashFile()`; no regex lookbehind (iOS < 16.4); no `confirm()`; popout-safe timers; typed API responses; sentence-case UI; minAppVersion 1.11.4.
+- LICENSE (MIT); README disclosures for network use, accounts and privacy; release workflow checks the tag against the manifest, runs lint and tests, and publishes build provenance attestations.
+
 ## 0.5.0 (2026-10-12) "Grows with you"
 
 - Shared folders: map a vault folder to its own repository (any supported host, optional own token); the main repository excludes it; status shown in the panel.

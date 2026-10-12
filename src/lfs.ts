@@ -12,6 +12,20 @@ import type { Remote } from "./remote.ts";
 import { encodeText } from "./util.ts";
 
 const SPEC = "version https://git-lfs.github.com/spec/v1";
+
+interface LfsAction {
+	href: string;
+	header?: Record<string, string>;
+}
+interface LfsObject {
+	oid: string;
+	size: number;
+	error?: { code?: number; message?: string };
+	actions?: { upload?: LfsAction; download?: LfsAction; verify?: LfsAction };
+}
+interface LfsBatch {
+	objects?: LfsObject[];
+}
 const te = new TextEncoder();
 const td = new TextDecoder();
 const hex = (b: ArrayBuffer) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
@@ -69,7 +83,7 @@ export class LfsLayer implements Layer {
 		return data;
 	}
 
-	private async batch(operation: "upload" | "download", oid: string, size: number): Promise<any> {
+	private async batch(operation: "upload" | "download", oid: string, size: number): Promise<LfsObject | undefined> {
 		const res = await httpRequest(
 			this.transport,
 			{
@@ -81,8 +95,8 @@ export class LfsLayer implements Layer {
 			},
 			{ hostLabel: `${this.remote.label} LFS` },
 		);
-		const obj = res.json?.objects?.[0];
-		if (obj?.error) throw new Error(`Large-file storage: ${obj.error.message ?? obj.error.code}`);
+		const obj = (res.json as LfsBatch | null)?.objects?.[0];
+		if (obj?.error) throw new Error(`Large-file storage: ${obj.error.message ?? String(obj.error.code)}`);
 		return obj;
 	}
 
@@ -91,7 +105,7 @@ export class LfsLayer implements Layer {
 		const up = obj?.actions?.upload;
 		if (!up) return; // the host already has this object
 		await httpRequest(this.transport, { url: up.href, method: "PUT", headers: { ...(up.header ?? {}), "Content-Type": "application/octet-stream" }, body: data }, { hostLabel: "LFS upload" });
-		const verify = obj.actions.verify;
+		const verify = obj?.actions?.verify;
 		if (verify) {
 			await httpRequest(
 				this.transport,

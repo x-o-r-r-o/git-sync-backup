@@ -1,3 +1,5 @@
+import { getLanguage } from "obsidian";
+
 // Tiny translation layer. Follows Obsidian's interface language. English is the source of truth;
 // missing keys fall back to English. See docs/TRANSLATING.md.
 
@@ -160,7 +162,7 @@ const catalogs: Record<string, Partial<Record<Key, string>>> = { zh };
 
 function language(): string {
 	try {
-		return (window.localStorage.getItem("language") || "en").toLowerCase();
+		return (getLanguage() || "en").toLowerCase();
 	} catch {
 		return "en";
 	}
@@ -171,7 +173,7 @@ export function t(key: Key, vars: Record<string, string | number> = {}): string 
 	const lang = language();
 	const cat = catalogs[lang] ?? catalogs[lang.split("-")[0]];
 	const s = cat?.[key] ?? en[key];
-	return s.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? `{${k}}`));
+	return s.replace(/\{(\w+)\}/g, (_: string, k: string) => String(vars[k] ?? `{${k}}`));
 }
 
 export const LANGUAGES = ["en", ...Object.keys(catalogs)];

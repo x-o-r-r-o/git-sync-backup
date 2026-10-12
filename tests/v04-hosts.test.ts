@@ -93,3 +93,32 @@ for (const h of hosts) {
 		assert.ok((await remote.listTags()).some((t) => t.name === "snap-1"));
 	});
 }
+
+for (const h of hosts) {
+	test(`${h.name}: concurrent edits to the same file are never silently overwritten`, async () => {
+		const repo = new FakeRepo();
+		const remote = h.make(repo);
+		const a = device("A", remote as any);
+		const b = device("B", remote as any);
+		a.fs.put("x.md", "line 1\n\nline 2\n");
+		await a.sync();
+		await b.sync();
+		a.fs.put("x.md", "line 1 from A\n\nline 2\n");
+		b.fs.put("x.md", "line 1\n\nline 2 from B\n");
+		let raced = false;
+		const orig = remote.getRef.bind(remote);
+		(remote as any).getRef = async (br: string) => {
+			const head = await orig(br);
+			if (!raced && (new Error().stack ?? "").includes("commit")) {
+				raced = true;
+				await b.sync(); // B pushes its edit to x.md while A is committing
+			}
+			return head;
+		};
+		await a.sync();
+		await a.sync();
+		await b.sync();
+		assert.equal(repo.files().get("x.md"), "line 1 from A\n\nline 2 from B\n", "both edits survive");
+		assert.equal(a.fs.text("x.md"), "line 1 from A\n\nline 2 from B\n");
+	});
+}

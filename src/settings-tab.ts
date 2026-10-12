@@ -1,11 +1,18 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
 import type { ConflictStrategy, NoticeLevel } from "./types.ts";
 import type { SyncMode } from "./plan.ts";
 import { errMsg } from "./util.ts";
 import { HOSTS } from "./hosts.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
+import { destructive } from "./ui.ts";
 import type { HostKind } from "./hosts.ts";
+
+/** Runs `fn` when the field is committed (blur or Enter) instead of on every keystroke. */
+function onCommit(t: TextComponent, fn: (v: string) => Promise<void>): TextComponent {
+	t.inputEl.addEventListener("change", () => void fn(t.getValue()));
+	return t;
+}
 
 export class VaultSyncSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: VaultSyncPlugin) {
@@ -30,7 +37,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName("Connection").setHeading();
 		new Setting(containerEl)
 			.setName("Git host")
-			.setDesc("GitLab and Gitea/Forgejo support is in beta.")
+			.setDesc("Support for hosts other than GitHub is in beta.")
 			.addDropdown((d) => {
 				for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? " (beta)" : ""));
 				d.setValue(s.provider).onChange(async (v) => {
@@ -55,19 +62,20 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl).setName("Owner").setDesc(s.provider === "gitlab" ? "User or group path (subgroups allowed, e.g. team/notes)." : "User or organisation that owns the repo.").addText((t) =>
-			t.setPlaceholder("your-username").setValue(s.owner).onChange(async (v) => {
+			// Saved when you leave the field, so a half-typed name never gets synced to.
+			onCommit(t.setPlaceholder("Username").setValue(s.owner), async (v) => {
 				s.owner = v.trim();
 				await save();
 			}),
 		);
 		new Setting(containerEl).setName("Repository").setDesc("Use a private repository.").addText((t) =>
-			t.setPlaceholder("my-vault").setValue(s.repo).onChange(async (v) => {
+			onCommit(t.setPlaceholder("Repository name").setValue(s.repo), async (v) => {
 				s.repo = v.trim();
 				await save();
 			}),
 		);
 		new Setting(containerEl).setName("Branch").addText((t) =>
-			t.setValue(s.branch).onChange(async (v) => {
+			onCommit(t.setValue(s.branch), async (v) => {
 				s.branch = v.trim() || "main";
 				await save();
 			}),
@@ -151,7 +159,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			.setName("Edit delay (seconds)")
 			.setDesc("How long to wait after the last edit before syncing.")
 			.addSlider((sl) =>
-				sl.setLimits(5, 300, 5).setValue(s.changeDebounceSec).setDynamicTooltip().onChange(async (v) => {
+				sl.setLimits(5, 300, 5).setValue(s.changeDebounceSec).onChange(async (v) => {
 					s.changeDebounceSec = v;
 					await save();
 					p.rescheduleTriggers();
@@ -159,7 +167,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Periodic sync (minutes)")
-			.setDesc("0 turns it off. Also catches changes to settings/config files.")
+			.setDesc("Set to 0 to turn it off. Also catches changes to settings and configuration files.")
 			.addText((t) =>
 				t.setValue(String(s.intervalMin)).onChange(async (v) => {
 					s.intervalMin = Math.max(0, Number(v) || 0);
@@ -195,8 +203,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				});
 			});
 		new Setting(containerEl)
-			.setName("Max file size (MB)")
-			.setDesc("Larger files are skipped. GitHub's hard limit is 100 MB.")
+			.setName("Maximum file size in megabytes")
+			.setDesc("Larger files are skipped. GitHub accepts files up to 100 megabytes without large file storage.")
 			.addText((t) =>
 				t.setValue(String(s.maxFileSizeMB)).onChange(async (v) => {
 					s.maxFileSizeMB = Math.min(s.lfsThresholdMB > 0 ? 2000 : 100, Math.max(1, Number(v) || 50));
@@ -204,8 +212,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				}),
 			);
 		new Setting(containerEl)
-			.setName("Store large files with Git LFS (MB)")
-			.setDesc("Files at least this big are kept in the host's large-file storage instead of the repository, keeping the repo small and fast. 0 = off. Check your host's LFS quota (GitHub's free plan is limited). With LFS on, the max file size above can go up to 2000 MB.")
+			.setName("Large file storage threshold in megabytes")
+			.setDesc("Files at least this big are kept in the host's large file storage instead of the repository, which keeps the repository small and fast. Set to 0 to turn it off. Check your host's storage quota, since free plans are limited. When it is on, the maximum file size above can go up to 2000 megabytes.")
 			.addText((t) =>
 				t.setValue(String(s.lfsThresholdMB)).onChange(async (v) => {
 					s.lfsThresholdMB = Math.max(0, Number(v) || 0);
@@ -221,9 +229,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				.setDesc("Notes, attachments and file names are encrypted before upload. Other devices need the same passphrase.")
 				.addButton((b) => b.setButtonText("Remove unencrypted copies…").onClick(() => p.removeUnencryptedFiles()))
 				.addButton((b) =>
-					b
-						.setButtonText("Lock this device")
-						.setWarning()
+					destructive(b.setButtonText("Lock this device"))
 						.onClick(async () => {
 							await p.lockEncryption();
 							this.display();
@@ -275,10 +281,10 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		const ds = p.deviceScope();
 		new Setting(containerEl)
 			.setName("Only sync these folders")
-			.setDesc("One folder or pattern per line, e.g. Daily/ or Projects/. Leave empty to sync everything.")
+			.setDesc("One folder or pattern per line, for example daily/ or projects/. Leave empty to sync everything.")
 			.addTextArea((t) => {
 				t.inputEl.rows = 3;
-				t.setPlaceholder("Daily/\nProjects/").setValue(ds.include.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), include: v.split("\n").map((x) => x.trim()).filter(Boolean) }));
+				t.setPlaceholder("Daily/\nprojects/").setValue(ds.include.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), include: v.split("\n").map((x) => x.trim()).filter(Boolean) }));
 			});
 		new Setting(containerEl)
 			.setName("Also exclude on this device")
@@ -288,7 +294,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				t.setValue(ds.exclude.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), exclude: v.split("\n").map((x) => x.trim()).filter(Boolean) }));
 			});
 		new Setting(containerEl)
-			.setName("Don't download files larger than (MB)")
+			.setName("Skip downloading files larger than this many megabytes")
 			.setDesc("Big attachments stay on GitHub and are not downloaded to this device. 0 = no limit.")
 			.addText((t) => t.setValue(String(ds.maxDownloadMB)).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), maxDownloadMB: Math.max(0, Number(v) || 0) })));
 		new Setting(containerEl)
@@ -320,7 +326,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Review before manual sync")
-			.setDesc("When you press Sync, first show every pending change with diffs and checkboxes. Automatic syncs are not affected.")
+			.setDesc("When you start a sync manually, first show every pending change with diffs and checkboxes. Automatic syncs are not affected.")
 			.addToggle((t) =>
 				t.setValue(s.reviewBeforeManualSync).onChange(async (v) => {
 					s.reviewBeforeManualSync = v;
@@ -329,7 +335,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Ignore line-ending-only changes")
-			.setDesc("A file whose only change is Windows (CRLF) vs Unix (LF) line endings is treated as unchanged, so editors on other systems don't cause needless uploads or conflicts.")
+			.setDesc("A file whose only change is its line ending style is treated as unchanged, so editors on other operating systems don't cause needless uploads or conflicts.")
 			.addToggle((t) =>
 				t.setValue(s.ignoreLineEndingChanges).onChange(async (v) => {
 					s.ignoreLineEndingChanges = v;
@@ -350,13 +356,13 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			.setName("Delete guard threshold")
 			.setDesc("Ask when deleting more than this many files (left) or this percent of the vault (right), whichever is larger.")
 			.addText((t) =>
-				t.setPlaceholder("files").setValue(String(s.deleteGuardMin)).onChange(async (v) => {
+				t.setPlaceholder("10").setValue(String(s.deleteGuardMin)).onChange(async (v) => {
 					s.deleteGuardMin = Math.max(0, Number(v) || 0);
 					await save();
 				}),
 			)
 			.addText((t) =>
-				t.setPlaceholder("%").setValue(String(s.deleteGuardPercent)).onChange(async (v) => {
+				t.setPlaceholder("20").setValue(String(s.deleteGuardPercent)).onChange(async (v) => {
 					s.deleteGuardPercent = Math.max(0, Math.min(100, Number(v) || 0));
 					await save();
 				}),
@@ -366,7 +372,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName("Backup").setHeading();
 		new Setting(containerEl)
 			.setName("Daily snapshot")
-			.setDesc("Once a day, tag the current state on GitHub (snapshot-YYYYMMDD-HHMMSS) so you can always get back to it.")
+			.setDesc("Once a day, tag the current state in the repository with a dated snapshot so you can always get back to it.")
 			.addToggle((t) =>
 				t.setValue(s.dailySnapshot).onChange(async (v) => {
 					s.dailySnapshot = v;
@@ -409,7 +415,6 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			.addButton((b) =>
 				b
 					.setButtonText("Reset")
-					.setWarning()
 					.onClick(async () => {
 						await p.resetState();
 						new Notice("Sync state reset.");

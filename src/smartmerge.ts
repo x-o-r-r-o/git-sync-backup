@@ -20,7 +20,7 @@ function eq(a: J, b: J): boolean {
 		const bb = b as J[];
 		return a.length === bb.length && a.every((x, i) => eq(x, bb[i]));
 	}
-	const ak = Object.keys(a as object);
+	const ak = Object.keys(a);
 	const bk = Object.keys(b as object);
 	return ak.length === bk.length && ak.every((k) => eq((a as Record<string, J>)[k], (b as Record<string, J>)[k]));
 }
@@ -117,12 +117,13 @@ interface Entry {
 /** Top-level YAML entries: a "key:" line plus the indented/list lines that follow it. */
 function entries(fm: string): Entry[] | null {
 	const out: Entry[] = [];
-	for (const line of fm.split(/(?<=\n)/)) {
+	// Split into lines keeping the newline (no regex lookbehind: unsupported on iOS < 16.4).
+	for (const line of fm.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
 		if (!line.trim()) {
 			if (out.length) out[out.length - 1].text += line;
 			continue;
 		}
-		const top = /^([^\s#\-][^:]*):(\s|$)/.exec(line);
+		const top = /^([^\s#-][^:]*):(\s|$)/.exec(line);
 		if (top) out.push({ key: top[1].trim(), text: line });
 		else if (out.length && (/^\s/.test(line) || line.startsWith("- "))) out[out.length - 1].text += line;
 		else if (line.startsWith("#")) out.push({ key: `#${out.length}`, text: line });

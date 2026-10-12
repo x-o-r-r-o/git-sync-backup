@@ -9,6 +9,12 @@ export class TFile extends TAbstractFile {
 	stat = { mtime: 0, size: 0, ctime: 0 };
 }
 export class TFolder extends TAbstractFile {}
+export function normalizePath(p: string): string {
+	return p.replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+}
+export function getLanguage(): string {
+	return (globalThis as any).window?.localStorage?.getItem("language") ?? "en";
+}
 export function arrayBufferToBase64(b: ArrayBuffer): string {
 	return Buffer.from(new Uint8Array(b)).toString("base64");
 }

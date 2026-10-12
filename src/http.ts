@@ -7,7 +7,7 @@ import { sleep } from "./util.ts";
 
 export interface HttpResponse {
 	status: number;
-	json: any;
+	json: unknown;
 	arrayBuffer: ArrayBuffer;
 	headers: Record<string, string>;
 }
@@ -24,9 +24,9 @@ export type Transport = (req: HttpRequest) => Promise<HttpResponse>;
 
 export const obsidianTransport: Transport = async (req) => {
 	const res = await requestUrl({ url: req.url, method: req.method, headers: req.headers, body: req.body, contentType: req.contentType, throw: false });
-	let json: any = null;
+	let json: unknown = null;
 	try {
-		json = res.json;
+		json = res.json as unknown;
 	} catch {
 		/* not JSON */
 	}
@@ -54,7 +54,8 @@ export async function httpRequest(
 			continue;
 		}
 		if (res.status < 300 || opts.okStatuses?.includes(res.status)) return res;
-		const msg: string = res.json?.message ?? res.json?.error ?? `HTTP ${res.status}`;
+		const body = (res.json ?? {}) as { message?: unknown; error?: unknown };
+		const msg = typeof body.message === "string" ? body.message : typeof body.error === "string" ? body.error : `HTTP ${res.status}`;
 		if (res.status === 429 || (res.status === 403 && header(res, "retry-after"))) {
 			const wait = Number(header(res, "retry-after") ?? 0) * 1000 || 2000 * (attempt + 1);
 			if (wait <= 60_000 && attempt < 3) {
@@ -95,15 +96,21 @@ export async function compareByWalking(
 	head: string,
 ): Promise<"ahead" | "behind" | "identical" | "diverged"> {
 	if (base === head) return "identical";
-	const walk = async (from: string, target: string) => {
-		for (let page = 1; page <= 4; page++) {
+	// Returns true (found), false (reached the root without finding it) or null (gave up: too deep).
+	const walk = async (from: string, target: string): Promise<boolean | null> => {
+		for (let page = 1; page <= 60; page++) {
 			const shas = await list(from, page);
 			if (shas.includes(target)) return true;
 			if (shas.length < 50) return false;
 		}
-		return false;
+		return null;
 	};
-	if (await walk(head, base)) return "ahead";
-	if (await walk(base, head)) return "behind";
+	const fwd = await walk(head, base);
+	if (fwd) return "ahead";
+	const back = await walk(base, head);
+	if (back) return "behind";
+	// Only call it rewritten history when both walks reached the root. A very long history we could not
+	// fully walk is almost certainly just "ahead" (e.g. a device that was offline for weeks).
+	if (fwd === null || back === null) return "ahead";
 	return "diverged";
 }

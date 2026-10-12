@@ -92,7 +92,9 @@ export class PrefixLayer implements Layer {
 		this.id = `folder:${this.prefix}`;
 	}
 	async encodePath(p: string) {
-		return p.startsWith(this.prefix) ? p.slice(this.prefix.length) : p;
+		// Defense in depth: a path outside the folder must never reach the shared repository.
+		if (!p.startsWith(this.prefix)) throw new Error(`${p} is outside the shared folder ${this.prefix}`);
+		return p.slice(this.prefix.length);
 	}
 	async decodePath(raw: string) {
 		return this.prefix + raw;

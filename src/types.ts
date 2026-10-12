@@ -103,6 +103,8 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 // Per-device sync state, kept in the plugin folder and never synced.
 export interface SyncState {
 	version: 1;
+	/** Device that wrote this state (guards against state copied in by another sync tool). */
+	deviceId?: string;
 	repoKey: string;
 	head: string | null;
 	base: Record<string, string>;

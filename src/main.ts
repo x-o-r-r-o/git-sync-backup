@@ -8,9 +8,10 @@ import { VaultSyncSettingTab } from "./settings-tab.ts";
 import { SyncCancelled, SyncEngine } from "./sync.ts";
 import type { DeviceScope, SyncHost, SyncReport } from "./sync.ts";
 import { SetupWizard } from "./wizard.ts";
+import { readState, writeState } from "./statefile.ts";
 import { SharedFolderHost, sharedFolderPattern } from "./shared.ts";
 import type { HostKind } from "./hosts.ts";
-import { Codec, PrefixLayer } from "./codec.ts";
+import { Codec } from "./codec.ts";
 import { b64, EncryptionLayer, unb64 } from "./crypto.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import { encryptionGuard } from "./encryption.ts";
@@ -127,14 +128,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				this.settings.wizardShown = true;
 				void this.saveSettings();
 				window.setTimeout(() => this.openWizard(), 1000);
-			} else if (this.settings.syncOnStartup) window.setTimeout(() => this.sync("startup"), 2500);
+			} else if (this.settings.syncOnStartup) window.setTimeout(() => void this.sync("startup"), 2500);
 		});
 
 		this.registerDomEvent(document, "visibilitychange", () => {
 			if (document.visibilityState === "visible" && this.settings.syncOnResume) {
-				if (Date.now() - this.state.lastSync > 60_000) this.sync("resume");
+				if (Date.now() - this.state.lastSync > 60_000) void this.sync("resume");
 			} else if (document.visibilityState === "hidden" && this.settings.syncOnBackground) {
-				this.sync("background");
+				void this.sync("background");
 			}
 		});
 	}
@@ -156,8 +157,16 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		const id = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
 		return `vault-sync-github:${id}:${name}`;
 	}
-	// Secrets go to Obsidian's SecretStorage (1.11.4+), falling back to device-local storage on older
-	// versions. Values found in local storage are migrated on first read.
+	/** Device-local, vault-scoped values (Obsidian's local storage API; never synced). */
+	private localGet(name: string): string | null {
+		const v = this.app.loadLocalStorage(`vault-sync-github:${name}`) as unknown;
+		return typeof v === "string" ? v : null;
+	}
+	private localSet(name: string, value: string | null) {
+		this.app.saveLocalStorage(`vault-sync-github:${name}`, value);
+	}
+	// Secrets go to Obsidian's SecretStorage (1.11.4+, encrypted by the OS keychain where available),
+	// falling back to the vault-scoped local storage on older versions.
 	private secretId(name: string): string {
 		return this.localKey(name).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
 	}
@@ -166,37 +175,35 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	getSecret(name: string): string {
 		const store = this.secrets();
-		let legacy: string | null = null;
-		try {
-			legacy = window.localStorage.getItem(this.localKey(name));
-		} catch {
-			/* ignore */
-		}
-		if (!store) return legacy ?? "";
-		try {
-			const v = store.getSecret(this.secretId(name));
-			if (v) return v;
-			if (legacy) {
-				store.setSecret(this.secretId(name), legacy);
-				window.localStorage.removeItem(this.localKey(name));
+		if (store) {
+			try {
+				const v = store.getSecret(this.secretId(name));
+				if (v) return v;
+				// Saved before this device's Obsidian gained SecretStorage: move it over.
+				const old = this.localGet(`secret:${name}`);
+				if (old) {
+					store.setSecret(this.secretId(name), old);
+					this.localSet(`secret:${name}`, null);
+				}
+				return old ?? "";
+			} catch {
+				/* fall through */
 			}
-		} catch {
-			return legacy ?? "";
 		}
-		return legacy ?? "";
+		return this.localGet(`secret:${name}`) ?? "";
 	}
 	setSecret(name: string, value: string) {
 		const store = this.secrets();
 		if (store) {
 			try {
 				store.setSecret(this.secretId(name), value);
-				window.localStorage.removeItem(this.localKey(name));
+				this.localSet(`secret:${name}`, null);
 				return;
 			} catch {
 				/* fall back */
 			}
 		}
-		window.localStorage.setItem(this.localKey(name), value);
+		this.localSet(`secret:${name}`, value || null);
 	}
 	getToken(): string {
 		return this.getSecret("token");
@@ -224,18 +231,18 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	getApiBaseFor(kind: HostKind): string {
 		try {
-			return window.localStorage.getItem(this.localKey(`apiBase:${kind}`)) || (kind === "github" ? window.localStorage.getItem(this.localKey("apiBase")) : null) || HOSTS[kind].defaultApi;
+			return this.localGet(`apiBase:${kind}`) || HOSTS[kind].defaultApi;
 		} catch {
 			return HOSTS[kind].defaultApi;
 		}
 	}
 	setApiBase(url: string) {
-		window.localStorage.setItem(this.localKey(`apiBase:${this.settings.provider ?? "github"}`), url);
+		this.localSet(`apiBase:${this.settings.provider ?? "github"}`, url);
 	}
 	deviceName(): string {
 		let name = "";
 		try {
-			name = window.localStorage.getItem(this.localKey("device")) ?? "";
+			name = this.localGet("device") ?? "";
 		} catch {
 			/* ignore */
 		}
@@ -248,23 +255,24 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return "Device";
 	}
 	setDeviceName(name: string) {
-		window.localStorage.setItem(this.localKey("device"), name);
+		this.localSet("device", name);
 	}
 	/** Device-local scope: never synced, so each device can choose its own folders and limits. */
 	deviceScope(): DeviceScope {
 		try {
-			const raw = JSON.parse(window.localStorage.getItem(this.localKey("scope")) ?? "{}");
+			const raw = JSON.parse(this.localGet("scope") ?? "{}") as Partial<DeviceScope>;
 			return {
-				include: Array.isArray(raw.include) ? raw.include : [],
-				exclude: Array.isArray(raw.exclude) ? raw.exclude : [],
-				maxDownloadMB: Number(raw.maxDownloadMB) || 0,
+				include: Array.isArray(raw.include) ? raw.include.map(String) : [],
+				exclude: Array.isArray(raw.exclude) ? raw.exclude.map(String) : [],
+				// Phones default to a 25 MB download limit (big files are memory-heavy on mobile); 0 = no limit.
+				maxDownloadMB: raw.maxDownloadMB === undefined ? (Platform.isMobile ? 25 : 0) : Number(raw.maxDownloadMB) || 0,
 			};
 		} catch {
 			return { include: [], exclude: [], maxDownloadMB: 0 };
 		}
 	}
 	setDeviceScope(scope: DeviceScope) {
-		window.localStorage.setItem(this.localKey("scope"), JSON.stringify(scope));
+		this.localSet("scope", JSON.stringify(scope));
 		this.fullScanNeeded = true;
 	}
 	// ---------------- encryption ----------------
@@ -303,13 +311,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		new EncryptionModal(this.app, this, done).open();
 	}
 	async removeUnencryptedFiles() {
+		if (this.syncing) return void new Notice(t("notice.busy"));
+		this.syncing = true;
 		try {
 			const removed = await this.engine.removeUnencryptedFiles((files) =>
 				confirmPlan(this.app, "Remove unencrypted copies", "Delete these unencrypted files from the repository in one commit. Your notes stay safe: their encrypted copies are already uploaded. Note: older versions remain in the repository's history.", [{ title: "Delete from GitHub", items: files }], "Remove", true),
 			);
-			new Notice(removed.length ? `Removed ${removed.length} unencrypted file(s) from GitHub.` : "No unencrypted files found.");
+			new Notice(removed.length ? `Removed ${removed.length} unencrypted file(s) from the repository.` : "No unencrypted files found.");
 		} catch (e) {
 			if (!(e instanceof SyncCancelled)) new Notice(`Could not remove files: ${errMsg(e)}`);
+		} finally {
+			this.syncing = false;
 		}
 	}
 	/** Shared folders belong to their own repositories; the main vault repo never touches them. */
@@ -387,6 +399,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async freeUpSpace() {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
+		if (this.syncing) return void new Notice(t("notice.busy"));
+		this.syncing = true;
+		try {
+			await this.freeUpSpaceInner();
+		} finally {
+			this.syncing = false;
+		}
+	}
+	private async freeUpSpaceInner() {
 		try {
 			const plan = await this.engine.freeUpSpace((p) =>
 				confirmPlan(
@@ -408,27 +429,30 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// ---------------- persistence ----------------
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<VaultSyncSettings> | null);
 	}
 	async saveSettings() {
 		await this.saveData(this.settings);
 		// Scope settings may have changed: rescan everything next time.
 		this.fullScanNeeded = true;
 	}
-	async loadState() {
-		try {
-			const raw = await this.app.vault.adapter.read(this.stateFilePath);
-			const parsed = JSON.parse(raw) as SyncState;
-			this.state = parsed.version === 1 ? { ...emptyState(), ...parsed } : emptyState();
-		} catch {
-			this.state = emptyState();
+	/** Random id for this device and vault, kept in device-local storage. */
+	deviceId(): string {
+		let id = this.localGet("deviceId");
+		if (!id) {
+			id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+			this.localSet("deviceId", id);
 		}
+		return id;
+	}
+	async loadState() {
+		this.state = await readState(this.app.vault.adapter, this.stateFilePath, this.deviceId(), (m) => this.log(m));
 	}
 	async saveState() {
-		await this.app.vault.adapter.write(this.stateFilePath, JSON.stringify(this.state));
+		await writeState(this.app.vault.adapter, this.stateFilePath, this.state, this.deviceId());
 	}
 	async resetState() {
-		this.state = emptyState();
+		this.state = { ...emptyState(), deviceId: this.deviceId() };
 		this.fullScanNeeded = true;
 		await this.saveState();
 		this.log("Sync state reset by user.");
@@ -466,7 +490,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.nextIntervalAt = Date.now() + ms;
 			this.intervalId = window.setInterval(() => {
 				this.nextIntervalAt = Date.now() + ms;
-				this.sync("interval");
+				void this.sync("interval");
 			}, ms);
 			this.registerInterval(this.intervalId);
 		}
@@ -548,7 +572,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		const leaf = existing ?? this.app.workspace.getRightLeaf(false);
 		if (!leaf) return;
 		if (!existing) await leaf.setViewState({ type: HEALTH_VIEW, active: true });
-		this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
 	}
 
 	// ---------------- sync ----------------
@@ -617,7 +641,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			for (const [p, t] of this.writtenBySync) if (Date.now() - t > 60_000) this.writtenBySync.delete(p);
 			const q = this.queued;
 			this.queued = null;
-			if (q) window.setTimeout(() => this.sync("change", q.mode, q.opts), 500);
+			if (q) window.setTimeout(() => void this.sync("change", q.mode, q.opts), 500);
 			else if (this.changedDuringSync) this.onChangeDebounced?.();
 			this.changedDuringSync = false;
 			this.refreshHealth(true);
@@ -686,6 +710,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	async openReview() {
 		const problem = this.configProblem();
 		if (problem) return void new Notice(problem);
+		if (this.syncing) return void new Notice(t("notice.busy"));
 		try {
 			const pv = await this.engine.preview(this.settings.mode);
 			const blobOf = (path: string, sha: string | undefined | null) => (sha ? this.engine.readBlob(path, sha) : Promise.resolve(null));
@@ -719,7 +744,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				const n = await this.textOf(d.path, newData);
 				return { oldLabel, newLabel, oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
 			};
-			new ReviewModal(this.app, pv.decisions, pv.skipped, loadDiff, (deferred) => this.sync("manual", this.settings.mode, { defer: deferred })).open();
+			new ReviewModal(this.app, pv.decisions, pv.skipped, loadDiff, (deferred) => void this.sync("manual", this.settings.mode, { defer: deferred })).open();
 		} catch (e) {
 			new Notice(`Could not prepare review: ${errMsg(e)}`);
 		}
@@ -773,8 +798,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	openTimeline() {
 		new TimelineModal(this.app, () => this.timelineEntries(), {
 			browse: (e) => this.browseAt(e),
-			restoreVault: (e) => this.restore(e, ""),
-			restoreFolder: (e) => new FolderSuggestModal(this.app, (f) => this.restore(e, f.path)).open(),
+			restoreVault: (e) => void this.restore(e, ""),
+			restoreFolder: (e) => new FolderSuggestModal(this.app, (f) => void this.restore(e, f.path)).open(),
 		}).open();
 	}
 
@@ -783,7 +808,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const files = await this.engine.filesAt(e.sha);
 			return [...files]
 				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([p, t]) => ({ label: p, sub: `${t.size} bytes`, run: () => this.openVersion(p, e) }));
+				.map(([p, t]) => ({ label: p, sub: `${t.size} bytes`, run: () => void this.openVersion(p, e) }));
 		}).open();
 	}
 
@@ -890,7 +915,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file) return false;
-				if (!checking) this.compareWithGitHub(file);
+				if (!checking) void this.compareWithGitHub(file);
 				return true;
 			},
 		});
@@ -920,7 +945,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			return commits.map((c) => ({
 				label: c.message.split("\n")[0],
 				sub: `${new Date(c.date).toLocaleString()} · ${c.author} · ${c.sha.slice(0, 7)}`,
-				run: () => this.openVersion(file.path, c),
+				run: () => void this.openVersion(file.path, c),
 			}));
 		}).open();
 	}
@@ -966,7 +991,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					rows.push({
 						label: name,
 						sub: `Deleted ${new Date(c.date).toLocaleString()} · ${c.message.split("\n")[0]}`,
-						run: () => this.openVersion(name, { sha: parent, message: `before ${c.sha.slice(0, 7)}`, date: c.date }),
+						run: () => void this.openVersion(name, { sha: parent, message: `before ${c.sha.slice(0, 7)}`, date: c.date }),
 					});
 				}
 			}

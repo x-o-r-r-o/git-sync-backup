@@ -33,7 +33,7 @@ export function asText(path: string, data: ArrayBuffer): string | null {
 
 export function encodeText(s: string): ArrayBuffer {
 	const u = encoder.encode(s);
-	return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer;
+	return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength);
 }
 
 export function isHiddenPath(path: string): boolean {
@@ -95,7 +95,8 @@ export async function pool<T>(items: T[], limit: number, fn: (item: T) => Promis
 	await Promise.all(workers);
 }
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+// window.setTimeout keeps timers working in popout windows.
+export const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 
 export function errMsg(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);

@@ -33,6 +33,8 @@ export interface CommitRequest {
 	message: string;
 	upserts: Upsert[];
 	deletes: string[];
+	/** Repository path → blob sha at `parent`, when the caller already knows it (saves a tree listing). */
+	existing?: Map<string, string>;
 	/** Called as upload batches complete. */
 	progress?: (done: number, total: number) => void;
 }
@@ -90,7 +92,7 @@ export interface Remote {
 	rateLimit(): Promise<{ limit: number; remaining: number; reset: number } | null>;
 	countFiles(branch: string): Promise<number>;
 	/** Raw HTTP access for host-specific extras (e.g. Git LFS). */
-	request(method: string, path: string, body?: unknown, opts?: { accept?: string; okStatuses?: number[] }): Promise<{ status: number; json: any; arrayBuffer: ArrayBuffer; headers: Record<string, string> }>;
+	request(method: string, path: string, body?: unknown, opts?: { accept?: string; okStatuses?: number[] }): Promise<{ status: number; json: unknown; arrayBuffer: ArrayBuffer; headers: Record<string, string> }>;
 	/** HTTPS clone URL base of the repo (used by Git LFS). */
 	gitUrl(): string;
 	authHeader(): string;

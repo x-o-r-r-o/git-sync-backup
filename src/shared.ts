@@ -11,9 +11,12 @@ import type { Remote } from "./remote.ts";
 import { SyncEngine } from "./sync.ts";
 import type { DeviceScope, SyncHost } from "./sync.ts";
 import { emptyState } from "./types.ts";
+import { readState, writeState } from "./statefile.ts";
 import type { ConflictChoice, ConflictInfo, DeleteGuardChoice, SharedFolder, SyncState, VaultSyncSettings } from "./types.ts";
 
-export const sharedFolderPattern = (folder: string) => folder.replace(/^\/+|\/+$/g, "") + "/";
+// Anchored at the vault root ("/Work/"), so a nested folder with the same name (Projects/Work/) is
+// never mistaken for the shared folder.
+export const sharedFolderPattern = (folder: string) => "/" + folder.replace(/^\/+|\/+$/g, "") + "/";
 
 export class SharedFolderHost implements SyncHost {
 	readonly def: SharedFolder;
@@ -67,15 +70,10 @@ export class SharedFolderHost implements SyncHost {
 		this.plugin.progress(`${this.def.folder}: ${text}`);
 	}
 	async loadState() {
-		try {
-			const parsed = JSON.parse(await this.app.vault.adapter.read(this.stateFilePath)) as SyncState;
-			this.state = parsed.version === 1 ? { ...emptyState(), ...parsed } : emptyState();
-		} catch {
-			this.state = emptyState();
-		}
+		this.state = await readState(this.app.vault.adapter, this.stateFilePath, this.plugin.deviceId(), (m) => this.log(m));
 	}
 	async saveState() {
-		await this.app.vault.adapter.write(this.stateFilePath, JSON.stringify(this.state));
+		await writeState(this.app.vault.adapter, this.stateFilePath, this.state, this.plugin.deviceId());
 	}
 	askConflict(info: ConflictInfo): Promise<ConflictChoice> {
 		return this.plugin.askConflict(info);

@@ -14,6 +14,16 @@ export interface HostConfig {
 }
 
 const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
+
+// Shapes of the Gitea API responses this client reads (only the fields used).
+interface GtUser { login?: string; username?: string }
+interface GtRepo { private?: boolean; default_branch?: string; html_url: string; size?: number; name: string; updated_at: string; owner?: GtUser }
+interface GtBranch { commit?: { id?: string } }
+interface GtCommit { sha: string; commit?: { tree?: { sha: string }; message?: string; author?: { name?: string; date?: string } }; tree?: { sha: string }; created?: string; parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
+interface GtTree { tree?: TreeEntry[]; truncated?: boolean }
+interface GtBlob { content?: string }
+interface GtTag { name: string; id?: string; commit?: { sha: string } }
+interface GtChangeFiles { commit?: { sha: string; parents?: { sha: string }[] }; sha?: string; parents?: { sha: string }[] }
 // Keep each ChangeFiles request comfortably under typical proxy body limits.
 const BATCH_BYTES = 8 * 1024 * 1024;
 
@@ -59,29 +69,29 @@ export class Gitea implements Remote {
 			{ okStatuses: opts.okStatuses, hostLabel: this.label },
 		);
 	}
-	private async json(method: string, path: string, body?: unknown): Promise<any> {
-		return (await this.request(method, path, body)).json;
+	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+		return (await this.request(method, path, body)).json as T;
 	}
 
 	async getUser() {
-		const u = await this.json("GET", "/user");
-		return { login: u.login ?? u.username };
+		const u = await this.json<GtUser>("GET", "/user");
+		return { login: u.login ?? u.username ?? "" };
 	}
 	async getRepo() {
 		const res = await this.request("GET", this.repoPath, undefined, { okStatuses: [404] });
 		if (res.status === 404) return null;
-		const r = res.json;
+		const r = res.json as GtRepo;
 		return { private: !!r.private, default_branch: r.default_branch || "main", html_url: r.html_url, size: r.size ?? 0 };
 	}
 	async createRepo(name: string, org?: string) {
-		const r = await this.json("POST", org ? `/orgs/${encodeURIComponent(org)}/repos` : "/user/repos", { name, private: true, auto_init: false, description: "Obsidian vault (synced by Vault Sync)" });
+		const r = await this.json<GtRepo>("POST", org ? `/orgs/${encodeURIComponent(org)}/repos` : "/user/repos", { name, private: true, auto_init: false, description: "Obsidian vault (synced by Vault Sync)" });
 		return { html_url: r.html_url };
 	}
 	async listRepos(maxPages = 3) {
 		const out: { owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[] = [];
 		for (let page = 1; page <= maxPages; page++) {
-			const list: any[] = await this.json("GET", `/user/repos?limit=50&page=${page}`);
-			for (const r of list) out.push({ owner: r.owner?.login ?? r.owner?.username, name: r.name, private: !!r.private, updated: r.updated_at, defaultBranch: r.default_branch || "main" });
+			const list = await this.json<GtRepo[]>("GET", `/user/repos?limit=50&page=${page}`);
+			for (const r of list) out.push({ owner: r.owner?.login ?? r.owner?.username ?? "", name: r.name, private: !!r.private, updated: r.updated_at, defaultBranch: r.default_branch || "main" });
 			if (list.length < 50) break;
 		}
 		return out.sort((a, b) => b.updated.localeCompare(a.updated));
@@ -89,31 +99,33 @@ export class Gitea implements Remote {
 
 	async getRef(branch: string): Promise<string | null> {
 		const res = await this.request("GET", `${this.repoPath}/branches/${encPath(branch)}?_=${Date.now()}`, undefined, { okStatuses: [404, 409] });
-		return res.status < 300 ? (res.json.commit?.id ?? null) : null;
+		return res.status < 300 ? ((res.json as GtBranch).commit?.id ?? null) : null;
 	}
 	async createRef(ref: string, sha: string): Promise<void> {
-		if (ref.startsWith("refs/tags/")) await this.json("POST", `${this.repoPath}/tags`, { tag_name: ref.slice(10), target: sha });
-		else await this.json("POST", `${this.repoPath}/branches`, { new_branch_name: ref.replace(/^refs\/heads\//, ""), old_ref_name: sha });
+		if (ref.startsWith("refs/tags/")) await this.json<unknown>("POST", `${this.repoPath}/tags`, { tag_name: ref.slice(10), target: sha });
+		else await this.json<unknown>("POST", `${this.repoPath}/branches`, { new_branch_name: ref.replace(/^refs\/heads\//, ""), old_ref_name: sha });
 	}
 	async getCommitTree(sha: string): Promise<string> {
-		const c = await this.json("GET", `${this.repoPath}/git/commits/${sha}?stat=false&files=false`);
-		return c.commit?.tree?.sha ?? c.tree?.sha;
+		const c = await this.json<GtCommit>("GET", `${this.repoPath}/git/commits/${sha}?stat=false&files=false`);
+		const tree = c.commit?.tree?.sha ?? c.tree?.sha;
+		if (!tree) throw new Error(`Commit ${sha} has no tree`);
+		return tree;
 	}
 	async listTree(treeSha: string): Promise<TreeEntry[]> {
 		const out: TreeEntry[] = [];
 		for (let page = 1; page < 1000; page++) {
-			const t = await this.json("GET", `${this.repoPath}/git/trees/${treeSha}?recursive=true&per_page=1000&page=${page}`);
+			const t = await this.json<GtTree>("GET", `${this.repoPath}/git/trees/${treeSha}?recursive=true&per_page=1000&page=${page}`);
 			for (const e of t.tree ?? []) out.push({ path: e.path, mode: e.mode, type: e.type, sha: e.sha, size: e.size });
 			if (!t.truncated || !(t.tree ?? []).length) break;
 		}
 		return out;
 	}
 	async getBlob(sha: string): Promise<ArrayBuffer> {
-		const b = await this.json("GET", `${this.repoPath}/git/blobs/${sha}`);
+		const b = await this.json<GtBlob>("GET", `${this.repoPath}/git/blobs/${sha}`);
 		return b64decode(b.content ?? "");
 	}
 	async putFile(path: string, message: string, base64: string, branch: string): Promise<void> {
-		await this.json("POST", `${this.repoPath}/contents/${encPath(path)}`, { content: base64, message, branch, new_branch: branch });
+		await this.json<unknown>("POST", `${this.repoPath}/contents/${encPath(path)}`, { content: base64, message, branch, new_branch: branch });
 	}
 
 	/**
@@ -123,7 +135,7 @@ export class Gitea implements Remote {
 	async commit(req: CommitRequest): Promise<CommitResult> {
 		const head = await this.getRef(req.branch);
 		if (head !== req.parent) throw new NotFastForward();
-		const existing = new Map((await this.listTree(req.parentTree)).filter((e) => e.type === "blob").map((e) => [e.path, e.sha]));
+		const existing = req.existing ?? new Map((await this.listTree(req.parentTree)).filter((e) => e.type === "blob").map((e) => [e.path, e.sha]));
 
 		type Op = { operation: "create" | "update" | "delete"; path: string; content?: string; sha?: string };
 		let parent = req.parent;
@@ -135,10 +147,18 @@ export class Gitea implements Remote {
 			const [subject, ...rest] = req.message.split("\n");
 			const message = part > 1 || !last ? `${subject} (part ${part})\n${rest.join("\n")}` : req.message;
 			const res = await this.request("POST", `${this.repoPath}/contents`, { branch: req.branch, message, files }, { okStatuses: [409, 422] });
-			if (res.status === 409 || res.status === 422) throw new NotFastForward();
-			const c = res.json.commit ?? res.json;
-			const parents: string[] = (c.parents ?? []).map((x: any) => x.sha);
+			if (res.status === 409) throw new NotFastForward();
+			if (res.status === 422) {
+				const m = String((res.json as { message?: string } | null)?.message ?? "");
+				// sha mismatch = someone changed the file meanwhile; other 422s are real errors.
+				if (/sha|does not match|already exists|not exist/i.test(m)) throw new NotFastForward();
+				throw new Error(`Gitea refused the commit: ${m || "HTTP 422"}`);
+			}
+			const body = res.json as GtChangeFiles;
+			const c = body.commit ?? { sha: body.sha ?? "", parents: body.parents };
+			const parents = (c.parents ?? []).map((x) => x.sha);
 			if (parents.length && parents[0] !== parent) fastForward = false;
+			if (!c.sha) throw new Error("Gitea did not return the new commit");
 			parent = c.sha;
 		};
 
@@ -169,26 +189,26 @@ export class Gitea implements Remote {
 	async compare(base: string, head: string): Promise<Relation> {
 		const exists = await this.request("GET", `${this.repoPath}/git/commits/${base}?stat=false&files=false`, undefined, { okStatuses: [404, 422] });
 		if (exists.status >= 300) return "missing";
-		return compareByWalking(async (sha, page) => (await this.json("GET", `${this.repoPath}/commits?sha=${sha}&limit=50&page=${page}&stat=false&files=false&verification=false`)).map((c: any) => c.sha), base, head);
+		return compareByWalking(async (sha, page) => (await this.json<GtCommit[]>("GET", `${this.repoPath}/commits?sha=${sha}&limit=50&page=${page}&stat=false&files=false&verification=false`)).map((c) => c.sha), base, head);
 	}
 
 	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
 		const q = new URLSearchParams({ sha: branch, limit: String(perPage), stat: "false", files: "false", verification: "false" });
 		if (path) q.set("path", path);
-		const list: any[] = await this.json("GET", `${this.repoPath}/commits?${q.toString()}`);
+		const list = await this.json<GtCommit[]>("GET", `${this.repoPath}/commits?${q.toString()}`);
 		return list.map((c) => ({ sha: c.sha, message: c.commit?.message ?? "", date: c.commit?.author?.date ?? c.created ?? "", author: c.commit?.author?.name ?? "" }));
 	}
 	async getCommitFiles(sha: string) {
-		const c = await this.json("GET", `${this.repoPath}/git/commits/${sha}?stat=false&files=true`);
-		return { parent: c.parents?.[0]?.sha ?? null, files: (c.files ?? []).map((f: any) => ({ filename: f.filename, status: f.status === "deleted" ? "removed" : f.status })) };
+		const c = await this.json<GtCommit>("GET", `${this.repoPath}/git/commits/${sha}?stat=false&files=true`);
+		return { parent: c.parents?.[0]?.sha ?? null, files: (c.files ?? []).map((f) => ({ filename: f.filename, status: f.status === "deleted" ? "removed" : f.status })) };
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
 		const res = await this.request("GET", `${this.repoPath}/raw/${encPath(path)}?ref=${encodeURIComponent(ref)}`, undefined, { accept: "*/*", okStatuses: [404] });
 		return res.status === 404 ? null : res.arrayBuffer;
 	}
 	async listTags() {
-		const list: any[] = await this.json("GET", `${this.repoPath}/tags?limit=50`);
-		return list.map((t) => ({ name: t.name, sha: t.commit?.sha ?? t.id }));
+		const list = await this.json<GtTag[]>("GET", `${this.repoPath}/tags?limit=50`);
+		return list.map((t) => ({ name: t.name, sha: t.commit?.sha ?? t.id ?? "" }));
 	}
 	async rateLimit() {
 		return null;

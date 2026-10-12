@@ -39,9 +39,21 @@ function header(res: RequestUrlResponse, name: string): string | undefined {
 	return key ? h[key] : undefined;
 }
 
-function safeJson(res: RequestUrlResponse): any {
+// Shapes of the GitHub REST responses this client reads (only the fields used).
+interface GhRepo { private: boolean; default_branch: string; html_url: string; size: number }
+interface GhRepoListItem { owner: { login: string }; name: string; private: boolean; updated_at: string; default_branch: string }
+interface GhRef { object: { sha: string } }
+interface GhSha { sha: string }
+interface GhCommit { tree: { sha: string } }
+interface GhTree { tree: TreeEntry[]; truncated: boolean }
+interface GhCommitListItem { sha: string; commit: { message: string; author?: { date?: string; name?: string }; committer?: { date?: string } } }
+interface GhCommitDetail { parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
+interface GhTag { name: string; commit: { sha: string } }
+interface GhRateLimit { resources: { core: { limit: number; remaining: number; reset: number } } }
+
+function safeJson(res: RequestUrlResponse): { message?: string } | null {
 	try {
-		return res.json;
+		return res.json as { message?: string };
 	} catch {
 		return null;
 	}
@@ -160,7 +172,7 @@ export class GitHub implements Remote {
 			if (res.status < 300 || opts.okStatuses?.includes(res.status)) return res;
 
 			const data = safeJson(res);
-			const msg: string = data?.message ?? `HTTP ${res.status}`;
+			const msg = data?.message ?? `HTTP ${res.status}`;
 
 			if (res.status === 403 || res.status === 429) {
 				const retryAfter = Number(header(res, "retry-after"));
@@ -188,26 +200,26 @@ export class GitHub implements Remote {
 		throw lastErr instanceof Error ? lastErr : new GitHubError("Network error talking to GitHub", 0);
 	}
 
-	private async json(method: string, path: string, body?: unknown): Promise<any> {
-		return (await this.request(method, path, body)).json;
+	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+		return (await this.request(method, path, body)).json as T;
 	}
 
 	// ---- account / repo ----
 
 	async getUser(): Promise<{ login: string }> {
-		return this.json("GET", "/user");
+		return this.json<{ login: string }>("GET", "/user");
 	}
 
 	async getRepo(): Promise<{ private: boolean; default_branch: string; html_url: string; size: number } | null> {
 		const res = await this.request("GET", this.repoPath, undefined, { okStatuses: [404] });
-		return res.status === 404 ? null : res.json;
+		return res.status === 404 ? null : (res.json as GhRepo);
 	}
 
 	/** Repositories the token can see, most recently updated first. */
 	async listRepos(maxPages = 3): Promise<{ owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[]> {
 		const out: { owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[] = [];
 		for (let page = 1; page <= maxPages; page++) {
-			const list: any[] = await this.json("GET", `/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`);
+			const list = await this.json<GhRepoListItem[]>("GET", `/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`);
 			for (const r of list) out.push({ owner: r.owner.login, name: r.name, private: r.private, updated: r.updated_at, defaultBranch: r.default_branch });
 			if (list.length < 100) break;
 		}
@@ -223,7 +235,7 @@ export class GitHub implements Remote {
 
 	async createRepo(name: string, org?: string): Promise<{ html_url: string }> {
 		const path = org ? `/orgs/${encodeURIComponent(org)}/repos` : "/user/repos";
-		return this.json("POST", path, {
+		return this.json<{ html_url: string }>("POST", path, {
 			name,
 			private: true,
 			auto_init: false,
@@ -239,11 +251,11 @@ export class GitHub implements Remote {
 			okStatuses: [404, 409],
 		});
 		if (res.status === 404 || res.status === 409) return null;
-		return res.json.object.sha;
+		return (res.json as GhRef).object.sha;
 	}
 
 	async createRef(ref: string, sha: string): Promise<void> {
-		await this.json("POST", `${this.repoPath}/git/refs`, { ref, sha });
+		await this.json<unknown>("POST", `${this.repoPath}/git/refs`, { ref, sha });
 	}
 
 	/** Fast-forward only. Returns false if someone else pushed first. */
@@ -254,7 +266,12 @@ export class GitHub implements Remote {
 			{ sha, force: false },
 			{ okStatuses: [409, 422] },
 		);
-		return res.status < 300;
+		if (res.status < 300) return true;
+		// Only a non-fast-forward means "another device pushed first"; anything else (e.g. a protected
+		// branch) is a real error the user must see, not something to retry.
+		const msg = String(safeJson(res)?.message ?? "");
+		if (/fast[- ]forward/i.test(msg) || res.status === 409) return false;
+		throw new GitHubError(`Could not update branch ${branch}: ${msg || `HTTP ${res.status}`}`, res.status);
 	}
 
 	/**
@@ -265,15 +282,15 @@ export class GitHub implements Remote {
 		const res = await this.request("GET", `${this.repoPath}/compare/${base}...${head}?per_page=1`, undefined, {
 			okStatuses: [404],
 		});
-		return res.status === 404 ? "missing" : res.json.status;
+		return res.status === 404 ? "missing" : (res.json as { status: Relation }).status;
 	}
 
 	async getCommitTree(sha: string): Promise<string> {
-		return (await this.json("GET", `${this.repoPath}/git/commits/${sha}`)).tree.sha;
+		return (await this.json<GhCommit>("GET", `${this.repoPath}/git/commits/${sha}`)).tree.sha;
 	}
 
 	async getTree(sha: string, recursive: boolean): Promise<{ tree: TreeEntry[]; truncated: boolean }> {
-		return this.json("GET", `${this.repoPath}/git/trees/${sha}${recursive ? "?recursive=1" : ""}`);
+		return this.json<GhTree>("GET", `${this.repoPath}/git/trees/${sha}${recursive ? "?recursive=1" : ""}`);
 	}
 
 	/** Full file list of a tree, walking sub-trees if GitHub truncated the recursive listing. */
@@ -301,31 +318,31 @@ export class GitHub implements Remote {
 	}
 
 	async createBlob(base64: string): Promise<string> {
-		return (await this.json("POST", `${this.repoPath}/git/blobs`, { content: base64, encoding: "base64" })).sha;
+		return (await this.json<GhSha>("POST", `${this.repoPath}/git/blobs`, { content: base64, encoding: "base64" })).sha;
 	}
 
 	async createTree(baseTree: string | null, tree: NewTreeEntry[]): Promise<string> {
 		const body: Record<string, unknown> = { tree };
 		if (baseTree) body.base_tree = baseTree;
-		return (await this.json("POST", `${this.repoPath}/git/trees`, body)).sha;
+		return (await this.json<GhSha>("POST", `${this.repoPath}/git/trees`, body)).sha;
 	}
 
 	async createCommit(message: string, tree: string, parents: string[]): Promise<string> {
-		return (await this.json("POST", `${this.repoPath}/git/commits`, { message, tree, parents })).sha;
+		return (await this.json<GhSha>("POST", `${this.repoPath}/git/commits`, { message, tree, parents })).sha;
 	}
 
 	/** Creates the first commit in an empty repo (the Git Data API refuses to work on empty repos). */
 	async putFile(path: string, message: string, base64: string, branch: string): Promise<void> {
-		await this.json("PUT", `${this.repoPath}/contents/${encPath(path)}`, { message, content: base64, branch });
+		await this.json<unknown>("PUT", `${this.repoPath}/contents/${encPath(path)}`, { message, content: base64, branch });
 	}
 
 	/** Core API budget. This endpoint does not count against the limit. */
 	async rateLimit(): Promise<{ limit: number; remaining: number; reset: number } | null> {
-		return (await this.json("GET", "/rate_limit")).resources.core;
+		return (await this.json<GhRateLimit>("GET", "/rate_limit")).resources.core;
 	}
 
 	async listTags(): Promise<{ name: string; sha: string }[]> {
-		const list: any[] = await this.json("GET", `${this.repoPath}/tags?per_page=100`);
+		const list = await this.json<GhTag[]>("GET", `${this.repoPath}/tags?per_page=100`);
 		return list.map((t) => ({ name: t.name, sha: t.commit.sha }));
 	}
 
@@ -334,7 +351,7 @@ export class GitHub implements Remote {
 	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
 		const q = new URLSearchParams({ sha: branch, per_page: String(perPage) });
 		if (path) q.set("path", path);
-		const list: any[] = await this.json("GET", `${this.repoPath}/commits?${q.toString()}`);
+		const list = await this.json<GhCommitListItem[]>("GET", `${this.repoPath}/commits?${q.toString()}`);
 		return list.map((c) => ({
 			sha: c.sha,
 			message: c.commit.message,
@@ -344,7 +361,7 @@ export class GitHub implements Remote {
 	}
 
 	async getCommitFiles(sha: string): Promise<{ parent: string | null; files: { filename: string; status: string }[] }> {
-		const c = await this.json("GET", `${this.repoPath}/commits/${sha}`);
+		const c = await this.json<GhCommitDetail>("GET", `${this.repoPath}/commits/${sha}`);
 		return { parent: c.parents?.[0]?.sha ?? null, files: c.files ?? [] };
 	}
 

@@ -4,6 +4,8 @@ on:
     tags: ["*"]
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -12,10 +14,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm ci || npm install
+      - run: npm ci --legacy-peer-deps
+      - name: Check tag matches manifest version
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          if [ "$GITHUB_REF_NAME" != "$VERSION" ]; then echo "Tag $GITHUB_REF_NAME does not match manifest version $VERSION"; exit 1; fi
       - run: npm run build
+      - run: npm run lint
       - run: npm test
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --notes-file <(awk "/^## $GITHUB_REF_NAME/{f=1;next}/^## /{f=0}f" CHANGELOG.md)

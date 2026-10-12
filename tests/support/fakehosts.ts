@@ -167,6 +167,12 @@ export function gitlabTransport(repo: FakeRepo) {
 			return ok(all.slice(start, start + per), next ? { Link: next } : {});
 		}
 		if ((m = /^blobs\/(\w+)\/raw$/.exec(rest))) return raw(repo.blobs.get(m[1])!);
+		if ((m = /^files\/([^/]+)$/.exec(rest)) && req.method === "HEAD") {
+			const ref = q.get("ref")!;
+			const p2 = decodeURIComponent(m[1]);
+			const last = repo.history(ref).find((sha) => { const c = repo.commits.get(sha)!; const par = c.parents[0] ? repo.commits.get(c.parents[0])!.files.get(p2) : undefined; return c.files.get(p2) !== par; });
+			return { status: last ? 200 : 404, json: null, arrayBuffer: new ArrayBuffer(0), headers: last ? { "X-Gitlab-Last-Commit-Id": last } : {} };
+		}
 		if ((m = /^files\/(.+)\/raw$/.exec(rest))) {
 			const sha = repo.commits.get(q.get("ref")!)?.files.get(decodeURIComponent(m[1]));
 			return sha ? raw(repo.blobs.get(sha)!) : err(404);
@@ -179,6 +185,12 @@ export function gitlabTransport(repo: FakeRepo) {
 			repo.interject?.();
 			repo.interject = null;
 			const parent = repo.head(body.branch)!;
+			const head = repo.head(body.branch)!;
+			for (const a of body.actions) {
+				if (!a.last_commit_id) continue;
+				const last = repo.history(head).find((sha) => { const c = repo.commits.get(sha)!; const par = c.parents[0] ? repo.commits.get(c.parents[0])!.files.get(a.file_path) : undefined; return c.files.get(a.file_path) !== par; });
+				if (last !== a.last_commit_id) return err(400, "You are attempting to update a file that has changed since you started editing it.");
+			}
 			try {
 				const id = await repo.apply(body.branch, body.commit_message, body.actions.map((a: any) => ({ op: a.action, path: a.file_path, content: a.content })));
 				return ok({ id, parent_ids: [parent] });

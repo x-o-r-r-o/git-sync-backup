@@ -1,6 +1,6 @@
 {
   "name": "vault-sync-github",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "description": "Obsidian plugin: sync and back up a vault with GitHub on desktop and mobile",
   "main": "main.js",
   "type": "module",
@@ -8,12 +8,19 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "test": "node --import ./tests/support/register.mjs --test tests/*.test.ts",
-    "test:live": "node --import ./tests/support/register.mjs --test --test-concurrency=1 tests/live/live.test.ts"
+    "test:live": "node --import ./tests/support/register.mjs --test --test-concurrency=1 tests/live/live.test.ts",
+    "lint": "eslint src"
   },
   "license": "MIT",
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@eslint/json": "^0.14.0",
     "esbuild": "^0.25.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-obsidianmd": "^0.4.2",
+    "globals": "^17.13.0",
     "obsidian": "latest",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.71.1"
   }
 }

@@ -9,6 +9,14 @@ import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEnt
 
 const BATCH_BYTES = 8 * 1024 * 1024;
 
+// Shapes of the GitLab API responses this client reads (only the fields used).
+interface GlProject { visibility?: string; default_branch?: string; web_url: string; path: string; path_with_namespace: string; last_activity_at: string; namespace?: { full_path?: string } }
+interface GlBranch { commit?: { id?: string } }
+interface GlTreeItem { path: string; mode: string; type: "blob" | "tree" | "commit"; id: string }
+interface GlCommit { id: string; message?: string; title?: string; authored_date?: string; created_at?: string; author_name?: string; parent_ids?: string[] }
+interface GlDiff { new_path: string; old_path: string; new_file?: boolean; deleted_file?: boolean }
+interface GlTag { name: string; commit?: { id: string } }
+
 export class GitLab implements Remote {
 	readonly kind = "gitlab" as const;
 	readonly label = "GitLab";
@@ -55,28 +63,28 @@ export class GitLab implements Remote {
 			{ okStatuses: opts.okStatuses, hostLabel: this.label },
 		);
 	}
-	private async json(method: string, path: string, body?: unknown): Promise<any> {
-		return (await this.request(method, path, body)).json;
+	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+		return (await this.request(method, path, body)).json as T;
 	}
 
 	async getUser() {
-		return { login: (await this.json("GET", "/user")).username };
+		return { login: (await this.json<{ username: string }>("GET", "/user")).username };
 	}
 	async getRepo() {
 		const res = await this.request("GET", this.project, undefined, { okStatuses: [404] });
 		if (res.status === 404) return null;
-		const r = res.json;
+		const r = res.json as GlProject;
 		return { private: r.visibility !== "public", default_branch: r.default_branch || "main", html_url: r.web_url, size: 0 };
 	}
 	async createRepo(name: string, org?: string) {
 		const body: Record<string, unknown> = { name, path: name, visibility: "private", initialize_with_readme: false };
-		if (org) body.namespace_id = (await this.json("GET", `/namespaces/${encodeURIComponent(org)}`)).id;
-		return { html_url: (await this.json("POST", "/projects", body)).web_url };
+		if (org) body.namespace_id = (await this.json<{ id: number }>("GET", `/namespaces/${encodeURIComponent(org)}`)).id;
+		return { html_url: (await this.json<GlProject>("POST", "/projects", body)).web_url };
 	}
 	async listRepos(maxPages = 3) {
 		const out: { owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[] = [];
 		for (let page = 1; page <= maxPages; page++) {
-			const list: any[] = await this.json("GET", `/projects?membership=true&per_page=100&page=${page}&order_by=last_activity_at&simple=true`);
+			const list = await this.json<GlProject[]>("GET", `/projects?membership=true&per_page=100&page=${page}&order_by=last_activity_at&simple=true`);
 			for (const r of list) out.push({ owner: r.namespace?.full_path ?? r.path_with_namespace.split("/").slice(0, -1).join("/"), name: r.path, private: r.visibility !== "public", updated: r.last_activity_at, defaultBranch: r.default_branch || "main" });
 			if (list.length < 100) break;
 		}
@@ -85,11 +93,11 @@ export class GitLab implements Remote {
 
 	async getRef(branch: string): Promise<string | null> {
 		const res = await this.request("GET", `${this.project}/repository/branches/${encodeURIComponent(branch)}?_=${Date.now()}`, undefined, { okStatuses: [404] });
-		return res.status < 300 ? res.json.commit?.id ?? null : null;
+		return res.status < 300 ? ((res.json as GlBranch).commit?.id ?? null) : null;
 	}
 	async createRef(ref: string, sha: string): Promise<void> {
-		if (ref.startsWith("refs/tags/")) await this.json("POST", `${this.project}/repository/tags?tag_name=${encodeURIComponent(ref.slice(10))}&ref=${sha}`);
-		else await this.json("POST", `${this.project}/repository/branches?branch=${encodeURIComponent(ref.replace(/^refs\/heads\//, ""))}&ref=${sha}`);
+		if (ref.startsWith("refs/tags/")) await this.json<unknown>("POST", `${this.project}/repository/tags?tag_name=${encodeURIComponent(ref.slice(10))}&ref=${sha}`);
+		else await this.json<unknown>("POST", `${this.project}/repository/branches?branch=${encodeURIComponent(ref.replace(/^refs\/heads\//, ""))}&ref=${sha}`);
 	}
 	/** GitLab lists trees by ref, so a commit sha serves as the tree id. */
 	async getCommitTree(sha: string): Promise<string> {
@@ -98,10 +106,13 @@ export class GitLab implements Remote {
 	async listTree(ref: string): Promise<TreeEntry[]> {
 		const out: TreeEntry[] = [];
 		let url = `${this.project}/repository/tree?ref=${encodeURIComponent(ref)}&recursive=true&per_page=100&pagination=keyset`;
-		for (let i = 0; i < 2000 && url; i++) {
-			const res = await this.request("GET", url, undefined, { okStatuses: [404] });
+		for (let page = 0; url; page++) {
+			if (page >= 5000) throw new Error("Repository is too large to list (more than 500,000 entries).");
+			// A 404 is only "empty repository" on the first page; later it would silently truncate the
+			// listing, and missing entries would look like remote deletions.
+			const res = await this.request("GET", url, undefined, { okStatuses: page === 0 ? [404] : [] });
 			if (res.status === 404) break;
-			for (const e of res.json ?? []) out.push({ path: e.path, mode: e.mode, type: e.type, sha: e.id });
+			for (const e of (res.json as GlTreeItem[] | null) ?? []) out.push({ path: e.path, mode: e.mode, type: e.type, sha: e.id });
 			const link = Object.entries(res.headers).find(([k]) => k.toLowerCase() === "link")?.[1] ?? "";
 			const next = /<([^>]+)>;\s*rel="next"/.exec(link)?.[1];
 			url = next ? next.replace(this.base, "") : "";
@@ -112,17 +123,21 @@ export class GitLab implements Remote {
 		return (await this.request("GET", `${this.project}/repository/blobs/${sha}/raw`, undefined, { accept: "*/*" })).arrayBuffer;
 	}
 	async putFile(path: string, message: string, base64: string, branch: string): Promise<void> {
-		await this.json("POST", `${this.project}/repository/files/${this.file(path)}`, { branch, content: base64, encoding: "base64", commit_message: message });
+		await this.json<unknown>("POST", `${this.project}/repository/files/${this.file(path)}`, { branch, content: base64, encoding: "base64", commit_message: message });
 	}
 
 	async commit(req: CommitRequest): Promise<CommitResult> {
 		const head = await this.getRef(req.branch);
 		if (head !== req.parent) throw new NotFastForward();
-		const existing = new Set((await this.listTree(req.parent)).filter((e) => e.type === "blob").map((e) => e.path));
+		const existing = new Set(req.existing ? req.existing.keys() : (await this.listTree(req.parent)).filter((e) => e.type === "blob").map((e) => e.path));
+		// GitLab only locks a file when given the last commit that touched it (per file). Look it up so a
+		// concurrent edit from another device makes our commit fail instead of silently winning.
+		const lastCommit = async (path: string): Promise<string | undefined> => {
+			const res = await this.request("HEAD", `${this.project}/repository/files/${this.file(path)}?ref=${req.parent}`, undefined, { okStatuses: [404] });
+			return Object.entries(res.headers).find(([k]) => k.toLowerCase() === "x-gitlab-last-commit-id")?.[1];
+		};
 
-		// The head check above guards against concurrent pushes (GitLab's last_commit_id must equal the
-		// file's own last commit, which we don't track, so it isn't used).
-		type Action = { action: "create" | "update" | "delete"; file_path: string; content?: string; encoding?: "base64" };
+		type Action = { action: "create" | "update" | "delete"; file_path: string; content?: string; encoding?: "base64"; last_commit_id?: string };
 		let parent = req.parent;
 		let fastForward = true;
 		let part = 0;
@@ -132,10 +147,16 @@ export class GitLab implements Remote {
 			const [subject, ...rest] = req.message.split("\n");
 			const commit_message = part > 1 || !last ? `${subject} (part ${part})\n${rest.join("\n")}` : req.message;
 			const res = await this.request("POST", `${this.project}/repository/commits`, { branch: req.branch, commit_message, actions }, { okStatuses: [400, 409] });
-			if (res.status === 400 || res.status === 409) throw new NotFastForward();
-			const parents: string[] = res.json.parent_ids ?? [];
+			if (res.status === 409) throw new NotFastForward();
+			if (res.status === 400) {
+				const m = String((res.json as { message?: string } | null)?.message ?? "");
+				if (/changed since|already exists|doesn't exist|does not exist|conflict/i.test(m)) throw new NotFastForward();
+				throw new Error(`GitLab refused the commit: ${m || "HTTP 400"}`);
+			}
+			const created = res.json as GlCommit;
+			const parents = created.parent_ids ?? [];
 			if (parents.length && parents[0] !== parent) fastForward = false;
-			parent = res.json.id;
+			parent = created.id;
 		};
 		let batch: Action[] = [];
 		let bytes = 0;
@@ -147,11 +168,12 @@ export class GitLab implements Remote {
 				batch = [];
 				bytes = 0;
 			}
-			batch.push({ action: existing.has(u.path) ? "update" : "create", file_path: u.path, content: b64encode(data), encoding: "base64" });
+			const update = existing.has(u.path);
+			batch.push({ action: update ? "update" : "create", file_path: u.path, content: b64encode(data), encoding: "base64", ...(update ? { last_commit_id: await lastCommit(u.path) } : {}) });
 			bytes += data.byteLength;
 			req.progress?.(++done, req.upserts.length);
 		}
-		for (const p of req.deletes) if (existing.has(p)) batch.push({ action: "delete", file_path: p });
+		for (const p of req.deletes) if (existing.has(p)) batch.push({ action: "delete", file_path: p, last_commit_id: await lastCommit(p) });
 		await send(batch, true);
 		return { sha: parent, fastForward };
 	}
@@ -160,7 +182,7 @@ export class GitLab implements Remote {
 		if (base === head) return "identical";
 		const res = await this.request("GET", `${this.project}/repository/merge_base?refs[]=${base}&refs[]=${head}`, undefined, { okStatuses: [400, 404] });
 		if (res.status >= 300) return "missing";
-		const mb = res.json.id;
+		const mb = (res.json as { id: string }).id;
 		if (mb === base) return "ahead";
 		if (mb === head) return "behind";
 		return "diverged";
@@ -169,12 +191,12 @@ export class GitLab implements Remote {
 	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
 		const q = new URLSearchParams({ ref_name: branch, per_page: String(perPage) });
 		if (path) q.set("path", path);
-		const list: any[] = await this.json("GET", `${this.project}/repository/commits?${q.toString()}`);
+		const list = await this.json<GlCommit[]>("GET", `${this.project}/repository/commits?${q.toString()}`);
 		return list.map((c) => ({ sha: c.id, message: c.message ?? c.title ?? "", date: c.authored_date ?? c.created_at ?? "", author: c.author_name ?? "" }));
 	}
 	async getCommitFiles(sha: string) {
-		const c = await this.json("GET", `${this.project}/repository/commits/${sha}`);
-		const diff: any[] = await this.json("GET", `${this.project}/repository/commits/${sha}/diff?per_page=100`);
+		const c = await this.json<GlCommit>("GET", `${this.project}/repository/commits/${sha}`);
+		const diff = await this.json<GlDiff[]>("GET", `${this.project}/repository/commits/${sha}/diff?per_page=100`);
 		return { parent: c.parent_ids?.[0] ?? null, files: diff.map((d) => ({ filename: d.deleted_file ? d.old_path : d.new_path, status: d.deleted_file ? "removed" : d.new_file ? "added" : "modified" })) };
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
@@ -182,8 +204,8 @@ export class GitLab implements Remote {
 		return res.status === 404 ? null : res.arrayBuffer;
 	}
 	async listTags() {
-		const list: any[] = await this.json("GET", `${this.project}/repository/tags?per_page=100`);
-		return list.map((t) => ({ name: t.name, sha: t.commit?.id }));
+		const list = await this.json<GlTag[]>("GET", `${this.project}/repository/tags?per_page=100`);
+		return list.map((t) => ({ name: t.name, sha: t.commit?.id ?? "" }));
 	}
 	async rateLimit() {
 		return null;

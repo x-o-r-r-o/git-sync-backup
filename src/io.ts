@@ -125,9 +125,8 @@ export class VaultIO {
 	async remove(path: string): Promise<void> {
 		const f = this.tfile(path);
 		if (f) {
-			const fm = this.app.fileManager as unknown as { trashFile?: (f: TFile) => Promise<void> };
-			if (fm.trashFile) await fm.trashFile.call(this.app.fileManager, f);
-			else await this.app.vault.trash(f, false);
+			// Respects the user's "deleted files" preference (system trash, .trash, or permanent).
+			await this.app.fileManager.trashFile(f);
 		} else if (await this.adapter.exists(path)) {
 			await this.adapter.trashLocal(path);
 		}
@@ -140,7 +139,7 @@ export class VaultIO {
 				const listing = await this.adapter.list(dir);
 				if (listing.files.length || listing.folders.length) return;
 				const folder = this.app.vault.getAbstractFileByPath(dir);
-				if (folder instanceof TFolder) await this.app.vault.delete(folder, false);
+				if (folder instanceof TFolder) await this.app.fileManager.trashFile(folder);
 				else await this.adapter.rmdir(dir, false);
 			} catch {
 				return;

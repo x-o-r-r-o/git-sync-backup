@@ -46,3 +46,28 @@ test("shared folder: Work/ syncs to its own repo root; main repo never sees it",
 	assert.equal((await me.sync()).upToDate, true, "main engine unaffected by Work/ changes");
 	assert.ok(![...privateRepo.headFiles().keys()].some((p) => p.startsWith("Work/")));
 });
+
+test("shared folder: a nested folder with the same name stays private", async () => {
+	const { sharedFolderPattern } = await import("../src/shared.ts");
+	assert.equal(sharedFolderPattern("Work"), "/Work/");
+	const privateRepo = new FakeGitHub();
+	const teamRepo = new FakeGitHub();
+	const me = device("Mac", privateRepo);
+	me.host.extraExcludes = () => [sharedFolderPattern("Work")];
+	const teamHost = { ...me.host, gh: teamRepo as any, state: { ...me.host.state, base: {}, cache: {} } } as any;
+	teamHost.stateFilePath = ".obsidian/plugins/vault-sync-github/sync-state-team.json";
+	teamHost.deviceScope = () => ({ include: [sharedFolderPattern("Work")], exclude: [], maxDownloadMB: 0 });
+	teamHost.codec = () => new Codec([new PrefixLayer("Work")]);
+	teamHost.extraExcludes = undefined;
+	const teamEngine = new SyncEngine(teamHost);
+
+	me.fs.put("Work/shared.md", "team\n");
+	me.fs.put("Projects/Work/private.md", "mine\n");
+	await me.sync();
+	await teamEngine.run("sync");
+	assert.deepEqual([...teamRepo.headFiles().keys()].filter((p) => !p.startsWith(".")), ["shared.md"]);
+	assert.ok(privateRepo.headFiles().has("Projects/Work/private.md"), "nested Work/ is backed up privately");
+	assert.ok(!privateRepo.headFiles().has("Work/shared.md"));
+	await teamEngine.run("sync");
+	assert.equal(me.fs.text("Projects/Work/private.md"), "mine\n", "not moved into the shared folder");
+});
