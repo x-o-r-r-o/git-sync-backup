@@ -5,7 +5,8 @@ import { VaultIO } from "./io.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { VaultSyncSettingTab } from "./settings-tab.ts";
 import { SyncCancelled, SyncEngine } from "./sync.ts";
-import type { SyncHost, SyncReport } from "./sync.ts";
+import type { DeviceScope, SyncHost, SyncReport } from "./sync.ts";
+import { SetupWizard } from "./wizard.ts";
 import { DEFAULT_SETTINGS, emptyState } from "./types.ts";
 import type {
 	ConflictChoice,
@@ -40,6 +41,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	state!: SyncState;
 	gh!: GitHub;
 	lastReport: SyncReport | null = null;
+	/** Set by the setup wizard to show live progress. */
+	onProgress: ((text: string) => void) | null = null;
 	lastError: string | null = null;
 	lastErrorAt = 0;
 	private engine!: SyncEngine;
@@ -112,7 +115,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.registerEvent(this.app.vault.on("delete", (f) => onVaultChange(f)));
 			this.registerEvent(this.app.vault.on("rename", (f, old) => onVaultChange(f, old)));
 			this.rescheduleTriggers();
-			if (this.settings.syncOnStartup) window.setTimeout(() => this.sync("startup"), 2500);
+			if (!this.isConfigured() && !this.settings.wizardShown) {
+				this.settings.wizardShown = true;
+				void this.saveSettings();
+				window.setTimeout(() => this.openWizard(), 1000);
+			} else if (this.settings.syncOnStartup) window.setTimeout(() => this.sync("startup"), 2500);
 		});
 
 		this.registerDomEvent(document, "visibilitychange", () => {
@@ -178,6 +185,67 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	setDeviceName(name: string) {
 		window.localStorage.setItem(this.localKey("device"), name);
+	}
+	/** Device-local scope: never synced, so each device can choose its own folders and limits. */
+	deviceScope(): DeviceScope {
+		try {
+			const raw = JSON.parse(window.localStorage.getItem(this.localKey("scope")) ?? "{}");
+			return {
+				include: Array.isArray(raw.include) ? raw.include : [],
+				exclude: Array.isArray(raw.exclude) ? raw.exclude : [],
+				maxDownloadMB: Number(raw.maxDownloadMB) || 0,
+			};
+		} catch {
+			return { include: [], exclude: [], maxDownloadMB: 0 };
+		}
+	}
+	setDeviceScope(scope: DeviceScope) {
+		window.localStorage.setItem(this.localKey("scope"), JSON.stringify(scope));
+		this.fullScanNeeded = true;
+	}
+	progress(text: string) {
+		this.onProgress?.(text);
+		this.statusEl?.setAttr("aria-label", text);
+		this.ribbonEl?.setAttr("aria-label", `Sync with GitHub: ${text}`);
+	}
+	openWizard() {
+		new SetupWizard(this.app, this).open();
+	}
+
+	/** First sync from the setup wizard. Returns a one-line summary. */
+	async firstSync(prefer?: "local" | "remote"): Promise<string> {
+		await this.sync("manual", this.settings.mode, prefer ? { firstSyncPrefer: prefer } : { firstSyncPrefer: undefined });
+		if (this.lastError) return `The first sync failed: ${this.lastError}. You can retry from the sync status panel.`;
+		const r = this.lastReport;
+		if (!r) return "Sync finished.";
+		if (r.upToDate) return "Everything was already in sync.";
+		const parts = [
+			r.downloaded.length && `${r.downloaded.length} downloaded`,
+			r.uploaded.length && `${r.uploaded.length} uploaded`,
+			r.conflictCopies.length && `${r.conflictCopies.length} kept as both versions`,
+			r.skipped.length && `${r.skipped.length} skipped (see status panel)`,
+		].filter(Boolean);
+		return `First sync complete: ${parts.join(", ") || "no changes"}.`;
+	}
+
+	async freeUpSpace() {
+		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
+		try {
+			const plan = await this.engine.freeUpSpace((p) =>
+				confirmPlan(
+					this.app,
+					"Free up space on this device",
+					`Remove ${p.files.length} local file(s) (${(p.bytes / 1048576).toFixed(1)} MB) that this device doesn't sync (outside its folders or above its download limit). Each one is identical to the copy on GitHub, which is kept. They go to the trash.`,
+					[{ title: "Remove from this device", items: p.files }],
+					"Free up space",
+				),
+			);
+			if (!plan.files.length) new Notice("Nothing to remove: no local files outside this device's scope are safely on GitHub.");
+			else new Notice(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB.`);
+		} catch (e) {
+			if (!(e instanceof SyncCancelled)) new Notice(`Could not free up space: ${errMsg(e)}`);
+		}
+		this.refreshHealth();
 	}
 
 	// ---------------- persistence ----------------
@@ -340,7 +408,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (trigger === "manual") new Notice(problem);
 			return;
 		}
-		if (trigger === "manual" && this.settings.reviewBeforeManualSync && !opts.defer && mode === this.settings.mode) {
+		if (trigger === "manual" && this.settings.reviewBeforeManualSync && !Object.keys(opts).length && mode === this.settings.mode) {
 			return this.openReview();
 		}
 		if (trigger !== "manual" && !navigator.onLine) {
@@ -469,7 +537,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				let newData: ArrayBuffer | null;
 				let oldLabel = "GitHub";
 				let newLabel = "This device";
-				if (d.kind === "download" || d.kind === "delete-local") {
+				if (d.kind === "move-local") {
+					oldData = await local(d.from);
+					newData = await blob(remoteSha);
+					oldLabel = `This device (${d.from})`;
+					newLabel = `GitHub (${d.path})`;
+				} else if (d.kind === "adopt-remote-edit") {
+					oldData = await local(d.path);
+					newData = await blob(d.sha);
+					oldLabel = `This device (${d.path})`;
+					newLabel = `GitHub (${d.from})`;
+				} else if (d.kind === "download" || d.kind === "delete-local") {
 					oldData = await local(d.path);
 					newData = await blob(remoteSha);
 					oldLabel = "This device";
@@ -544,7 +622,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private browseAt(e: TimelineEntry) {
 		new CommitListModal(this.app, `Files at ${e.sha.slice(0, 7)} (${new Date(e.date).toLocaleString()})`, async () => {
 			const tree = await this.gh.listTree(await this.gh.getCommitTree(e.sha));
-			const scope = this.engine.buildScope();
+			const scope = this.engine.buildScope(false);
 			return tree
 				.filter((t) => t.type === "blob" && scope(t.path))
 				.sort((a, b) => a.path.localeCompare(b.path))
@@ -635,6 +713,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.addCommand({ id: "timeline", name: "Timeline: restore vault or folder to an earlier point", callback: () => this.openTimeline() });
 		this.addCommand({ id: "reset-to-github", name: "Make this device match GitHub (discard local changes)", callback: () => this.resetToGitHub() });
 		this.addCommand({ id: "snapshot", name: "Create backup snapshot on GitHub", callback: () => this.snapshot(true) });
+		this.addCommand({ id: "setup-wizard", name: "Run setup wizard", callback: () => this.openWizard() });
+		this.addCommand({ id: "free-up-space", name: "Free up space on this device", callback: () => this.freeUpSpace() });
 		this.addCommand({ id: "show-log", name: "Show sync log", callback: () => this.openLog() });
 		this.addCommand({
 			id: "file-history",

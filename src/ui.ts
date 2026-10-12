@@ -153,6 +153,8 @@ export class DeleteGuardModal extends Modal {
 const GROUPS: [string, Decision["kind"], string][] = [
 	["Download from GitHub", "download", "arrow-down"],
 	["Upload to GitHub", "upload", "arrow-up"],
+	["Renamed on GitHub (rename here)", "move-local", "pencil"],
+	["Renamed here, edited on GitHub", "adopt-remote-edit", "git-merge"],
 	["Changed on both sides", "conflict", "git-merge"],
 	["Delete on this device", "delete-local", "trash"],
 	["Delete on GitHub", "delete-remote", "trash-2"],
@@ -206,7 +208,8 @@ export class ReviewModal extends Modal {
 					refresh();
 				};
 				boxes.push(cb);
-				row.createSpan({ text: d.path, cls: "vsg-review-path" });
+				const from = "from" in d ? d.from : "renamedFrom" in d && d.renamedFrom ? d.renamedFrom : null;
+				row.createSpan({ text: from ? `${from} → ${d.path}` : d.path, cls: "vsg-review-path" });
 				const btn = row.createEl("button", { text: "Diff", cls: "vsg-review-diff" });
 				btn.onClickEvent(() => new DiffModal(this.app, d.path, () => this.loadDiff(d)).open());
 			}
@@ -227,7 +230,15 @@ export class ReviewModal extends Modal {
 		footer.addButton((b) => {
 			syncBtnRef.set = (n) => b.setButtonText(n === this.checked.size ? "Sync all" : `Sync ${n} selected`).setDisabled(n === 0);
 			b.setCta().onClick(() => {
-				const deferred = new Set([...this.checked].filter(([, v]) => !v).map(([p]) => p));
+				// A rename involves two paths: defer both so neither half runs alone.
+				const deferred = new Set<string>();
+				for (const d of this.decisions) {
+					if (this.checked.get(d.path)) continue;
+					deferred.add(d.path);
+					if ("from" in d) deferred.add(d.from);
+					if (d.kind === "upload" && d.renamedFrom) deferred.add(d.renamedFrom);
+					if (d.kind === "delete-remote" && d.renamedTo) deferred.add(d.renamedTo);
+				}
 				this.close();
 				this.onSync(deferred);
 			});

@@ -8,9 +8,14 @@ export type SyncMode = "sync" | "push" | "pull";
 export type Decision =
 	| { kind: "download"; path: string; sha: string }
 	| { kind: "delete-local"; path: string }
-	| { kind: "upload"; path: string; sha: string }
-	| { kind: "delete-remote"; path: string }
-	| { kind: "conflict"; path: string; base: string | null; local: string; remote: string };
+	| { kind: "upload"; path: string; sha: string; renamedFrom?: string }
+	| { kind: "delete-remote"; path: string; renamedTo?: string }
+	| { kind: "conflict"; path: string; base: string | null; local: string; remote: string }
+	// Renamed on GitHub: rename the local file instead of delete + re-download. `upload` is set when the
+	// local file was edited meanwhile, so the edit is pushed under the new name.
+	| { kind: "move-local"; path: string; from: string; sha: string; upload?: string }
+	// Renamed here, edited on GitHub: bring GitHub's edit into the new name and drop the old path.
+	| { kind: "adopt-remote-edit"; path: string; from: string; sha: string };
 
 export interface Plan {
 	decisions: Decision[];
@@ -73,4 +78,78 @@ export function decide(
 		}
 	}
 	return { decisions, settled };
+}
+
+/**
+ * Turns delete + add pairs with identical content into renames. Exact content match only: renaming a
+ * note in Obsidian never changes the note itself (link updates touch other files).
+ */
+export function detectRenames(
+	decisions: Decision[],
+	base: Record<string, string>,
+	local: Map<string, string>,
+	remote: Map<string, string>,
+): Decision[] {
+	const used = new Set<string>();
+	const out = new Map<string, Decision>();
+
+	// Candidate "new" paths, indexed by the content they carry.
+	const remoteAdds = new Map<string, string[]>(); // sha -> new paths added on GitHub
+	const localAdds = new Map<string, string[]>(); // sha -> new paths added here
+	for (const d of decisions) {
+		if (d.kind === "download" && !base[d.path] && !local.has(d.path)) push(remoteAdds, d.sha, d.path);
+		if (d.kind === "upload" && !base[d.path] && !remote.has(d.path)) push(localAdds, d.sha, d.path);
+	}
+	const take = (m: Map<string, string[]>, sha: string): string | undefined => {
+		const list = m.get(sha);
+		while (list?.length) {
+			const p = list.shift()!;
+			if (!used.has(p)) return p;
+		}
+		return undefined;
+	};
+
+	for (const d of decisions) {
+		if (used.has(d.path)) continue;
+		const b = base[d.path];
+		if (!b) continue;
+		const l = local.get(d.path);
+		const r = remote.get(d.path);
+
+		// Renamed on GitHub (old path gone remotely, same content appeared at a new path).
+		if (!r && (d.kind === "delete-local" || d.kind === "upload")) {
+			const to = take(remoteAdds, b);
+			if (to) {
+				used.add(d.path).add(to);
+				out.set(to, { kind: "move-local", path: to, from: d.path, sha: b, ...(l && l !== b ? { upload: l } : {}) });
+				continue;
+			}
+		}
+		// Renamed here (old path gone locally, same content at a new local path).
+		if (!l && (d.kind === "delete-remote" || d.kind === "download")) {
+			const to = take(localAdds, b);
+			if (to) {
+				used.add(d.path).add(to);
+				if (d.kind === "delete-remote") {
+					out.set(d.path, { kind: "delete-remote", path: d.path, renamedTo: to });
+					out.set(to, { kind: "upload", path: to, sha: b, renamedFrom: d.path });
+				} else {
+					out.set(to, { kind: "adopt-remote-edit", path: to, from: d.path, sha: r! });
+				}
+			}
+		}
+	}
+
+	const result: Decision[] = [];
+	for (const d of decisions) {
+		if (!used.has(d.path)) result.push(d);
+		else if (out.has(d.path)) result.push(out.get(d.path)!);
+	}
+	return result;
+}
+
+function push(m: Map<string, string[]>, k: string, v: string) {
+	const list = m.get(k);
+	if (list) list.push(v);
+	else m.set(k, [v]);
 }

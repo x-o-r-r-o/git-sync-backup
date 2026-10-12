@@ -135,7 +135,8 @@ export class HealthView extends ItemView {
 			text: `Last sync ${ago(p.state.lastSync)} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? "two-way" : p.settings.mode === "push" ? "backup only" : "pull only"}`,
 		});
 		const acts = el.createDiv({ cls: "vsg-h-actions" });
-		this.button(acts, "Sync now", () => p.sync("manual"), true);
+		if (!p.isConfigured()) this.button(acts, "Run setup wizard", () => p.openWizard(), true);
+		else this.button(acts, "Sync now", () => p.sync("manual"), true);
 		this.button(acts, "Review…", () => p.openReview());
 		this.button(acts, "↻", () => this.refresh(true)).setAttr("aria-label", "Refresh");
 
@@ -156,6 +157,11 @@ export class HealthView extends ItemView {
 		if (this.remoteInfo?.ahead) pend.createDiv({ text: "GitHub has newer changes from another device", cls: "vsg-h-accent" });
 		else if (this.remoteInfo?.ahead === false) pend.createDiv({ text: "Nothing new on GitHub", cls: "vsg-muted" });
 		else if (this.loadingRemote) pend.createDiv({ text: "Checking GitHub…", cls: "vsg-muted" });
+		const ds = p.deviceScope();
+		if (ds.include.length || ds.exclude.length || ds.maxDownloadMB) {
+			const bits = [ds.include.length && `only ${ds.include.join(", ")}`, ds.exclude.length && `excluding ${ds.exclude.join(", ")}`, ds.maxDownloadMB && `no downloads over ${ds.maxDownloadMB} MB`].filter(Boolean);
+			pend.createDiv({ cls: "vsg-muted", text: `This device syncs ${bits.join("; ")}.` });
+		}
 		const next = p.nextScheduledSync();
 		pend.createDiv({ cls: "vsg-muted", text: next ? `Next scheduled sync ${new Date(next).toLocaleTimeString()}` : "No periodic sync scheduled" });
 
@@ -206,6 +212,8 @@ export class HealthView extends ItemView {
 		this.button(t, "Timeline & restore", () => p.openTimeline());
 		this.button(t, "Snapshot now", () => p.snapshot(true));
 		this.button(t, "Make this device match GitHub", () => p.resetToGitHub());
+		this.button(t, "Free up space", () => p.freeUpSpace());
+		this.button(t, "Setup wizard", () => p.openWizard());
 		this.button(t, "Sync log", () => p.openLog());
 		this.button(t, "Settings", () => p.openSettings());
 	}

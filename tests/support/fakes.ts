@@ -63,6 +63,13 @@ export class FakeFS {
 			writeBinary: write,
 			mkdir: async (p: string) => void fs.dirs.add(p),
 			rmdir: async (p: string) => void fs.dirs.delete(p),
+			rename: async (from: string, to: string) => {
+				const f = fs.files.get(from);
+				if (!f) throw new Error("no such file " + from);
+				if (fs.files.has(to)) throw new Error("exists " + to);
+				fs.files.set(to, { data: f.data, mtime: ++clock });
+				fs.files.delete(from);
+			},
 			trashLocal: async (p: string) => {
 				fs.files.delete(p);
 				fs.trash.push(p);
@@ -91,6 +98,7 @@ export class FakeFS {
 					await write(p, d);
 				},
 				createFolder: async (p: string) => void fs.dirs.add(p),
+				rename: async (f: TFile, to: string) => adapter.rename(f.path, to),
 				delete: async (f: TFolder) => void fs.dirs.delete(f.path),
 				trash: async (f: TFile) => adapter.trashLocal(f.path),
 			},

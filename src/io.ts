@@ -109,6 +109,18 @@ export class VaultIO {
 		}
 	}
 
+	/**
+	 * Renames a file without touching its content or rewriting links (the other device already synced
+	 * any link updates). Open tabs and bookmarks follow the file.
+	 */
+	async rename(from: string, to: string): Promise<void> {
+		await this.ensureDir(parentDir(to));
+		const f = this.tfile(from);
+		if (f) await this.app.vault.rename(f, to);
+		else await this.adapter.rename(from, to);
+		await this.pruneEmptyDirs(parentDir(from));
+	}
+
 	/** Moves to trash (recoverable), then removes now-empty parent folders. */
 	async remove(path: string): Promise<void> {
 		const f = this.tfile(path);

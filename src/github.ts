@@ -153,6 +153,24 @@ export class GitHub {
 		return res.status === 404 ? null : res.json;
 	}
 
+	/** Repositories the token can see, most recently updated first. */
+	async listRepos(maxPages = 3): Promise<{ owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[]> {
+		const out: { owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[] = [];
+		for (let page = 1; page <= maxPages; page++) {
+			const list: any[] = await this.json("GET", `/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,collaborator,organization_member`);
+			for (const r of list) out.push({ owner: r.owner.login, name: r.name, private: r.private, updated: r.updated_at, defaultBranch: r.default_branch });
+			if (list.length < 100) break;
+		}
+		return out;
+	}
+
+	/** Number of files on a branch (0 if the branch or repo is empty). */
+	async countFiles(branch: string): Promise<number> {
+		const head = await this.getRef(branch);
+		if (!head) return 0;
+		return (await this.listTree(await this.getCommitTree(head))).filter((e) => e.type === "blob").length;
+	}
+
 	async createRepo(name: string, org?: string): Promise<{ html_url: string }> {
 		const path = org ? `/orgs/${encodeURIComponent(org)}/repos` : "/user/repos";
 		return this.json("POST", path, {

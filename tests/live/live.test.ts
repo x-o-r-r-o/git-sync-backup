@@ -245,3 +245,27 @@ test("live: tags and rate limit endpoints", { skip: !live }, async () => {
 	const tags = await gh.listTags();
 	assert.ok(Array.isArray(tags));
 });
+
+test("live: renames travel as renames; canvas merges node by node", { skip: !live }, async () => {
+	const branch = await freshBranch("v03");
+	const { a, b } = pair(branch);
+	const c = (nodes: object[]) => JSON.stringify({ nodes, edges: [] }, null, "\t");
+	a.fs.put("Inbox/idea.md", "idea\n");
+	a.fs.put("Board.canvas", c([{ id: "1", text: "start", x: 0, y: 0 }]));
+	await a.sync();
+	await b.sync();
+	a.fs.files.set("Projects/idea.md", a.fs.files.get("Inbox/idea.md")!);
+	a.fs.files.delete("Inbox/idea.md");
+	a.fs.put("Board.canvas", c([{ id: "1", text: "start", x: 0, y: 0 }, { id: "2", text: "A" }]));
+	b.fs.put("Board.canvas", c([{ id: "1", text: "start", x: 0, y: 0 }, { id: "3", text: "B" }]));
+	const ra = await a.sync();
+	assert.deepEqual(ra.renamed, ["Inbox/idea.md → Projects/idea.md"]);
+	const rb = await b.sync();
+	assert.deepEqual(rb.renamed, ["Inbox/idea.md → Projects/idea.md"]);
+	assert.deepEqual(rb.merged, ["Board.canvas"]);
+	assert.equal(b.fs.text("Projects/idea.md"), "idea\n");
+	const remote = await remoteFiles(branch);
+	assert.ok(remote.has("Projects/idea.md") && !remote.has("Inbox/idea.md"));
+	await a.sync();
+	assert.deepEqual(JSON.parse(a.fs.text("Board.canvas")!).nodes.map((n: { id: string }) => n.id).sort(), ["1", "2", "3"]);
+});

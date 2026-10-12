@@ -6,7 +6,8 @@ import type { GitHub, NewTreeEntry } from "./github.ts";
 import { compileGlobs } from "./glob.ts";
 import { VaultIO } from "./io.ts";
 import { merge3 } from "./merge.ts";
-import { decide } from "./plan.ts";
+import { decide, detectRenames } from "./plan.ts";
+import { smartMerge } from "./smartmerge.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { emptyState } from "./types.ts";
 import type {
@@ -35,6 +36,24 @@ export interface SyncHost {
 	localChanges?(): LocalChanges;
 	/** Called after a successful sync with the snapshot that sync covered. */
 	markLocalChangesSynced?(covered: LocalChanges): void;
+	/** Device-local scope (not synced between devices). */
+	deviceScope?(): DeviceScope;
+	/** Human-readable progress for long syncs. */
+	progress?(text: string): void;
+}
+
+export interface DeviceScope {
+	/** If non-empty, only these folders/patterns are synced on this device. */
+	include: string[];
+	/** Extra exclude patterns for this device. */
+	exclude: string[];
+	/** Remote files larger than this are not downloaded to this device (0 = no limit). */
+	maxDownloadMB: number;
+}
+
+export interface FreeSpacePlan {
+	files: string[];
+	bytes: number;
 }
 
 export interface ResetPlan {
@@ -57,6 +76,7 @@ export interface SyncReport {
 	uploaded: string[];
 	deletedRemote: string[];
 	merged: string[];
+	renamed: string[];
 	conflictCopies: string[];
 	skipped: string[];
 	errors: string[];
@@ -108,6 +128,7 @@ function safePath(p: string): boolean {
 export class SyncEngine {
 	private io: VaultIO;
 	private host: SyncHost;
+	private opts: SyncOptions = {};
 
 	constructor(host: SyncHost) {
 		this.host = host;
@@ -122,12 +143,18 @@ export class SyncEngine {
 		return `${this.s.owner}/${this.s.repo}@${this.s.branch}`;
 	}
 
-	buildScope(): (path: string) => boolean {
+	/** Which paths this plugin manages. With `device` (default) the device-local scope applies too. */
+	buildScope(device = true): (path: string) => boolean {
 		const cfg = this.host.app.vault.configDir;
-		const patterns = this.s.excludePatterns.split("\n").map((l) => l.split("{config}").join(cfg));
-		const excluded = compileGlobs([...patterns, ".git/", this.host.stateFilePath]);
+		const sub = (l: string) => l.split("{config}").join(cfg);
+		const patterns = this.s.excludePatterns.split("\n").map(sub);
+		const ds = device ? this.host.deviceScope?.() : undefined;
+		const excluded = compileGlobs([...patterns, ...(ds?.exclude ?? []).map(sub), ".git/", this.host.stateFilePath]);
+		const includes = (ds?.include ?? []).map((x) => x.trim()).filter((x) => x && !x.startsWith("#"));
+		const included = includes.length ? compileGlobs(includes.map(sub)) : null;
 		return (p: string) => {
 			if (excluded(p)) return false;
+			if (included && !included(p) && !p.startsWith(cfg + "/")) return false;
 			if (!isHiddenPath(p)) return true;
 			if (!this.s.syncConfigDir || !p.startsWith(cfg + "/")) return false;
 			return !isHiddenPath(p.slice(cfg.length + 1));
@@ -138,7 +165,8 @@ export class SyncEngine {
 	async preview(mode: SyncMode): Promise<Preview> {
 		const ctx = await this.gather(false, {}, true);
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		return { decisions: plan.decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
+		const decisions = detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas);
+		return { decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
 	}
 
 	/**
@@ -225,6 +253,7 @@ export class SyncEngine {
 		const configDue = this.s.syncConfigDir && (full || now - state.lastConfigScan > CONFIG_SCAN_MS);
 		const cfgPrefix = this.host.app.vault.configDir + "/";
 
+		this.host.progress?.("Scanning files…");
 		const files = this.io.listVault(baseScope);
 		if (configDue) files.push(...(await this.io.listConfig(baseScope)));
 		const localShas = new Map<string, string>();
@@ -264,6 +293,7 @@ export class SyncEngine {
 		}
 
 		// ---- remote ----
+		this.host.progress?.("Checking GitHub…");
 		let head = await this.host.gh.getRef(this.s.branch);
 		if (!head && initIfEmpty) head = await this.initRemote();
 
@@ -303,6 +333,7 @@ export class SyncEngine {
 		let treeSha: string | null = null;
 		if (head) {
 			treeSha = await this.host.gh.getCommitTree(head);
+			const deviceMax = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
 			const lowerLocal = new Map([...localShas.keys()].map((p) => [p.toLowerCase(), p]));
 			const seenLower = new Set<string>();
 			for (const e of await this.host.gh.listTree(treeSha)) {
@@ -314,6 +345,10 @@ export class SyncEngine {
 				}
 				if ((e.size ?? 0) > maxBytes) {
 					skip(e.path, `remote file larger than ${this.s.maxFileSizeMB} MB`);
+					continue;
+				}
+				if (deviceMax && (e.size ?? 0) > deviceMax && !localShas.has(e.path)) {
+					skip(e.path, "larger than this device's download limit");
 					continue;
 				}
 				const lower = e.path.toLowerCase();
@@ -355,6 +390,7 @@ export class SyncEngine {
 	private async runOnce(mode: SyncMode, opts: SyncOptions): Promise<SyncReport> {
 		const host = this.host;
 		const state = host.state;
+		this.opts = opts;
 		const report: SyncReport = {
 			mode,
 			upToDate: false,
@@ -363,6 +399,7 @@ export class SyncEngine {
 			uploaded: [],
 			deletedRemote: [],
 			merged: [],
+			renamed: [],
 			conflictCopies: [],
 			skipped: [],
 			errors: [],
@@ -384,7 +421,7 @@ export class SyncEngine {
 
 		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		let decisions = plan.decisions;
+		let decisions = detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas);
 
 		// Paths skipped for size/case keep their old base so they are not seen as deleted later.
 		const next: Record<string, string> = { ...plan.settled };
@@ -392,7 +429,8 @@ export class SyncEngine {
 
 		// ---- delete guard ----
 		const delLocal = decisions.filter((d) => d.kind === "delete-local").map((d) => d.path);
-		const delRemote = decisions.filter((d) => d.kind === "delete-remote").map((d) => d.path);
+		// Renames are not deletions.
+		const delRemote = decisions.filter((d) => d.kind === "delete-remote" && !d.renamedTo).map((d) => d.path);
 		const total = delLocal.length + delRemote.length;
 		const baseCount = Object.keys(state.base).length;
 		const limit = Math.max(this.s.deleteGuardMin, Math.ceil((baseCount * this.s.deleteGuardPercent) / 100));
@@ -409,6 +447,7 @@ export class SyncEngine {
 
 		const uploads: Upload[] = [];
 		const remoteDeletes: string[] = [];
+		const renames: string[] = [];
 		const device = host.deviceName();
 
 		const recordWrite = async (path: string, sha: string, data?: ArrayBuffer) => {
@@ -430,15 +469,48 @@ export class SyncEngine {
 
 		// ---- apply simple decisions (parallel) ----
 		const simple = decisions.filter((d) => d.kind !== "conflict");
+		let done = 0;
+		const downloads = simple.filter((d) => d.kind === "download" || d.kind === "adopt-remote-edit").length;
 		await pool(simple, 4, async (d) => {
 			try {
 				switch (d.kind) {
+					case "move-local": {
+						if (!(await this.io.stat(d.from))) {
+							// The old file vanished meanwhile: fall back to a plain download.
+							const data = await host.gh.getBlob(d.sha);
+							await this.io.write(d.path, data);
+							await recordWrite(d.path, d.sha, data);
+						} else {
+							await this.io.rename(d.from, d.path);
+							const old = cacheNext[d.from];
+							const st = await this.io.stat(d.path);
+							if (st) cacheNext[d.path] = { m: st.mtime, s: st.size, h: d.upload ?? d.sha, ...(old?.n ? { n: old.n } : {}) };
+						}
+						delete cacheNext[d.from];
+						delete next[d.from];
+						next[d.path] = d.sha;
+						if (d.upload) await queueUpload(d.path, undefined, d.upload);
+						report.renamed.push(`${d.from} → ${d.path}`);
+						break;
+					}
+					case "adopt-remote-edit": {
+						const data = await host.gh.getBlob(d.sha);
+						await this.io.write(d.path, data);
+						await recordWrite(d.path, d.sha, data);
+						await queueUpload(d.path, data, d.sha);
+						remoteDeletes.push(d.from);
+						renames.push(`${d.from} → ${d.path}`);
+						report.renamed.push(`${d.from} → ${d.path} (with edits from GitHub)`);
+						host.progress?.(`Downloading ${++done}/${downloads}`);
+						break;
+					}
 					case "download": {
 						const data = await host.gh.getBlob(d.sha);
 						await this.io.write(d.path, data);
 						await recordWrite(d.path, d.sha, data);
 						next[d.path] = d.sha;
 						report.downloaded.push(d.path);
+						host.progress?.(`Downloading ${++done}/${downloads}`);
 						break;
 					}
 					case "delete-local":
@@ -449,6 +521,10 @@ export class SyncEngine {
 						break;
 					case "upload":
 						await queueUpload(d.path, undefined, d.sha);
+						if (d.renamedFrom) {
+							renames.push(`${d.renamedFrom} → ${d.path}`);
+							report.renamed.push(`${d.renamedFrom} → ${d.path}`);
+						}
 						break;
 					case "delete-remote":
 						remoteDeletes.push(d.path);
@@ -480,15 +556,17 @@ export class SyncEngine {
 		}
 		let newHead = ctx.head;
 		if (mode !== "pull" && (uploads.length || remoteDeletes.length) && ctx.head && ctx.treeSha) {
-			newHead = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, device);
+			newHead = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, device, renames);
 			report.commit = newHead;
+			const renamedTargets = new Set(renames.map((r) => r.split(" → ")[1]));
+			const renamedSources = new Set(renames.map((r) => r.split(" → ")[0]));
 			for (const u of uploads) {
 				next[u.path] = u.sha;
-				if (!report.merged.includes(u.path) && !report.conflictCopies.includes(u.path)) report.uploaded.push(u.path);
+				if (!report.merged.includes(u.path) && !report.conflictCopies.includes(u.path) && !renamedTargets.has(u.path)) report.uploaded.push(u.path);
 			}
 			for (const p of remoteDeletes) {
 				delete next[p];
-				report.deletedRemote.push(p);
+				if (!renamedSources.has(p)) report.deletedRemote.push(p);
 			}
 		}
 
@@ -540,6 +618,26 @@ export class SyncEngine {
 		};
 
 		if (mode === "pull") return keepBoth(false);
+
+		// First sync with an existing vault on both sides: the setup wizard may say which side wins.
+		if (!d.base && this.opts.firstSyncPrefer === "remote") return void (await writeRemote());
+		if (!d.base && this.opts.firstSyncPrefer === "local") return void (await queueUpload(d.path, localData));
+
+		// Structure-aware merge first (canvas/JSON by key and id, Markdown frontmatter by key).
+		if (d.base && localText !== null && remoteText !== null && this.s.conflictStrategy !== "local" && this.s.conflictStrategy !== "remote") {
+			const b = asText(d.path, await host.gh.getBlob(d.base));
+			const smart = b === null ? null : smartMerge(d.path, b, localText, remoteText, { local: `this device (${device})`, remote: "GitHub" });
+			if (smart?.clean) {
+				const merged = encodeText(smart.text);
+				const sha = await gitBlobSha(merged);
+				await this.io.write(d.path, merged);
+				await recordWrite(d.path, sha, merged);
+				await queueUpload(d.path, merged, sha);
+				report.merged.push(d.path);
+				host.log(`Merged ${d.path} (${smart.kind}-aware merge).`);
+				return;
+			}
+		}
 
 		let strategy: string = this.s.conflictStrategy;
 		if (strategy === "ask") {
@@ -602,7 +700,7 @@ export class SyncEngine {
 		}
 	}
 
-	private async push(head: string, baseTree: string, uploads: Upload[], deletes: string[], device: string): Promise<string> {
+	private async push(head: string, baseTree: string, uploads: Upload[], deletes: string[], device: string, renames: string[] = []): Promise<string> {
 		const gh = this.host.gh;
 		// Trees are built in chained chunks (each based on the previous one), so memory stays
 		// bounded to roughly one chunk and no single request gets too large.
@@ -617,6 +715,7 @@ export class SyncEngine {
 		};
 
 		for (let i = 0; i < uploads.length; i += UPLOAD_BATCH) {
+			this.host.progress?.(`Uploading ${Math.min(i + UPLOAD_BATCH, uploads.length)}/${uploads.length}`);
 			// Low concurrency for writes: GitHub's secondary rate limit punishes parallel content creation.
 			await pool(uploads.slice(i, i + UPLOAD_BATCH), 2, async (u) => {
 				const data = u.data ?? (await this.io.read(u.path));
@@ -640,10 +739,46 @@ export class SyncEngine {
 		}
 		await flush();
 
-		const commit = await gh.createCommit(this.commitMessage(uploads, deletes, device), tree, [head]);
+		const commit = await gh.createCommit(this.commitMessage(uploads, deletes, device, renames), tree, [head]);
 		if (!(await gh.updateRef(this.s.branch, commit))) throw new NotFastForward();
 		this.host.log(`Pushed commit ${commit.slice(0, 7)} (${uploads.length} changed, ${deletes.length} deleted).`);
 		return commit;
+	}
+
+	/**
+	 * Remove local copies of files this device doesn't need (outside its device scope, or above its
+	 * download limit) — only when the exact same content is safely on GitHub.
+	 */
+	async freeUpSpace(confirm: (plan: FreeSpacePlan) => Promise<boolean>): Promise<FreeSpacePlan> {
+		const state = this.host.state;
+		const shared = this.buildScope(false);
+		const mine = this.buildScope(true);
+		const max = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
+		const head = await this.host.gh.getRef(this.s.branch);
+		if (!head) throw new Error("The branch on GitHub is empty.");
+		const remote = new Map<string, string>();
+		for (const e of await this.host.gh.listTree(await this.host.gh.getCommitTree(head))) if (e.type === "blob") remote.set(e.path, e.sha);
+
+		const plan: FreeSpacePlan = { files: [], bytes: 0 };
+		for (const f of this.io.listVault(shared)) {
+			if (mine(f.path) && !(max && f.size > max)) continue;
+			const r = remote.get(f.path);
+			if (!r) continue;
+			const c = state.cache[f.path];
+			const h = c && c.m === f.mtime && c.s === f.size ? c.h : await gitBlobSha(await this.io.read(f.path));
+			if (h !== r) continue; // not safely on GitHub: keep it
+			plan.files.push(f.path);
+			plan.bytes += f.size;
+		}
+		if (!plan.files.length) return plan;
+		if (!(await confirm(plan))) throw new SyncCancelled("Cancelled.");
+		for (const p of plan.files) {
+			await this.io.remove(p);
+			delete state.cache[p];
+		}
+		await this.host.saveState();
+		this.host.log(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB: removed ${plan.files.length} local copies that are safe on GitHub.`);
+		return plan;
 	}
 
 	/**
@@ -714,7 +849,8 @@ export class SyncEngine {
 		const gh = this.host.gh;
 		const head = await gh.getRef(this.s.branch);
 		if (!head) throw new Error("The branch on GitHub is empty.");
-		const scope = this.buildScope();
+		// Restores act on GitHub for every device, so they use the shared scope, not this device's.
+		const scope = this.buildScope(false);
 		const prefix = folder.replace(/^\/+|\/+$/g, "");
 		const inScope = (p: string) => scope(p) && safePath(p) && (!prefix || p === prefix || p.startsWith(prefix + "/"));
 		const read = async (tree: string) => {
@@ -756,21 +892,30 @@ export class SyncEngine {
 		return plan;
 	}
 
-	private commitMessage(uploads: Upload[], deletes: string[], device: string): string {
+	private commitMessage(uploads: Upload[], deletes: string[], device: string, renames: string[] = []): string {
 		const parts: string[] = [];
-		const added = uploads.filter((u) => !this.host.state.base[u.path]).length;
-		const changed = uploads.length - added;
+		const targets = new Set(renames.map((r) => r.split(" → ")[1]));
+		const sources = new Set(renames.map((r) => r.split(" → ")[0]));
+		const added = uploads.filter((u) => !this.host.state.base[u.path] && !targets.has(u.path)).length;
+		const changed = uploads.filter((u) => this.host.state.base[u.path]).length;
+		const deleted = deletes.filter((p) => !sources.has(p)).length;
 		if (added) parts.push(`${added} added`);
 		if (changed) parts.push(`${changed} updated`);
-		if (deletes.length) parts.push(`${deletes.length} deleted`);
-		const files = [...uploads.map((u) => u.path), ...deletes].slice(0, 10);
+		if (renames.length) parts.push(`${renames.length} renamed`);
+		if (deleted) parts.push(`${deleted} deleted`);
+		const files = [
+			...renames,
+			...uploads.map((u) => u.path).filter((p) => !targets.has(p)),
+			...deletes.filter((p) => !sources.has(p)),
+		].slice(0, 10);
 		const summary = parts.join(", ") || "sync";
 		const subject = this.s.commitTemplate
 			.split("{{device}}").join(device)
 			.split("{{summary}}").join(summary)
 			.split("{{date}}").join(new Date().toISOString())
 			.split("{{count}}").join(String(uploads.length + deletes.length));
-		const more = uploads.length + deletes.length - files.length;
+		const total = renames.length + uploads.filter((u) => !targets.has(u.path)).length + deleted;
+		const more = total - files.length;
 		const list = `${files.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- …and ${more} more` : ""}`;
 		return `${subject}\n\n${list}\n\nDevice: ${device}`;
 	}

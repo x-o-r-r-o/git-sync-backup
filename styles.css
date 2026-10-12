@@ -366,3 +366,88 @@
 	flex-wrap: wrap;
 	gap: var(--size-4-1);
 }
+
+/* ---------- v0.3: setup wizard ---------- */
+.vsg-wizard {
+	width: min(640px, 95vw);
+}
+.vsg-wz-steps {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-3);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+.vsg-wz-steps .is-active {
+	color: var(--text-accent);
+	font-weight: var(--font-semibold);
+}
+.vsg-wz-steps .is-done {
+	color: var(--text-muted);
+}
+.vsg-wz-status,
+.vsg-wz-progress {
+	margin: var(--size-4-2) 0;
+}
+.vsg-wz-progress {
+	padding: var(--size-4-3);
+	background: var(--background-secondary);
+	border-radius: var(--radius-m);
+	font-family: var(--font-monospace);
+}
+.vsg-wz-code {
+	font-size: 1.8em;
+	font-family: var(--font-monospace);
+	letter-spacing: 0.15em;
+	margin: var(--size-4-2) 0;
+	cursor: copy;
+	user-select: all;
+}
+.vsg-wz-search {
+	width: 100%;
+	margin-bottom: var(--size-4-2);
+}
+.vsg-wz-repos {
+	max-height: 40vh;
+	overflow: auto;
+}
+.vsg-wz-repo {
+	display: flex;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	word-break: break-all;
+}
+.vsg-wz-repo:hover {
+	background: var(--background-modifier-hover);
+}
+.vsg-badge {
+	font-size: var(--font-ui-smaller);
+	padding: 0 6px;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary-alt);
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+.vsg-badge-warn {
+	background: rgba(var(--color-red-rgb), 0.15);
+	color: var(--text-error);
+}
+.vsg-wz-options {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	margin: var(--size-4-3) 0;
+}
+.vsg-wz-option {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: flex-start;
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	cursor: pointer;
+}

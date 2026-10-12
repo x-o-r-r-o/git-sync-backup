@@ -36,6 +36,9 @@ export interface VaultSyncSettings {
 
 	commitTemplate: string;
 	noticeLevel: NoticeLevel;
+	/** GitHub OAuth App client ID for "Sign in with GitHub" (device flow). Not a secret. */
+	oauthClientId: string;
+	wizardShown: boolean;
 }
 
 export const DEFAULT_SETTINGS: VaultSyncSettings = {
@@ -78,6 +81,8 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 
 	commitTemplate: "{{device}}: {{summary}}",
 	noticeLevel: "errors",
+	oauthClientId: "",
+	wizardShown: false,
 };
 
 // Per-device sync state, kept in the plugin folder and never synced.
@@ -132,4 +137,6 @@ export interface LocalChanges {
 export interface SyncOptions {
 	/** Paths left out of this sync (unchecked in review). They keep their old baseline. */
 	defer?: Set<string>;
+	/** First sync only (no baseline): which side wins when a file differs. Default: keep both. */
+	firstSyncPrefer?: "local" | "remote";
 }
