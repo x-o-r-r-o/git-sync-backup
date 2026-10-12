@@ -22,7 +22,9 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm test
+      # GitHub only offers attestations on public repositories (or org-owned ones).
       - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
