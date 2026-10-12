@@ -112,8 +112,28 @@ export class FakeGitHub {
 		this.blobs.set(sha, data);
 		return sha;
 	}
+	staleRef: string | null = null; // simulate a cached, outdated branch head
 	async getRef(b: string) {
+		if (this.staleRef) return this.staleRef;
 		return this.refs.get(b) ?? null;
+	}
+	private ancestors(sha: string): Set<string> {
+		const seen = new Set<string>();
+		const stack = [sha];
+		while (stack.length) {
+			const c = stack.pop()!;
+			if (seen.has(c) || !this.commits.has(c)) continue;
+			seen.add(c);
+			stack.push(...this.commits.get(c)!.parents);
+		}
+		return seen;
+	}
+	async compare(base: string, head: string) {
+		if (!this.commits.has(base)) return "missing";
+		if (base === head) return "identical";
+		if (this.ancestors(head).has(base)) return "ahead";
+		if (this.ancestors(base).has(head)) return "behind";
+		return "diverged";
 	}
 	async getRepo() {
 		return { private: true, default_branch: "main", html_url: "", size: 0 };

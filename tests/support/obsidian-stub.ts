@@ -12,6 +12,30 @@ export class TFolder extends TAbstractFile {}
 export function arrayBufferToBase64(b: ArrayBuffer): string {
 	return Buffer.from(new Uint8Array(b)).toString("base64");
 }
-export function requestUrl(): never {
-	throw new Error("network not available in tests");
+// fetch-based stand-in for Obsidian's requestUrl (used by the live GitHub tests).
+export async function requestUrl(req: {
+	url: string;
+	method?: string;
+	headers?: Record<string, string>;
+	body?: string;
+	contentType?: string;
+	throw?: boolean;
+}) {
+	const headers: Record<string, string> = { ...(req.headers ?? {}) };
+	if (req.contentType) headers["Content-Type"] = req.contentType;
+	const res = await fetch(req.url, { method: req.method ?? "GET", headers, body: req.body });
+	const arrayBuffer = await res.arrayBuffer();
+	const text = new TextDecoder().decode(arrayBuffer);
+	const outHeaders: Record<string, string> = {};
+	res.headers.forEach((v, k) => (outHeaders[k] = v));
+	if (req.throw !== false && res.status >= 400) throw new Error(`HTTP ${res.status}`);
+	return {
+		status: res.status,
+		headers: outHeaders,
+		arrayBuffer,
+		text,
+		get json() {
+			return JSON.parse(text);
+		},
+	};
 }

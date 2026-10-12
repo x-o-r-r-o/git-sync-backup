@@ -163,6 +163,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				}),
 			);
 		new Setting(containerEl)
+			.setClass("vsg-stacked")
 			.setName("Exclude patterns")
 			.setDesc("gitignore style, one per line. {config} means the settings folder. Excluded files are never uploaded, downloaded or deleted.")
 			.addTextArea((t) => {
@@ -216,15 +217,15 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName("Delete guard threshold")
-			.setDesc("Ask when deleting more than this many files, or this percent of the vault, whichever is larger.")
+			.setDesc("Ask when deleting more than this many files (left) or this percent of the vault (right), whichever is larger.")
 			.addText((t) =>
-				t.setValue(String(s.deleteGuardMin)).onChange(async (v) => {
+				t.setPlaceholder("files").setValue(String(s.deleteGuardMin)).onChange(async (v) => {
 					s.deleteGuardMin = Math.max(0, Number(v) || 0);
 					await save();
 				}),
 			)
 			.addText((t) =>
-				t.setValue(String(s.deleteGuardPercent)).onChange(async (v) => {
+				t.setPlaceholder("%").setValue(String(s.deleteGuardPercent)).onChange(async (v) => {
 					s.deleteGuardPercent = Math.max(0, Math.min(100, Number(v) || 0));
 					await save();
 				}),

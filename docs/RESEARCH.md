@@ -51,3 +51,19 @@
 | Low | Empty commits when merged content equals remote; parallel blob creation could trip GitHub's secondary rate limit; repeated failure notices every interval | Skip unchanged uploads; write concurrency 2; notify only on first failure in a row |
 
 Regression tests were added for unsafe paths, chunked 1,200-file uploads, and no empty commits (28 tests total).
+
+## Real-world testing (2026-10-12)
+
+- **Live GitHub suite** (`npm run test:live`): 9 tests through a real private repo. Covers byte-exact round trips (binary, 450 KB text, Unicode names), SHAs matching GitHub, merge, keep-both, delete guard, edit beats delete, concurrent-push retry, config excludes, a 450-file chunked commit, history and restore, and snapshot tags. All pass.
+- **Inside Obsidian 1.14.4 (macOS):**
+  - plugin loads; ribbon, status bar, settings tab and sync log work
+  - a missing or invalid token shows a clear message
+  - first sync downloads and uploads correctly
+  - an edit is auto-synced 30 s later
+  - remote edits from a second device merge cleanly
+  - overlapping edits produce a keep-both copy
+- **Critical bug found and fixed:** GitHub API responses are cacheable for 60 s and Obsidian's HTTP layer honours that. A stale branch head was read as remote deletions, and 2 notes were deleted locally (they went to the system trash and were restored on the next sync).
+  - Fix 1: no-cache request headers plus a cache-busting parameter on the branch lookup.
+  - Fix 2: a stale-head guard. The compare API detects a head older than the last synced one and retries instead of acting; a rewritten history means a fresh baseline with no deletions.
+  - Regression tests added (30 unit and e2e tests total).
+- Note: hidden or background windows have their timers throttled by Chromium, so auto-sync after edits can run up to about 1 min late while Obsidian is in the background.

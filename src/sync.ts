@@ -10,7 +10,7 @@ import { decide } from "./plan.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { emptyState } from "./types.ts";
 import type { ConflictChoice, ConflictInfo, DeleteGuardChoice, SyncState, VaultSyncSettings } from "./types.ts";
-import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath, pool } from "./util.ts";
+import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath, pool, sleep } from "./util.ts";
 
 export interface SyncHost {
 	app: App;
@@ -46,6 +46,7 @@ export interface Preview {
 
 export class SyncCancelled extends Error {}
 class NotFastForward extends Error {}
+class StaleRemote extends Error {}
 
 interface RemoteEntry {
 	sha: string;
@@ -105,7 +106,7 @@ export class SyncEngine {
 	/** Dry run: what would happen, without touching anything. */
 	async preview(mode: SyncMode): Promise<Preview> {
 		const ctx = await this.gather(false);
-		const plan = decide(this.host.state.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
+		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
 		return { decisions: plan.decisions, skipped: ctx.skipped };
 	}
 
@@ -117,6 +118,14 @@ export class SyncEngine {
 				if (e instanceof NotFastForward && attempt < 3) {
 					this.host.log("Remote moved during sync (another device pushed). Retrying.");
 					continue;
+				}
+				if (e instanceof StaleRemote) {
+					if (attempt < 3) {
+						this.host.log("GitHub returned an outdated branch state. Waiting and retrying.");
+						await sleep(2000 * (attempt + 1));
+						continue;
+					}
+					throw new Error("GitHub keeps returning an outdated branch state. Nothing was changed; try again in a minute.");
 				}
 				throw e;
 			}
@@ -160,11 +169,23 @@ export class SyncEngine {
 		let head = await this.host.gh.getRef(this.s.branch);
 		if (!head && initIfEmpty) head = await this.initRemote();
 
+		// Safety: never act on a remote state older than the one we already synced, and never
+		// infer deletions across a rewritten history.
+		let base = state.base;
+		if (head && state.head && head !== state.head) {
+			const rel = await this.host.gh.compare(state.head, head);
+			if (rel === "behind") throw new StaleRemote();
+			if (rel === "diverged" || rel === "missing") {
+				this.host.log("Remote history was rewritten (force-push?). Comparing from scratch; nothing will be deleted.");
+				base = {};
+			}
+		}
+
 		// Fast path: nothing changed anywhere since last sync.
 		const baseInScope = Object.keys(state.base).filter(scope);
 		const unchangedLocal = localShas.size === baseInScope.length && [...localShas].every(([p, h]) => state.base[p] === h);
 		if (head && head === state.head && unchangedLocal && !state.dirty) {
-			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true };
+			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base };
 		}
 
 		const remote = new Map<string, RemoteEntry>();
@@ -201,7 +222,7 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false };
+		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base };
 	}
 
 	private async initRemote(): Promise<string> {
@@ -251,7 +272,7 @@ export class SyncEngine {
 		}
 
 		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
-		const plan = decide(state.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
+		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
 		let decisions = plan.decisions;
 
 		// Paths skipped for size/case keep their old base so they are not seen as deleted later.

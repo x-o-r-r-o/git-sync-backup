@@ -1,7 +1,8 @@
 // Minimal GitHub REST client built on Obsidian's requestUrl, which works on desktop and
 // mobile and is not subject to CORS. No git binary, no isomorphic-git.
 
-import { requestUrl, RequestUrlResponse } from "obsidian";
+import { requestUrl } from "obsidian";
+import type { RequestUrlResponse } from "obsidian";
 import { sleep } from "./util.ts";
 
 export interface GitHubConfig {
@@ -90,6 +91,10 @@ export class GitHub {
 						Authorization: `Bearer ${c.token}`,
 						Accept: opts.accept ?? "application/vnd.github+json",
 						"X-GitHub-Api-Version": "2022-11-28",
+						// GitHub marks responses cacheable for 60s and Obsidian's HTTP layer honours that.
+						// A stale branch head would look like remote deletions, so always revalidate.
+						"Cache-Control": "no-cache",
+						Pragma: "no-cache",
 					},
 					contentType: body !== undefined ? "application/json" : undefined,
 					body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -162,7 +167,7 @@ export class GitHub {
 
 	/** Head commit sha of a branch, or null if the branch (or the whole repo) is empty/missing. */
 	async getRef(branch: string): Promise<string | null> {
-		const res = await this.request("GET", `${this.repoPath}/git/ref/heads/${encPath(branch)}`, undefined, {
+		const res = await this.request("GET", `${this.repoPath}/git/ref/heads/${encPath(branch)}?_=${Date.now()}`, undefined, {
 			okStatuses: [404, 409],
 		});
 		if (res.status === 404 || res.status === 409) return null;
@@ -182,6 +187,17 @@ export class GitHub {
 			{ okStatuses: [409, 422] },
 		);
 		return res.status < 300;
+	}
+
+	/**
+	 * How `head` relates to `base`: "ahead" (head contains base), "behind" (head is older),
+	 * "identical", "diverged" (history rewritten), or "missing" (base commit no longer exists).
+	 */
+	async compare(base: string, head: string): Promise<"ahead" | "behind" | "identical" | "diverged" | "missing"> {
+		const res = await this.request("GET", `${this.repoPath}/compare/${base}...${head}?per_page=1`, undefined, {
+			okStatuses: [404],
+		});
+		return res.status === 404 ? "missing" : res.json.status;
 	}
 
 	async getCommitTree(sha: string): Promise<string> {

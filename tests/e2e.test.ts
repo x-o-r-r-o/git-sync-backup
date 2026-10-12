@@ -243,3 +243,31 @@ test("no empty commit when local already matches remote content", async () => {
 	assert.equal(gh.commits.size, before);
 	assert.equal((await b.sync()).upToDate, true);
 });
+
+test("stale (cached) remote head never causes local deletions", async () => {
+	const { gh, a } = setup();
+	a.fs.put("one.md", "1\n");
+	await a.sync();
+	const older = gh.refs.get("main")!;
+	a.fs.put("two.md", "2\n");
+	await a.sync();
+	gh.staleRef = older; // GitHub/HTTP cache serves the previous head
+	await assert.rejects(() => a.sync(), /outdated branch state/);
+	assert.ok(a.fs.files.has("two.md"), "two.md must survive");
+	gh.staleRef = null;
+	assert.equal((await a.sync()).upToDate, true);
+});
+
+test("rewritten remote history never deletes local files", async () => {
+	const { gh, a } = setup();
+	a.fs.put("keep.md", "k\n");
+	await a.sync();
+	// Simulate a force-push to an unrelated history without keep.md.
+	const t = await gh.createTree(null, [{ path: "other.md", mode: "100644", type: "blob", content: "o\n" }]);
+	const c = await gh.createCommit("rewrite", t, []);
+	gh.refs.set("main", c);
+	await a.sync();
+	assert.equal(a.fs.text("keep.md"), "k\n");
+	assert.equal(a.fs.text("other.md"), "o\n");
+	assert.ok(gh.headFiles().has("keep.md"), "re-uploaded");
+});
