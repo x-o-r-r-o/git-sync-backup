@@ -192,6 +192,8 @@ npm run lint     # Obsidian's official review rules (eslint-plugin-obsidianmd)
 
 Source layout: `src/sync.ts` (engine), `src/plan.ts` (three-way decisions), `src/merge.ts` (diff3), `src/github.ts` (REST client on `requestUrl`), `src/io.ts` (vault access), `src/ui.ts` and `src/settings-tab.ts`.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report bugs and send changes.
+
 ## Network use, accounts and privacy
 
 This section covers the disclosures Obsidian's developer policies require.
@@ -233,5 +235,5 @@ This section covers the disclosures Obsidian's developer policies require.
 
 - GitHub rejects files over 100 MB (default limit here is 50 MB). Keep large media out with exclude patterns.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
-- No Git LFS.
+- Git LFS is opt-in (Settings → Store large files with Git LFS) and uses your host's LFS quota.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.

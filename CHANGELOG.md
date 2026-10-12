@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 (2026-10-12)
+
+- Fix the Obsidian Community scorecard: `package-lock.json` is back in sync with `package.json` (the `obsidian` type package is pinned instead of `latest`), so `npm ci` succeeds and source review and build verification can run.
+- Dev-only `moment` (pulled in by the lint plugin) overridden to a patched version: `npm audit` reports 0 vulnerabilities.
+- The release workflow uses plain `npm ci`, so a stale lockfile fails CI instead of the directory scan.
+- Added `CONTRIBUTING.md`.
+- README: corrected an outdated Git LFS note under Limits.
+
 ## 1.1.0 (2026-10-12)
 
 - **Bitbucket Cloud** support (beta): API 2.0, multi-file commits pinned to the expected parent, and a hash index computed and cached on the device (Bitbucket exposes no blob hashes) that only re-fetches changed paths.
