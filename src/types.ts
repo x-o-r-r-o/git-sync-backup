@@ -1,7 +1,13 @@
 import type { SyncMode } from "./plan.ts";
+import { DEFAULT_CONFIG_SYNC } from "./scope-config.ts";
+import type { ConfigSync } from "./scope-config.ts";
 
 export type ConflictStrategy = "auto" | "markers" | "keep-both" | "ask" | "local" | "remote";
-export type NoticeLevel = "all" | "errors" | "silent";
+/**
+ * "changes": a short notice when a sync changed files, plus errors. "auto" (default): "changes" on phones,
+ * which have no status bar, and "errors" on desktop.
+ */
+export type NoticeLevel = "auto" | "all" | "changes" | "errors" | "silent";
 
 // Stored in data.json. Safe to sync between devices: no secrets in here.
 // The token, API base URL and device name live in device-local storage instead, so a
@@ -21,6 +27,12 @@ export interface VaultSyncSettings {
 	syncOnBackground: boolean;
 
 	syncConfigDir: boolean;
+	/** Which parts of the settings folder sync (when syncConfigDir is on). */
+	configSync: ConfigSync;
+	/** Sync hidden files and folders at the top of the vault (e.g. .github/, .editorconfig). */
+	syncHidden: boolean;
+	/** Also exclude what the vault's .gitignore lists (and sync the .gitignore itself). */
+	useGitignore: boolean;
 	excludePatterns: string;
 	maxFileSizeMB: number;
 	/** Files at least this large are stored with Git LFS (0 = off). */
@@ -39,6 +51,10 @@ export interface VaultSyncSettings {
 
 	commitTemplate: string;
 	noticeLevel: NoticeLevel;
+	/** Sync when a note is opened (at most every 30 seconds), to fetch its latest version. */
+	syncOnOpen: boolean;
+	/** Mark files in the file explorer: edited since the last sync, conflict copies. */
+	explorerBadges: boolean;
 	wizardShown: boolean;
 	/** Folders synced to their own repositories (e.g. a team folder). No secrets in here. */
 	sharedFolders: SharedFolder[];
@@ -69,6 +85,9 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	syncOnBackground: true,
 
 	syncConfigDir: false,
+	configSync: DEFAULT_CONFIG_SYNC,
+	syncHidden: false,
+	useGitignore: false,
 	excludePatterns: [
 		"# One pattern per line, gitignore style",
 		".trash/",
@@ -95,7 +114,9 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	dailySnapshot: false,
 
 	commitTemplate: "{{device}}: {{summary}}",
-	noticeLevel: "errors",
+	noticeLevel: "auto",
+	syncOnOpen: false,
+	explorerBadges: true,
 	wizardShown: false,
 	sharedFolders: [],
 };
@@ -169,6 +190,8 @@ export interface LocalChanges {
 export interface SyncOptions {
 	/** Paths left out of this sync (unchecked in review). They keep their old baseline. */
 	defer?: Set<string>;
+	/** Sync only these paths ("Sync current file"); everything else keeps its old baseline. */
+	only?: Set<string>;
 	/** First sync only (no baseline): which side wins when a file differs. Default: keep both. */
 	firstSyncPrefer?: "local" | "remote";
 }

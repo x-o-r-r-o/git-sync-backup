@@ -19,7 +19,8 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 - **Backups built in.** Every sync is one commit. Restore a single file, a folder or the whole vault to any earlier point, recover deleted files and take snapshot tags.
 - **Private by design.** Optional end-to-end encryption means the host only ever stores unreadable data, including file names. Sign in with GitHub instead of pasting a token, and credentials stay in Obsidian's secure storage.
 - **See before you sync.** Visual diffs, a review step with checkboxes, and a status panel that shows what's pending and how to fix problems.
-- **Fits every device.** Each device can sync only the folders it needs, and big attachments can stay in the repository and be downloaded on demand. Renames travel as renames, even when the file was also edited.
+- **Fits every device.** Each device can sync only the folders it needs, and big attachments can stay in the repository and be downloaded on demand. Choose which parts of the settings folder sync, down to single plugins. Renames travel as renames, even when the file was also edited.
+- **A new device in seconds.** Scan a QR code or open a setup link from a device that already syncs. The plugin warns when another sync tool (Obsidian Sync, iCloud, Obsidian Git, …) is active on the same vault.
 - **Grows with you.** Share a folder with a team through its own repository, keep big media in Git LFS, and use the interface in English, Simplified Chinese, German, Spanish, French, Japanese, Korean or Portuguese.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for how this compares with other sync plugins.
@@ -63,6 +64,14 @@ For GitLab, Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on G
 
 Repeat on each device with the same repository. An existing vault on a second device is safe: the first sync never deletes anything, and any file that differs is kept in both versions.
 
+### Add another device with a link or QR code
+
+On a device that already syncs, choose **Add another device** (status panel, settings, or the command palette). It shows a QR code and a link with the host, repository, branch and your sync choices. Install the plugin on the new device, then scan the code with its camera or open the link there. The new device shows exactly what the link will change and asks before applying it.
+
+- Signed in with GitHub: the new device signs in itself.
+- With a token: optionally include it. It is encrypted with a one-time code that is shown next to the QR code and never included in the link; type it on the new device.
+- Only open setup links you created yourself.
+
 The token is stored only on the device, in Obsidian's secure storage. It is never written to `data.json`, so it is never uploaded, even with settings-folder sync on.
 
 ## How a sync works
@@ -81,7 +90,11 @@ The token is stored only on the device, in Obsidian's secure storage. It is neve
 
 - **Triggers:** on startup, after edits (debounced), on a timer, when the app returns to the foreground or goes to the background, and manually.
 - **Modes:** two-way sync, backup only (upload, never changes local files) or pull only (read-only copy).
-- **Scope:** gitignore-style exclude patterns (`*`, `**`, `?`, `/` to anchor, `!` to re-include; the last matching pattern wins; brackets are literal), a maximum file size, and optional sync of the settings folder (themes, snippets, plugins, hotkeys). Files outside scope are never touched on either side.
+- **Scope:** gitignore-style exclude patterns (`*`, `**`, `?`, `/` to anchor, `!` to re-include; the last matching pattern wins; brackets are literal) and a maximum file size. Files outside scope are never touched on either side.
+- **Settings folder, part by part:** turn on settings-folder sync, then choose appearance and themes, CSS snippets, hotkeys, core settings, which plugins are on, plugin code and plugin settings separately. **Choose per plugin** sets single plugins to code and settings, code only, settings only, or this device only, which is useful for plugins that store device-specific paths. Your exclude patterns still have the last word.
+- **Hidden files** (optional): files and folders at the top of the vault whose names start with a dot, such as `.github/` or `.editorconfig`. Never `.git`, `.trash` or the settings folder.
+- **`.gitignore`** (optional): files listed in the vault's `.gitignore` are not synced, and the `.gitignore` itself syncs to every device.
+- **Sync current file now** (command) syncs only the open note; everything else waits for the next sync. **Sync when opening a note** (optional) fetches its latest version first, at most every 30 seconds.
 - **Renames and moves** are detected, also when the file was edited at the same time. Nothing is downloaded again, open tabs and bookmarks follow the file, and moving a whole folder doesn't trip the delete guard.
 - **Line endings:** a change that is only CRLF ↔ LF is ignored (on by default).
 - **Fast on phones:** only files whose timestamps changed, or that Obsidian reports as edited, are re-checked, with a periodic full rescan as a safety net. Hashing yields to the interface so Obsidian never freezes.
@@ -115,6 +128,8 @@ When a file changed on both sides, choose what happens: **merge automatically** 
   - conflict copies, with **Resolve** (pick change by change, then the copy goes to the trash), Compare, Open and Delete copy buttons
   - files skipped in the last sync and why, and files kept in the repository only
   - when each device last synced, the API budget (GitHub) and the next scheduled sync
+- **File explorer:** a dot on files edited since the last sync, and a warning on conflict copies (can be turned off).
+- **Notifications:** by default a short notice when a sync changed files on phones (which have no status bar), and only errors on desktop.
 - **Sync log**, status bar (desktop) and a spinning ribbon icon while syncing.
 
 ### End-to-end encryption
@@ -183,6 +198,8 @@ Custom API URL for GitHub Enterprise and self-hosted servers, commit message tem
 | Recover deleted files | Restore files deleted in earlier syncs |
 | Show sync log | Recent sync activity |
 | Open repository in browser | Open the repository on your host |
+| Sync current file now | Sync only the open note |
+| Add another device (setup link) | Show a QR code and setup link for a new device |
 
 ## Requirements
 
@@ -205,12 +222,13 @@ This section covers the disclosures Obsidian's developer policies require.
 
 ## Security notes
 
-- The token, API URL and device name are stored per device and never synced. A changed `data.json` arriving from another device cannot send your token anywhere else.
+- The token, API URL and device name are stored per device and never synced. A pasted token is bound to the host and API URL it was entered for, so a changed `data.json`, a setup link or switching hosts can't send it anywhere else.
 - Use a token limited to the vault repository. If it leaks, the damage is limited to that one repository.
 - **Sign in with GitHub** uses the *Vault Sync for Git* GitHub App with only *Contents: read and write* on the repositories you choose. Its access token lasts 8 hours and is renewed on the device; no client secret exists in the plugin, and the author never sees your tokens or data. Revoke it any time in GitHub → Settings → Applications.
 - For pasted GitHub tokens, the status panel warns two weeks before the token expires, and a notice appears in the last week.
 - With **settings-folder sync** on, plugin code (`.obsidian/plugins/*/main.js`) syncs too. Anyone who can push to the repository can then run code on your devices. Keep the repository private and don't give others write access.
 - Remote paths are validated (no `..`, no absolute paths, no empty segments) before anything is written.
+- **Setup links** contain the host, repository, branch and sync choices, and no secrets unless you include the token, which is encrypted with a one-time code (AES-GCM, key from PBKDF2-SHA256) that is never part of the link. Opening a link only shows what it would change; nothing is applied until you confirm. Only open links you created yourself.
 - **End-to-end encryption limits.**
   - Encrypted files still reveal approximate file sizes and path lengths, and whether two files are identical.
   - Content isn't bound to its path, so someone with write access to the repository could swap or roll back encrypted files. They still can't read or forge content.
@@ -233,6 +251,7 @@ This section covers the disclosures Obsidian's developer policies require.
 
 - GitHub rejects files over 100 MB (the default limit here is 50 MB). Use Git LFS or exclude patterns for large media.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
+- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked on full scans, every 30 minutes by default, rather than right after each change. Only hidden files at the top of the vault are synced, not hidden folders inside normal folders.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
 - Sign in with GitHub works on github.com. GitLab, Gitea and Bitbucket use access tokens.
 - GitHub is tested against the real API on every release. GitLab, Gitea and Bitbucket are tested against simulated servers, which is why they are marked beta. Reports from real servers and phones are welcome.
@@ -264,4 +283,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) to report bugs or send changes, [CHANGELO
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Bundled third-party code (the QR code generator) is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

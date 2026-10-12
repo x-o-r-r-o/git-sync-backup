@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
 import type { ConflictStrategy, NoticeLevel } from "./types.ts";
@@ -10,6 +10,7 @@ import { SharedFolderModal } from "./shared-ui.ts";
 import { destructive } from "./ui.ts";
 import { t } from "./i18n.ts";
 import { GitHubSignInModal } from "./ghapp-ui.ts";
+import type { PluginSyncMode } from "./scope-config.ts";
 
 /** Runs `fn` when the field is committed (blur or Enter) instead of on every keystroke. */
 function onCommit(c: TextComponent, fn: (v: string) => Promise<void>): TextComponent {
@@ -27,6 +28,8 @@ interface Item {
 
 interface Group {
 	heading?: string;
+	/** Shown folded (in display()); basics stay open so the first screen is short. */
+	collapsed?: boolean;
 	items: Item[];
 }
 
@@ -42,6 +45,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	private openGroups = new Set<string>();
+
 	private refresh() {
 		this.display();
 	}
@@ -54,14 +59,41 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		const ds = p.deviceScope();
 		const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
 
-		const toggle = (key: "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot", reschedule = false) => (st: Setting): unknown =>
+		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges";
+		const toggle = (key: ToggleKey, reschedule = false, redraw = false) => (st: Setting): unknown =>
 			st.addToggle((c) =>
 				c.setValue(s[key]).onChange(async (v) => {
 					s[key] = v;
 					await save();
 					if (reschedule) p.rescheduleTriggers();
+					if (key === "explorerBadges") p.refreshBadges();
+					if (redraw) this.refresh();
 				}),
 			);
+		const cfgToggle = (key: "appearance" | "snippets" | "hotkeys" | "core" | "pluginList" | "pluginCode" | "pluginSettings") => (st: Setting): unknown =>
+			st.addToggle((c) =>
+				c.setValue(s.configSync[key]).onChange(async (v) => {
+					s.configSync = { ...s.configSync, [key]: v };
+					await save();
+				}),
+			);
+		const cfgItems: Item[] = s.syncConfigDir
+			? [
+					{ name: t("s.cfgAppearance"), desc: t("s.cfgAppearanceDesc"), cls: "vsg-indent", render: cfgToggle("appearance") },
+					{ name: t("s.cfgSnippets"), cls: "vsg-indent", render: cfgToggle("snippets") },
+					{ name: t("s.cfgHotkeys"), cls: "vsg-indent", render: cfgToggle("hotkeys") },
+					{ name: t("s.cfgCore"), desc: t("s.cfgCoreDesc"), cls: "vsg-indent", render: cfgToggle("core") },
+					{ name: t("s.cfgPluginList"), desc: t("s.cfgPluginListDesc"), cls: "vsg-indent", render: cfgToggle("pluginList") },
+					{ name: t("s.cfgPluginCode"), desc: t("s.cfgPluginCodeDesc"), cls: "vsg-indent", render: cfgToggle("pluginCode") },
+					{ name: t("s.cfgPluginSettings"), desc: t("s.cfgPluginSettingsDesc"), cls: "vsg-indent", render: cfgToggle("pluginSettings") },
+					{
+						name: t("s.cfgPerPlugin"),
+						desc: t("s.cfgPerPluginDesc", { n: Object.keys(s.configSync.plugins).length }),
+						cls: "vsg-indent",
+						render: (st) => st.addButton((b) => b.setButtonText(t("s.cfgPerPluginBtn")).onClick(() => new PluginSyncModal(this.app, p, () => this.refresh()).open())),
+					},
+				]
+			: [];
 
 		const tokenDesc = createFragment((f) => {
 			f.appendText(t("s.tokenDesc") + " ");
@@ -232,10 +264,16 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 								),
 					},
 					{
+						name: t("link.addDevice"),
+						desc: t("link.addDeviceDesc"),
+						render: (st) => st.addButton((b) => b.setButtonText(t("link.createBtn")).onClick(() => p.openSetupLink())),
+					},
+					{
 						name: t("s.apiBase"),
 						desc: t("s.apiBaseDesc", { hint: host.apiHint }),
 						render: (st) => st.addText((c) => onCommit(c.setValue(p.getApiBase()), async (v) => {
 							p.setApiBase(v.trim() || host.defaultApi);
+							p.rebindToken();
 							if (s.provider === "github") this.refresh();
 						})),
 					},
@@ -294,12 +332,18 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					},
 					{ name: t("s.onResume"), desc: t("s.onResumeDesc"), render: toggle("syncOnResume", true) },
 					{ name: t("s.onBackground"), desc: t("s.onBackgroundDesc"), render: toggle("syncOnBackground", true) },
+					{ name: t("s.onOpen"), desc: t("s.onOpenDesc"), render: toggle("syncOnOpen") },
+					{ name: t("s.badges"), desc: t("s.badgesDesc"), render: toggle("explorerBadges") },
 				],
 			},
 			{
 				heading: t("s.hScope"),
+				collapsed: true,
 				items: [
-					{ name: t("s.configDir", { dir: this.app.vault.configDir }), desc: `${t("s.configDirDesc")} ${t("s.configDirWarn")}`, render: toggle("syncConfigDir") },
+					{ name: t("s.configDir", { dir: this.app.vault.configDir }), desc: `${t("s.configDirDesc")} ${t("s.configDirWarn")}`, render: toggle("syncConfigDir", false, true) },
+					...cfgItems,
+					{ name: t("s.hidden"), desc: t("s.hiddenDesc"), render: toggle("syncHidden") },
+					{ name: t("s.gitignore"), desc: t("s.gitignoreDesc"), render: toggle("useGitignore") },
 					{
 						name: t("s.exclude"),
 						desc: t("s.excludeDesc"),
@@ -340,6 +384,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			},
 			{
 				heading: t("s.hEncryption"),
+				collapsed: true,
 				items: p.isEncrypted()
 					? [
 							{
@@ -366,6 +411,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			},
 			{
 				heading: t("s.hShared"),
+				collapsed: true,
 				items: [
 					{ name: "", desc: t("s.sharedIntro"), render: () => undefined, searchable: false },
 					...(s.sharedFolders ?? []).map(
@@ -401,6 +447,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			},
 			{
 				heading: t("s.hDevice"),
+				collapsed: true,
 				items: [
 					{ name: "", desc: t("s.deviceIntro"), render: () => undefined, searchable: false },
 					{
@@ -451,6 +498,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			},
 			{
 				heading: t("s.hConflicts"),
+				collapsed: true,
 				items: [
 					{
 						name: t("s.strategy"),
@@ -501,10 +549,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			},
 			{
 				heading: t("s.hBackup"),
+				collapsed: true,
 				items: [{ name: t("s.snapshot"), desc: t("s.snapshotDesc"), render: toggle("dailySnapshot") }],
 			},
 			{
 				heading: t("s.hAdvanced"),
+				collapsed: true,
 				items: [
 					{
 						name: t("s.commitMsg"),
@@ -533,7 +583,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						render: (st) =>
 							st.addDropdown((d) =>
 								d
-									.addOptions({ all: t("s.noticesAll"), errors: t("s.noticesErrors"), silent: t("s.noticesNone") })
+									.addOptions({ auto: t("s.noticesAuto"), all: t("s.noticesAll"), changes: t("s.noticesChanges"), errors: t("s.noticesErrors"), silent: t("s.noticesNone") })
 									.setValue(s.noticeLevel)
 									.onChange(async (v) => {
 										s.noticeLevel = v as NoticeLevel;
@@ -561,13 +611,22 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		for (const g of this.groups()) {
-			if (g.heading) new Setting(containerEl).setName(g.heading).setHeading();
+			let parent: HTMLElement = containerEl;
+			if (g.heading && g.collapsed) {
+				// Folded sections remember whether they were open while the settings stay open.
+				const det = containerEl.createEl("details", { cls: "vsg-group" });
+				det.open = this.openGroups.has(g.heading);
+				det.createEl("summary", { cls: "vsg-group-summary", text: g.heading });
+				const heading = g.heading;
+				det.addEventListener("toggle", () => (det.open ? this.openGroups.add(heading) : this.openGroups.delete(heading)));
+				parent = det;
+			} else if (g.heading) new Setting(containerEl).setName(g.heading).setHeading();
 			for (const item of g.items) {
 				if (!item.name) {
-					containerEl.createEl("p", { cls: "setting-item-description", text: typeof item.desc === "string" ? item.desc : (item.desc?.textContent ?? "") });
+					parent.createEl("p", { cls: "setting-item-description", text: typeof item.desc === "string" ? item.desc : (item.desc?.textContent ?? "") });
 					continue;
 				}
-				const st = new Setting(containerEl).setName(item.name);
+				const st = new Setting(parent).setName(item.name);
 				if (item.desc) st.setDesc(item.desc);
 				if (item.cls) st.setClass(item.cls);
 				item.render(st);
@@ -592,5 +651,61 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				},
 			})),
 		}));
+	}
+}
+
+/** Per-plugin choice for the settings folder: follow the switches, or sync code and/or settings. */
+class PluginSyncModal extends Modal {
+	private plugin: VaultSyncPlugin;
+	private onDone: () => void;
+
+	constructor(app: App, plugin: VaultSyncPlugin, onDone: () => void) {
+		super(app);
+		this.plugin = plugin;
+		this.onDone = onDone;
+	}
+
+	async onOpen() {
+		const { contentEl } = this;
+		this.titleEl.setText(t("s.cfgPerPlugin"));
+		contentEl.createEl("p", { cls: "vsg-muted", text: t("s.cfgPerPluginIntro") });
+		const adapter = this.app.vault.adapter;
+		const dir = `${this.app.vault.configDir}/plugins`;
+		let folders: string[] = [];
+		try {
+			folders = (await adapter.list(dir)).folders.map((f) => f.split("/").pop() ?? f).sort();
+		} catch {
+			/* no plugins folder */
+		}
+		if (!folders.length) contentEl.createEl("p", { text: t("s.cfgNoPlugins") });
+		const s = this.plugin.settings;
+		for (const id of folders) {
+			let name = id;
+			try {
+				name = (JSON.parse(await adapter.read(`${dir}/${id}/manifest.json`)) as { name?: string }).name || id;
+			} catch {
+				/* folder without a manifest */
+			}
+			new Setting(contentEl)
+				.setName(name)
+				.setDesc(id === this.plugin.manifest.id ? `${id} · ${t("s.cfgThisPlugin")}` : id)
+				.addDropdown((d) =>
+					d
+						.addOptions({ default: t("s.cfgFollow"), all: t("s.cfgAll"), code: t("s.cfgCodeOnly"), settings: t("s.cfgSettingsOnly"), none: t("s.cfgNone") })
+						.setValue(s.configSync.plugins[id] ?? "default")
+						.onChange(async (v) => {
+							const plugins = { ...s.configSync.plugins };
+							if (v === "default") delete plugins[id];
+							else plugins[id] = v as PluginSyncMode;
+							s.configSync = { ...s.configSync, plugins };
+							await this.plugin.saveSettings();
+						}),
+				);
+		}
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		this.onDone();
 	}
 }

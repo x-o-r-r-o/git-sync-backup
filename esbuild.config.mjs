@@ -12,6 +12,9 @@ const ctx = await esbuild.context({
   sourcemap: prod ? false : "inline",
   treeShaking: true,
   outfile: "main.js",
+  banner: {
+    js: "/*! Vault Sync for Git (MIT). Includes qrcode-generator, Copyright (c) 2009 Kazuhiko Arase, MIT license. See THIRD_PARTY_NOTICES.md */",
+  },
 });
 
 if (prod) {

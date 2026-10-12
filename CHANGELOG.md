@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.0 (2026-10-12)
+
+**New**
+- **Settings folder, part by part.** Appearance and themes, CSS snippets, hotkeys, core settings, which plugins are on, plugin code and plugin settings each have their own switch, and **Choose per plugin** sets single plugins to code and settings, code only, settings only, or this device only. Implemented as generated exclude patterns that run before yours, so your own patterns still win.
+- **Add another device** with a QR code or setup link (status panel, settings, command palette). The link carries host, repository, branch and sync choices; a token can be included, encrypted with a one-time code that is never in the link. Opening a link shows what it changes and asks first. Uses the bundled `qrcode-generator` (MIT) for the QR code.
+- **Warning about other sync tools** on the same vault (Obsidian Sync, Obsidian Git or a `.git` folder, Remotely Save, LiveSync, Fit and others, and iCloud/Dropbox/OneDrive/Google Drive folders on desktop), in the setup wizard and the status panel.
+- **Respect the vault's `.gitignore`** (optional), and **sync hidden files and folders** at the top of the vault (optional, e.g. `.github/`, `.editorconfig`).
+- **File-explorer badges:** a dot on files edited since the last sync and a warning on conflict copies.
+- **Sync current file now** (command) and **Sync when opening a note** (optional, at most every 30 s).
+- **Notifications:** new "When files changed" level, and a new default, *Automatic*, that shows changes on phones (no status bar) and only errors on desktop. Saved choices are kept.
+- **Simpler settings:** connection and sync behaviour stay open; the other sections are folded.
+
+**Security**
+- A pasted token is now bound to the host and API URL it was entered for. Switching hosts, a changed API URL in a synced `data.json`, or a setup link can no longer send it to another server; enter a token for the new host instead. (Before, switching hosts in settings reused the previous host's token.)
+
 ## 1.2.0 (2026-10-12)
 
 **New**

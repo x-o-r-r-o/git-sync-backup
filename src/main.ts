@@ -48,9 +48,15 @@ import { t } from "./i18n.ts";
 import { DeviceFlowError, GITHUB_APP, needsRefresh, parseTokens, refreshAppToken } from "./ghapp.ts";
 import type { AppConfig, AppTokens } from "./ghapp.ts";
 import { webBase } from "./auth.ts";
+import { normalizeConfigSync } from "./scope-config.ts";
+import { ExplorerBadges } from "./explorer.ts";
+import { parseSetupPayload, SETUP_ACTION } from "./setuplink.ts";
+import type { SetupPayload } from "./setuplink.ts";
+import { ApplySetupLinkModal, CreateSetupLinkModal } from "./setuplink-ui.ts";
+import { detectOtherSync } from "./othersync.ts";
 import { asText, conflictCopyOriginal, errMsg, restoredCopyPath, sleep, stamp } from "./util.ts";
 
-type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background";
+type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background" | "open";
 type Status = "idle" | "syncing" | "ok" | "error" | "offline" | "conflict";
 
 export default class VaultSyncPlugin extends Plugin implements SyncHost {
@@ -60,6 +66,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private refreshing: Promise<boolean> | null = null;
 	private unloaded = false;
 	private expiredNoticeShown = false;
+	private lastOpenSync = 0;
+	private badges: ExplorerBadges | null = null;
+	refreshBadges: () => void = () => {};
 	lastReport: SyncReport | null = null;
 	private encLayer: EncryptionLayer | null = null;
 	private shared: { sig: string; hosts: SharedFolderHost[] } | null = null;
@@ -126,7 +135,20 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.addSettingTab(new VaultSyncSettingTab(this.app, this));
 		this.registerCommands();
 
+		this.registerObsidianProtocolHandler(SETUP_ACTION, (params) => {
+			const payload = parseSetupPayload(params.s);
+			if (!payload) return void new Notice(t("link.invalid"));
+			new ApplySetupLinkModal(this.app, this, payload).open();
+		});
+		this.badges = new ExplorerBadges(this.app, () => this.pendingLocalPaths(), () => this.settings.explorerBadges && this.isConfigured());
+		this.badgeTimer = debounce(() => {
+			if (!this.unloaded) this.badges?.refresh();
+		}, 1500, true);
+		this.refreshBadges = () => this.badgeTimer?.();
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.refreshBadges()));
 		this.app.workspace.onLayoutReady(() => {
+			this.refreshBadges();
+			void this.checkOtherSync();
 			const touch = (path: string) => {
 				if (this.syncing) return void this.touchedDuringSync.add(path);
 				const w = this.writtenBySync.get(path);
@@ -136,6 +158,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const onVaultChange = (file: TAbstractFile, oldPath?: string) => {
 				if (file instanceof TFile) touch(file.path);
 				if (oldPath) touch(oldPath);
+				this.refreshBadges();
 				if (!this.settings.syncOnChange) return;
 				// Our own writes during a sync also land here; that only costs one cheap no-op sync later.
 				if (this.syncing) this.changedDuringSync = true;
@@ -153,6 +176,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			} else if (this.settings.syncOnStartup) window.setTimeout(() => void this.sync("startup"), 2500);
 		});
 
+		this.registerEvent(
+			this.app.workspace.on("file-open", (file) => {
+				if (!file || !this.settings.syncOnOpen || !this.isConfigured() || this.syncing) return;
+				if (Date.now() - this.lastOpenSync < 30_000) return;
+				this.lastOpenSync = Date.now();
+				void this.sync("open");
+			}),
+		);
+
 		this.registerDomEvent(document, "visibilitychange", () => {
 			if (document.visibilityState === "visible" && this.settings.syncOnResume) {
 				if (Date.now() - this.state.lastSync > 60_000) void this.sync("resume");
@@ -164,10 +196,34 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	onunload() {
 		this.unloaded = true;
+		this.badgeTimer?.cancel();
+		this.badges?.destroy();
+		this.badges = null;
 		this.onChangeDebounced?.cancel();
 	}
 	isUnloaded(): boolean {
 		return this.unloaded;
+	}
+	/** Other sync tools found in this vault (checked on load and when the status panel opens). */
+	otherSync: string[] = [];
+	async checkOtherSync(): Promise<string[]> {
+		this.otherSync = await detectOtherSync(this.app).catch(() => []);
+		return this.otherSync;
+	}
+	private gitignoreLines: string[] = [];
+	private badgeTimer: Debouncer<[], void> | null = null;
+	gitignorePatterns(): string[] {
+		return this.gitignoreLines;
+	}
+	/** Reads the vault's .gitignore (it isn't indexed by Obsidian, so read it from disk before each sync). */
+	async loadGitignore() {
+		if (!this.settings.useGitignore) return void (this.gitignoreLines = []);
+		try {
+			const a = this.app.vault.adapter;
+			this.gitignoreLines = (await a.exists(".gitignore")) ? (await a.read(".gitignore")).split(/\r?\n/) : [];
+		} catch {
+			this.gitignoreLines = [];
+		}
 	}
 
 	// Called by Obsidian when data.json changes on disk (e.g. synced from another device).
@@ -233,10 +289,25 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	getToken(): string {
 		if (this.usingGitHubApp()) return this.appTokens()?.access ?? "";
-		return this.getSecret("token");
+		const token = this.getSecret("token");
+		if (!token) return "";
+		// A pasted token is only ever sent to the host and API URL it was entered for: a synced data.json,
+		// a setup link or a host switch can't redirect it. Tokens saved before 1.3 get bound on first use.
+		const bound = this.localGet("token:for");
+		if (bound === null) this.localSet("token:for", this.tokenTarget());
+		else if (bound !== this.tokenTarget()) return "";
+		return token;
+	}
+	private tokenTarget(): string {
+		return `${this.settings.provider ?? "github"}|${this.getApiBase().replace(/\/+$/, "")}`;
+	}
+	/** After the user changes the API URL in settings themselves, the token follows it. */
+	rebindToken() {
+		if (this.getSecret("token")) this.localSet("token:for", this.tokenTarget());
 	}
 	setToken(token: string) {
 		this.setSecret("token", token);
+		this.localSet("token:for", token ? this.tokenTarget() : null);
 		// Pasting a token switches this device back to token sign-in.
 		if (token && this.usingGitHubApp()) this.localSet("auth:github", null);
 	}
@@ -561,8 +632,36 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.statusEl?.setAttr("aria-label", text);
 		this.ribbonEl?.setAttr("aria-label", `${t("ribbon.sync")}: ${text}`);
 	}
-	openWizard() {
-		new SetupWizard(this.app, this).open();
+	openWizard(start?: "vault") {
+		new SetupWizard(this.app, this, start).open();
+	}
+
+	// ---------------- add a device (setup link) ----------------
+
+	openSetupLink() {
+		if (!this.isConfigured()) return void new Notice(this.configProblem() ?? t("m.needRepo"));
+		new CreateSetupLinkModal(this.app, this).open();
+	}
+
+	/** Applies a confirmed setup link to this vault, then continues in the setup wizard. */
+	async applySetupPayload(s: SetupPayload, token: string) {
+		this.settings.provider = s.provider;
+		this.setApiBase(s.api ?? HOSTS[s.provider].defaultApi);
+		this.settings.owner = s.owner;
+		this.settings.repo = s.repo;
+		this.settings.branch = s.branch;
+		if (s.syncConfigDir !== undefined) this.settings.syncConfigDir = s.syncConfigDir;
+		if (s.configSync) this.settings.configSync = normalizeConfigSync(s.configSync);
+		if (s.syncHidden !== undefined) this.settings.syncHidden = s.syncHidden;
+		if (s.useGitignore !== undefined) this.settings.useGitignore = s.useGitignore;
+		if (s.exclude !== undefined) this.settings.excludePatterns = s.exclude;
+		this.settings.wizardShown = true;
+		if (token) this.setToken(token);
+		await this.saveSettings();
+		this.log(`Setup link applied: ${s.provider} ${s.owner}/${s.repo} (${s.branch}).`);
+		// With a usable token the wizard goes straight to "this vault"; otherwise connect (sign in) first.
+		// A token entered for another host or server is never reused (getToken checks what it is for).
+		this.openWizard(this.getToken() ? "vault" : undefined);
 	}
 
 	/** First sync from the setup wizard. Returns a one-line summary. */
@@ -599,6 +698,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	private async freeUpSpaceInner() {
 		try {
+			await this.loadGitignore();
 			const plan = await this.engine.freeUpSpace((p) =>
 				confirmPlan(
 					this.app,
@@ -619,7 +719,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// ---------------- persistence ----------------
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<VaultSyncSettings> | null);
+		const saved = (await this.loadData()) as Partial<VaultSyncSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+		this.settings.configSync = normalizeConfigSync(saved?.configSync);
 	}
 	async saveSettings() {
 		await this.saveData(this.settings);
@@ -662,9 +764,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	/** Files changed on this device since the last sync (stat comparison plus vault-event flags). */
 	pendingLocalCount(): number {
+		return this.pendingLocalPaths().size;
+	}
+	/** Files edited on this device since the last sync (cheap: cached stats and vault events). */
+	pendingLocalPaths(): Set<string> {
 		const pending = new Set(this.engine.quickLocalPending());
 		for (const p of this.dirty.keys()) pending.add(p);
-		return pending.size;
+		return pending;
 	}
 
 	// ---------------- triggers ----------------
@@ -698,12 +804,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		console.debug(`[vault-sync] ${msg}`);
 	}
 
-	private notify(msg: string, important = false) {
-		const lvl = this.settings.noticeLevel;
-		if (lvl === "all" || (lvl === "errors" && important)) new Notice(msg, important ? 8000 : 4000);
+	private notify(msg: string, important = false, changedFiles = false) {
+		let lvl = this.settings.noticeLevel;
+		if (lvl === "auto") lvl = Platform.isMobile ? "changes" : "errors";
+		const show = lvl === "all" || (important && lvl !== "silent") || (lvl === "changes" && changedFiles);
+		if (show) new Notice(msg, important ? 8000 : 4000);
 	}
 
 	private setStatus(status: Status, detail = "") {
+		this.refreshBadges();
 		const icons: Record<Status, string> = {
 			idle: "cloud",
 			syncing: "refresh-cw",
@@ -793,6 +902,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			return;
 		}
 		this.syncing = true;
+		await this.loadGitignore();
 		this.changedDuringSync = false;
 		this.touchedDuringSync.clear();
 		this.onChangeDebounced?.cancel();
@@ -801,7 +911,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		let written = new Set<string>();
 		try {
 			const r = await this.engine.run(mode, opts);
-			const sharedErrors = opts.defer || opts.firstSyncPrefer ? [] : await this.syncShared(mode);
+			const sharedErrors = opts.defer || opts.only || opts.firstSyncPrefer ? [] : await this.syncShared(mode);
 			if (sharedErrors.length) this.notify(`${t("m.sharedFailed")}\n${sharedErrors.join("\n")}`, true);
 			written = new Set([...r.downloaded, ...r.merged, ...r.conflictCopies, ...r.deletedLocal]);
 			const now = Date.now();
@@ -865,7 +975,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.notify(t("notice.conflicts", { n: r.conflictCopies.length }), true);
 		} else {
 			this.setStatus("ok");
-			this.notify(t("notice.synced", { summary }));
+			this.notify(t("notice.synced", { summary }), false, parts.length > 0);
 		}
 	}
 
@@ -905,6 +1015,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (problem) return void new Notice(problem);
 		if (this.syncing) return void new Notice(t("notice.busy"));
 		try {
+			await this.loadGitignore();
 			const pv = await this.engine.preview(this.settings.mode);
 			const blobOf = (path: string, sha: string | undefined | null) => (sha ? this.engine.readBlob(path, sha) : Promise.resolve(null));
 			const local = async (p: string) => ((await this.app.vault.adapter.exists(p)) ? this.engine.readLocal(p) : null);
@@ -1044,6 +1155,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.syncing = true;
 		this.setStatus("syncing", t("m.restoring", { what }));
 		try {
+			await this.loadGitignore();
 			const plan = await this.engine.restoreTo(e.sha, folder, (p) =>
 				confirmPlan(
 					this.app,
@@ -1081,6 +1193,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.syncing = true;
 		this.setStatus("syncing", t("m.comparing"));
 		try {
+			await this.loadGitignore();
 			const plan = await this.engine.resetToRemote((p) =>
 				confirmPlan(
 					this.app,
@@ -1146,6 +1259,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				return true;
 			},
 		});
+		this.addCommand({
+			id: "sync-current-file",
+			name: t("cmd.syncFile"),
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file) return false;
+				if (!checking) void this.sync("manual", this.settings.mode, { only: new Set([file.path]) });
+				return true;
+			},
+		});
+		this.addCommand({ id: "setup-link", name: t("cmd.setupLink"), callback: () => this.openSetupLink() });
 		this.addCommand({ id: "recover-deleted", name: t("cmd.recover"), callback: () => this.showDeletedFiles() });
 		this.addCommand({
 			id: "open-repo",

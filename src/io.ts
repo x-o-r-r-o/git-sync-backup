@@ -39,13 +39,9 @@ export class VaultIO {
 	/** Files in the config dir that are in scope. Walks the disk, so callers should not run it on every sync. */
 	async listConfig(inScope: (path: string) => boolean): Promise<LocalFileInfo[]> {
 		const out: LocalFileInfo[] = [];
+		// A listing error must abort the sync: a partial list would make the missing files look deleted.
 		const walk = async (dir: string) => {
-			let listing;
-			try {
-				listing = await this.adapter.list(dir);
-			} catch {
-				return;
-			}
+			const listing = await this.adapter.list(dir);
 			for (const file of listing.files) {
 				if (!inScope(file)) continue;
 				const st = await this.adapter.stat(file);
@@ -57,6 +53,28 @@ export class VaultIO {
 			}
 		};
 		await walk(this.app.vault.configDir);
+		return out;
+	}
+
+	/** Hidden files and folders at the top of the vault (not indexed by Obsidian), outside the config dir. */
+	async listHidden(inScope: (path: string) => boolean): Promise<LocalFileInfo[]> {
+		const out: LocalFileInfo[] = [];
+		const cfg = this.app.vault.configDir;
+		// Listing errors propagate (a partial list would make the missing files look deleted).
+		const root = await this.adapter.list("/");
+		const strip = (p: string) => p.replace(/^\/+/, "");
+		const addFile = async (file: string) => {
+			if (!inScope(file)) return;
+			const st = await this.adapter.stat(file);
+			if (st && st.type === "file") out.push({ path: file, mtime: st.mtime, size: st.size });
+		};
+		const walk = async (dir: string) => {
+			const listing = await this.adapter.list(dir);
+			for (const f of listing.files) await addFile(strip(f));
+			for (const sub of listing.folders) if (inScope(strip(sub))) await walk(strip(sub));
+		};
+		for (const f of root.files.map(strip)) if (f.startsWith(".")) await addFile(f);
+		for (const d of root.folders.map(strip)) if (d.startsWith(".") && d !== cfg && inScope(d)) await walk(d);
 		return out;
 	}
 

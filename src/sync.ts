@@ -24,6 +24,7 @@ import type {
 } from "./types.ts";
 import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath, pool, sleep } from "./util.ts";
 import { parsePointer } from "./lfs.ts";
+import { configPatterns } from "./scope-config.ts";
 import { t } from "./i18n.ts";
 
 export interface SyncHost {
@@ -49,6 +50,8 @@ export interface SyncHost {
 	progress?(text: string): void;
 	/** True once Obsidian unloaded the plugin (disable, update, reload): a running sync stops at the next safe point. */
 	isUnloaded?(): boolean;
+	/** Lines of the vault's .gitignore (read by the host before each sync). */
+	gitignorePatterns?(): string[];
 	/** Path/content transforms (encryption, folder mapping, LFS). Defaults to none. */
 	codec?(): Codec;
 	/**
@@ -111,6 +114,18 @@ export interface Preview {
 }
 
 export class SyncCancelled extends Error {}
+
+/**
+ * A hidden path that may sync: it must start at the top of the vault (only those are listed from disk;
+ * a hidden file inside a normal folder would look deleted on the next sync), and must not be .git,
+ * .trash or an Obsidian settings folder (this device's, or another one such as ".obsidian-mobile").
+ */
+function hiddenSyncable(p: string, cfg: string): boolean {
+	if (!p.startsWith(".")) return false;
+	const top = p.split("/")[0];
+	if (top === ".git" || top === ".trash" || top === cfg || /^\.obsidian/i.test(top)) return false;
+	return !p.split("/").includes(".git");
+}
 class StaleRemote extends Error {}
 class EditedDuringSync extends Error {
 	constructor(path: string) {
@@ -244,6 +259,10 @@ export class SyncEngine {
 		const patterns = this.s.excludePatterns.split("\n").map(sub);
 		const ds = device ? this.host.deviceScope?.() : undefined;
 		const excluded = compileGlobs([
+			// Settings-folder parts that stay on each device, then the vault's .gitignore, then the
+			// user's own patterns: later patterns win, so the user always has the last word.
+			...(this.s.syncConfigDir ? configPatterns(this.s.configSync).map(sub) : []),
+			...(this.s.useGitignore ? (this.host.gitignorePatterns?.() ?? []) : []),
 			...patterns,
 			...(ds?.exclude ?? []).map(sub),
 			...(this.host.extraExcludes?.() ?? []),
@@ -261,8 +280,9 @@ export class SyncEngine {
 			if (prefix && !p.startsWith(prefix)) return false;
 			if (included && !included(p) && !p.startsWith(cfg + "/")) return false;
 			if (!isHiddenPath(p)) return true;
-			if (!this.s.syncConfigDir || !p.startsWith(cfg + "/")) return false;
-			return !isHiddenPath(p.slice(cfg.length + 1));
+			if (p.startsWith(cfg + "/")) return this.s.syncConfigDir && !isHiddenPath(p.slice(cfg.length + 1));
+			if (p === ".gitignore" && this.s.useGitignore) return true;
+			return this.s.syncHidden && hiddenSyncable(p, cfg);
 		};
 	}
 
@@ -291,7 +311,7 @@ export class SyncEngine {
 			if (!c || c.m !== f.mtime || c.s !== f.size || state.base[f.path] !== c.h) out.push(f.path);
 		}
 		for (const p of Object.keys(state.base)) {
-			if (!seen.has(p) && !p.startsWith(cfgPrefix) && scope(p)) out.push(p);
+			if (!seen.has(p) && !p.startsWith(cfgPrefix) && !isHiddenPath(p) && scope(p)) out.push(p);
 		}
 		return out;
 	}
@@ -301,6 +321,9 @@ export class SyncEngine {
 		return JSON.stringify([
 			this.s.excludePatterns,
 			this.s.syncConfigDir,
+			this.s.syncConfigDir ? configPatterns(this.s.configSync) : [],
+			this.s.syncHidden,
+			this.s.useGitignore ? (this.host.gitignorePatterns?.() ?? []) : false,
 			this.s.maxFileSizeMB,
 			ds?.include ?? [],
 			ds?.exclude ?? [],
@@ -446,15 +469,21 @@ export class SyncEngine {
 		const changes: LocalChanges = this.host.localChanges?.() ?? { full: true, paths: new Set() };
 		const covered: LocalChanges = { full: changes.full, paths: new Set(changes.paths) };
 		const full = covered.full || !state.lastFullScan || now - state.lastFullScan > this.s.fullScanMinutes * 60_000;
-		const configDue = this.s.syncConfigDir && (full || now - state.lastConfigScan > CONFIG_SCAN_MS);
+		// Files Obsidian doesn't index (settings folder, hidden files) are found by walking the disk.
+		const walksDisk = this.s.syncConfigDir || this.s.syncHidden || this.s.useGitignore;
+		const configDue = walksDisk && (full || now - state.lastConfigScan > CONFIG_SCAN_MS);
 		const cfgPrefix = this.host.app.vault.configDir + "/";
+		const onDisk = (p: string) => p.startsWith(cfgPrefix) || isHiddenPath(p);
 
 		this.host.progress?.(t("p.scanning"));
 		// Stored forms changed (e.g. LFS turned on): cached hashes are stale, recompute them once.
 		const cacheValid = (state.codecFingerprint ?? "") === this.codec.fingerprint;
 		const files = this.io.listVault(baseScope);
-		const walkConfig = this.s.syncConfigDir && (configDue || !cacheValid);
-		if (walkConfig) files.push(...(await this.io.listConfig(baseScope)));
+		const walkConfig = walksDisk && (configDue || !cacheValid);
+		if (walkConfig) {
+			if (this.s.syncConfigDir) files.push(...(await this.io.listConfig(baseScope)));
+			if (this.s.syncHidden || this.s.useGitignore) files.push(...(await this.io.listHidden(baseScope)));
+		}
 		const localShas = new Map<string, string>();
 		const cacheNext: SyncState["cache"] = {};
 		let hashed = 0;
@@ -476,9 +505,9 @@ export class SyncEngine {
 			localShas.set(f.path, h);
 			if (++hashed % 25 === 0) await sleep(0);
 		}
-		if (this.s.syncConfigDir && !walkConfig) {
+		if (walksDisk && !walkConfig) {
 			for (const [p, c] of Object.entries(state.cache)) {
-				if (!p.startsWith(cfgPrefix) || !baseScope(p) || localShas.has(p)) continue;
+				if (!onDisk(p) || !baseScope(p) || localShas.has(p)) continue;
 				if (c.s > maxBytes) skip(p, `local file larger than ${this.s.maxFileSizeMB} MB`);
 				else {
 					cacheNext[p] = c;
@@ -586,6 +615,10 @@ export class SyncEngine {
 		// Encryption: refuse to read an encrypted repo without the key, or to mix keys.
 		if (this.host.checkEncryption && !readOnly) this.markerToAdd = await this.host.checkEncryption(head ? markerSha : null);
 		else if (this.host.checkEncryption) await this.host.checkEncryption(head ? markerSha : null);
+		if (opts.only) {
+			// "Sync current file": every other path keeps its baseline and is left for a later sync.
+			for (const p of new Set([...localShas.keys(), ...remoteShas.keys(), ...Object.keys(base)])) if (!opts.only.has(p)) skipPaths.add(p);
+		}
 		for (const p of skipPaths) {
 			localShas.delete(p);
 			remoteShas.delete(p);

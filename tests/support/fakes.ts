@@ -46,17 +46,19 @@ export class FakeFS {
 				if (f) return { type: "file", mtime: f.mtime, size: f.data.byteLength, ctime: 0 };
 				return fs.isDir(p) ? { type: "folder", mtime: 0, size: 0, ctime: 0 } : null;
 			},
-			list: async (dir: string) => {
+			list: async (rawDir: string) => {
+				const dir = rawDir.replace(/^\/+|\/+$/g, "");
 				const files = new Set<string>();
 				const folders = new Set<string>();
 				const all = [...fs.files.keys(), ...[...fs.dirs].map((d) => d + "/")];
+				const pre = dir ? dir + "/" : "";
 				for (const p of all) {
-					if (!p.startsWith(dir + "/")) continue;
-					const rest = p.slice(dir.length + 1);
+					if (!p.startsWith(pre)) continue;
+					const rest = p.slice(pre.length);
 					const i = rest.indexOf("/");
 					if (i < 0) {
 						if (rest) files.add(p);
-					} else folders.add(dir + "/" + rest.slice(0, i));
+					} else folders.add(pre + rest.slice(0, i));
 				}
 				return { files: [...files], folders: [...folders] };
 			},
@@ -75,8 +77,10 @@ export class FakeFS {
 				fs.files.delete(p);
 				fs.trash.push(p);
 			},
-			read: async () => {
-				throw new Error("no state");
+			read: async (p: string) => {
+				const f = fs.files.get(p);
+				if (!f) throw new Error("no state");
+				return dec.decode(f.data);
 			},
 			write: async () => {},
 		};

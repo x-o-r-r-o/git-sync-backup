@@ -83,14 +83,14 @@ All roadmap items have shipped:
 
 Still to verify: real phones, and real GitLab, Gitea and Bitbucket servers (so far they are tested against simulated servers only).
 
-## Next (from the 1.2 review)
+## Status after 1.3.0 (2026-10-12)
 
-Ranked by user demand in competitor issue trackers (Fit, Obsidian Git, Remotely Save, LiveSync) and effort:
+From the 1.2 review list, shipped in 1.3: granular settings-folder sync (1), setup link / QR code and other-sync-tool warning (2), `.gitignore` and hidden files (3), file-explorer status and phone notices (4), sync current file / on open (5), folded settings (6).
 
-1. **Granular settings-folder sync**: per category or per plugin (code + settings, code only, device-local), so workspace and plugin settings stop conflicting. Fit 1.6 and halyard-sync just shipped this.
-2. **Add a device with a setup link or QR code** carrying host, repository, branch and scope (token optional, passphrase-encrypted), plus a warning when another sync tool (Obsidian Sync, iCloud, a `.git` folder, Remotely Save, LiveSync) is active in the vault.
-3. **Respect the repository's `.gitignore`** and allow dotfiles outside the settings folder.
-4. **Sync status in the file explorer** (pending, conflict, on demand, excluded) and better feedback on phones, which have no status bar.
-5. **Sync this file now** and sync on file open.
-6. Fewer, grouped settings (basics first, advanced collapsed).
-7. Real-server verification of GitLab, Gitea and Bitbucket, and real-phone testing, before dropping "beta".
+## Next
+
+1. Real-server verification of GitLab, Gitea and Bitbucket, and real-phone testing (iOS, Android), before dropping "beta".
+2. Native-speaker review of the machine-assisted translations.
+3. More hosts: Gitee, Azure DevOps, plain HTTPS Git (Gitee's write API is limited).
+4. Conflict branch plus pull request for shared team folders.
+5. Hidden folders inside normal folders, and instant detection of settings-folder changes (today: on full scans).

@@ -62,6 +62,7 @@ export class HealthView extends ItemView {
 	async onOpen() {
 		this.render();
 		void this.loadRemote();
+		void this.plugin.checkOtherSync().then(() => this.render());
 	}
 
 	/** Re-render local info immediately; optionally re-query GitHub. */
@@ -160,6 +161,14 @@ export class HealthView extends ItemView {
 			if (f.action === "encryption") this.button(s, t("health.enterPassphrase"), () => p.openEncryption(() => void p.sync("manual")), true);
 		}
 
+		// ---- other sync tools ----
+		if (p.otherSync.length) {
+			const s = this.section(t("os.title"), "alert-triangle");
+			s.addClass("vsg-h-error");
+			s.createDiv({ text: t("os.found", { list: p.otherSync.map((x) => (x === ".git" ? t("os.gitFolder") : x)).join(", ") }) });
+			s.createDiv({ cls: "vsg-muted", text: t("os.hint") });
+		}
+
 		// ---- pending ----
 		const pend = this.section(t("health.pending"), "clock");
 		const edited = p.pendingLocalCount();
@@ -255,6 +264,7 @@ export class HealthView extends ItemView {
 		this.button(tl, t("health.snapshot"), () => p.snapshot(true));
 		this.button(tl, t("health.reset"), () => p.resetToGitHub());
 		this.button(tl, t("health.freeSpace"), () => p.freeUpSpace());
+		this.button(tl, t("link.addDevice"), () => p.openSetupLink());
 		this.button(tl, t("health.wizard"), () => p.openWizard());
 		this.button(tl, t("health.log"), () => p.openLog());
 		this.button(tl, t("health.settings"), () => p.openSettings());

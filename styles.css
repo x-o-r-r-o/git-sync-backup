@@ -482,3 +482,49 @@
 .vsg-hidden {
 	display: none;
 }
+
+/* File explorer: edited since the last sync, and conflict copies */
+.nav-file-title.vsg-x-pending .nav-file-title-content::after {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-inline-start: 6px;
+	border-radius: 50%;
+	background: var(--color-accent);
+	vertical-align: middle;
+}
+.nav-file-title.vsg-x-conflict .nav-file-title-content {
+	color: var(--text-warning);
+}
+.nav-file-title.vsg-x-conflict .nav-file-title-content::after {
+	content: " ⚠";
+}
+
+/* Add a device: setup link and QR code */
+.vsg-qr-box {
+	display: flex;
+	justify-content: center;
+	margin: var(--size-4-2) 0;
+}
+.vsg-qr {
+	width: min(260px, 70vw);
+	height: auto;
+	border-radius: var(--radius-s);
+	image-rendering: pixelated;
+}
+
+/* Settings: folded sections and indented sub-options */
+.vsg-group {
+	border-top: 1px solid var(--background-modifier-border);
+	padding: var(--size-4-2) 0;
+}
+.vsg-group-summary {
+	cursor: pointer;
+	font-weight: var(--font-semibold);
+	font-size: var(--font-ui-medium);
+	padding: var(--size-4-2) 0;
+}
+.setting-item.vsg-indent {
+	padding-inline-start: var(--size-4-6);
+}

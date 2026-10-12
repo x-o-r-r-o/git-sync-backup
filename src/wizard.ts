@@ -24,8 +24,9 @@ export class SetupWizard extends Modal {
 	private choice: FirstSync = "merge";
 	private resultText = "";
 
-	constructor(app: App, private plugin: VaultSyncPlugin) {
+	constructor(app: App, private plugin: VaultSyncPlugin, start?: "vault") {
 		super(app);
+		if (start) this.step = start;
 	}
 
 	onOpen() {
@@ -87,6 +88,16 @@ export class SetupWizard extends Modal {
 			.setName(tr("w.deviceName"))
 			.setDesc(tr("w.deviceNameDesc"))
 			.addText((t) => t.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim())));
+
+		// Another sync tool on the same vault can overwrite changes: say so before anything syncs.
+		const others = this.contentEl.createDiv();
+		void p.checkOtherSync().then((found) => {
+			if (!found.length) return;
+			const box = others.createDiv({ cls: "vsg-h-error" });
+			box.createDiv({ text: tr("os.found", { list: found.map((x) => (x === ".git" ? tr("os.gitFolder") : x)).join(", ") }) });
+			box.createDiv({ cls: "vsg-muted", text: tr("os.hint") });
+		});
+		this.contentEl.createEl("p", { cls: "vsg-muted", text: tr("link.wizardHint") });
 
 		const status = this.contentEl.createDiv({ cls: "vsg-wz-status" });
 		const done = async (token?: string) => {

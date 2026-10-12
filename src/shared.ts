@@ -47,7 +47,11 @@ export class SharedFolderHost implements SyncHost {
 	}
 	get settings(): VaultSyncSettings {
 		const s = this.plugin.settings;
-		return { ...s, provider: this.def.provider, owner: this.def.owner, repo: this.def.repo, branch: this.def.branch || "main", syncConfigDir: false, dailySnapshot: false };
+		return { ...s, provider: this.def.provider, owner: this.def.owner, repo: this.def.repo, branch: this.def.branch || "main", syncConfigDir: false, syncHidden: false, dailySnapshot: false };
+	}
+	/** The vault's .gitignore applies inside shared folders too (vault paths). */
+	gitignorePatterns(): string[] {
+		return this.plugin.gitignorePatterns();
 	}
 	get stateFilePath(): string {
 		return normalizePath(this.plugin.stateFilePath.replace(/sync-state\.json$/, `sync-state-${this.def.id}.json`));
