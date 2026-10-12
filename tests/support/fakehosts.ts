@@ -87,7 +87,11 @@ export function giteaTransport(repo: FakeRepo) {
 			repo.tags.set(body.tag_name, body.target);
 			return ok({});
 		}
-		if (path === `${R}/tags`) return ok([...repo.tags].map(([name, sha]) => ({ name, commit: { sha } })));
+		if (path === `${R}/tags`) {
+			const limit = Number(q.get("limit") ?? 30);
+			const page = Number(q.get("page") ?? 1);
+			return ok([...repo.tags].slice((page - 1) * limit, page * limit).map(([name, sha]) => ({ name, commit: { sha } })));
+		}
 		if ((m = /^\/repos\/me\/vault\/git\/commits\/(\w+)$/.exec(path))) {
 			const c = repo.commits.get(m[1]);
 			if (!c) return err(404);
@@ -136,7 +140,7 @@ export function giteaTransport(repo: FakeRepo) {
 }
 
 /** Fake GitLab at https://gitlab.test/api/v4, project me/vault. */
-export function gitlabTransport(repo: FakeRepo) {
+export function gitlabTransport(repo: FakeRepo, calls = { head: 0 }) {
 	return async (req: HttpRequest): Promise<HttpResponse> => {
 		const u = new URL(req.url);
 		const enc = u.pathname.replace(/^\/api\/v4/, "");
@@ -171,7 +175,9 @@ export function gitlabTransport(repo: FakeRepo) {
 			const ref = q.get("ref")!;
 			const p2 = decodeURIComponent(m[1]);
 			const last = repo.history(ref).find((sha) => { const c = repo.commits.get(sha)!; const par = c.parents[0] ? repo.commits.get(c.parents[0])!.files.get(p2) : undefined; return c.files.get(p2) !== par; });
-			return { status: last ? 200 : 404, json: null, arrayBuffer: new ArrayBuffer(0), headers: last ? { "X-Gitlab-Last-Commit-Id": last } : {} };
+			const blob = repo.commits.get(ref)?.files.get(p2);
+			calls.head++;
+			return { status: last ? 200 : 404, json: null, arrayBuffer: new ArrayBuffer(0), headers: last ? { "X-Gitlab-Last-Commit-Id": last, ...(blob ? { "X-Gitlab-Size": String(repo.blobs.get(blob)!.length) } : {}) } : {} };
 		}
 		if ((m = /^files\/(.+)\/raw$/.exec(rest))) {
 			const sha = repo.commits.get(q.get("ref")!)?.files.get(decodeURIComponent(m[1]));

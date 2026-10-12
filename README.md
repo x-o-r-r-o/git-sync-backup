@@ -251,7 +251,7 @@ This section covers the disclosures Obsidian's developer policies require.
 
 - GitHub rejects files over 100 MB (the default limit here is 50 MB). Use Git LFS or exclude patterns for large media.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
-- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked on full scans, every 30 minutes by default, rather than right after each change. Only hidden files at the top of the vault are synced, not hidden folders inside normal folders.
+- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. Only hidden files at the top of the vault are synced, not hidden folders inside normal folders.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
 - Sign in with GitHub works on github.com. GitLab, Gitea and Bitbucket use access tokens.
 - GitHub is tested against the real API on every release. GitLab, Gitea and Bitbucket are tested against simulated servers, which is why they are marked beta. Reports from real servers and phones are welcome.

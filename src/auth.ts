@@ -1,10 +1,15 @@
 // Authentication helpers. The plugin uses personal access tokens (fine-grained recommended).
 // See docs/AUTH.md for the OAuth research and the planned GitHub App sign-in.
 
-/** github.com for the public API, or the Enterprise host for https://HOST/api/v3. */
+/**
+ * github.com for the public API, the Enterprise host for https://HOST/api/v3, or SUB.ghe.com for
+ * GitHub Enterprise Cloud with data residency (API at https://api.SUB.ghe.com).
+ */
 export function webBase(apiBase: string): string {
 	const u = (apiBase || "https://api.github.com").replace(/\/+$/, "");
 	if (/^https:\/\/api\.github\.com$/i.test(u)) return "https://github.com";
+	const ghe = /^https:\/\/api\.([a-z0-9-]+)\.ghe\.com$/i.exec(u);
+	if (ghe) return `https://${ghe[1]}.ghe.com`;
 	return u.replace(/\/api\/v3$/i, "");
 }
 

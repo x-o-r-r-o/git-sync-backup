@@ -139,6 +139,11 @@ export interface SyncState {
 	codecFingerprint: string;
 	/** What was in scope at the last sync; when it changes, the next sync compares everything. */
 	scopeSig?: string;
+	/**
+	 * Files moved out of this device's scope (found elsewhere in the vault with the same content):
+	 * path → blob sha. Their repository copy is kept, without rescanning on every sync.
+	 */
+	keptMoved?: Record<string, string>;
 	/** Remote files this device chose not to download (over its size limit), available on demand. */
 	remoteOnly: Record<string, { sha: string; size: number }>;
 	lastSync: number;

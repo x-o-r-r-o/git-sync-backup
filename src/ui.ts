@@ -1,5 +1,5 @@
 import { App, ButtonComponent, FuzzySuggestModal, Modal, Notice, Setting, TFolder } from "obsidian";
-import { renderDiff, renderHunkPicker } from "./diffview.ts";
+import { clickable, renderDiff, renderHunkPicker } from "./diffview.ts";
 import type { CommitInfo } from "./github.ts";
 import type { Decision } from "./plan.ts";
 import type { ConflictChoice, ConflictInfo, DeleteGuardChoice } from "./types.ts";
@@ -206,6 +206,7 @@ export class ReviewModal extends Modal {
 			if (!items.length) continue;
 			const h = contentEl.createDiv({ cls: "vsg-review-group" });
 			const all = h.createEl("input", { type: "checkbox" });
+			all.setAttr("aria-label", tr("u.selectGroup", { group: title }));
 			all.checked = true;
 			all.toggleClass("vsg-hidden", preview);
 			h.createSpan({ text: ` ${title} (${items.length})`, cls: "vsg-review-title" });
@@ -215,6 +216,7 @@ export class ReviewModal extends Modal {
 				this.checked.set(d.path, true);
 				const row = ul.createDiv({ cls: "vsg-review-row" });
 				const cb = row.createEl("input", { type: "checkbox" });
+				cb.setAttr("aria-label", tr("u.includeFile", { path: d.path }));
 				cb.checked = true;
 				cb.toggleClass("vsg-hidden", preview);
 				cb.onchange = () => {
@@ -302,7 +304,7 @@ export class CommitListModal extends Modal {
 				const li = ul.createEl("li");
 				li.createDiv({ text: r.label, cls: "vsg-commit-title" });
 				li.createDiv({ text: r.sub, cls: "vsg-commit-sub" });
-				li.onClickEvent(() => {
+				clickable(li, () => {
 					this.close();
 					r.run();
 				});
@@ -343,7 +345,7 @@ export class FileVersionModal extends Modal {
 			pane.empty();
 			tabs.querySelectorAll("button").forEach((b) => b.toggleClass("is-active", b.dataset.k === which));
 			if (which === "diff" && canDiff) renderDiff(pane, this.currentText as string, this.text!, { oldLabel: tr("u.currentFile"), newLabel: tr("u.thisVersion") });
-			else pane.createEl("pre", { cls: "vsg-version", text: this.text ?? `(binary file, ${this.size} bytes)` });
+			else pane.createEl("pre", { cls: "vsg-version", text: this.text ?? tr("u.binaryFile", { n: this.size }) });
 		};
 		if (canDiff) {
 			const b = tabs.createEl("button", { text: tr("u.compareCurrent") });
@@ -505,7 +507,7 @@ export class TimelineModal extends Modal {
 				act(tr("u.browseFiles"), () => this.actions.browse(e));
 				act(tr("u.restoreFolder"), () => this.actions.restoreFolder(e));
 				act(tr("u.restoreVault"), () => this.actions.restoreVault(e));
-				li.onClickEvent(() => li.toggleClass("is-open", !li.hasClass("is-open")));
+				clickable(li, () => li.toggleClass("is-open", !li.hasClass("is-open")));
 			}
 		} catch (e) {
 			status.setText(tr("u.failed", { error: errText(e) }));

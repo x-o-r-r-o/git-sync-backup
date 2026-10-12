@@ -5,7 +5,7 @@ import type { App } from "obsidian";
 import { Codec, PLAIN } from "./codec.ts";
 import { MARKER_PATH } from "./crypto.ts";
 import { NotFastForward } from "./remote.ts";
-import type { Remote, Upsert } from "./remote.ts";
+import type { Remote, TreeEntry, Upsert } from "./remote.ts";
 import { compileGlobs } from "./glob.ts";
 import { VaultIO } from "./io.ts";
 import { lcsMatch, merge3, splitLines } from "./merge.ts";
@@ -170,6 +170,8 @@ export class SyncEngine {
 	/** Set after repeated "behind" answers: the branch really was moved back, so treat it like a rewrite. */
 	private acceptRewind = false;
 	private pinnedRemote: Remote | null = null;
+	/** The codec a running sync uses: toggling encryption mid-sync must not switch it under that sync. */
+	private pinnedCodec: Codec | null = null;
 
 	constructor(host: SyncHost) {
 		this.host = host;
@@ -190,7 +192,7 @@ export class SyncEngine {
 	}
 
 	private loadCodec() {
-		this.codec = this.host.codec?.() ?? PLAIN;
+		this.codec = this.pinnedCodec ?? this.host.codec?.() ?? PLAIN;
 	}
 
 	/** Repository path of a vault path (for history lookups). */
@@ -267,6 +269,10 @@ export class SyncEngine {
 			...(ds?.exclude ?? []).map(sub),
 			...(this.host.extraExcludes?.() ?? []),
 			".git/",
+			// Side files of an open SQLite database: syncing them mid-write corrupts the database elsewhere.
+			"*-wal",
+			"*-shm",
+			"*-journal",
 			this.host.stateFilePath,
 			// Every engine's state files live in the plugin folder.
 			this.host.stateFilePath.replace(/[^/]+$/, "sync-state*"),
@@ -289,10 +295,73 @@ export class SyncEngine {
 	/** Dry run: what would happen, without touching anything. */
 	async preview(mode: SyncMode): Promise<Preview> {
 		this.loadCodec();
-		const ctx = await this.gather(false, {}, true);
+		const ctx = await this.gather(false, {}, true, { mode });
+		for (const [from, to] of ctx.caseRenames) this.rekey(ctx, from, to);
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		const decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
+		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
+		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, ctx.skipped, () => {});
 		return { decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
+	}
+
+	/** A local file now known under another name (case-only rename): move its baseline and local hash along. */
+	private rekey(ctx: { base: Record<string, string>; localShas: Map<string, string>; eolSame: Set<string> }, from: string, to: string) {
+		const base = { ...ctx.base };
+		if (base[from]) {
+			base[to] = base[from];
+			delete base[from];
+		}
+		ctx.base = base;
+		const l = ctx.localShas.get(from);
+		if (l) {
+			ctx.localShas.delete(from);
+			ctx.localShas.set(to, l);
+		}
+		if (ctx.eolSame.delete(from)) ctx.eolSame.add(to);
+	}
+
+	/**
+	 * A file moved out of this device's scope (device include/exclude patterns) looks deleted here, but it
+	 * still exists: keep it in the repository instead of deleting it for every device. Only runs when
+	 * there are deletions to check; candidates are found by size first, then confirmed by content.
+	 */
+	private async keepMovedOutOfScope(decisions: Decision[], base: Record<string, string>, skipped: string[], keep: (path: string) => void): Promise<Decision[]> {
+		const cands = decisions.filter((d) => d.kind === "delete-remote" && !d.renamedTo && base[d.path]);
+		const ds = this.host.deviceScope?.();
+		const narrowed = !!ds && (ds.include.some((x) => x.trim() && !x.trim().startsWith("#")) || ds.exclude.length > 0);
+		if (!cands.length || !narrowed) return decisions;
+		const kept = new Set<string>();
+		// Already found on an earlier sync (same content as then): keep it without rescanning.
+		const known = this.host.state.keptMoved ?? {};
+		for (const d of cands) {
+			if (known[d.path] && known[d.path] === base[d.path]) {
+				kept.add(d.path);
+				keep(d.path);
+			}
+		}
+		const rest = cands.filter((d) => !kept.has(d.path));
+		const shared = this.buildScope(false);
+		const mine = this.buildScope(true);
+		const bySize = new Map<number, string[]>();
+		if (rest.length) for (const f of this.io.listVault((p) => shared(p) && !mine(p))) if (f.size > 0) bySize.set(f.size, [...(bySize.get(f.size) ?? []), f.path]);
+		for (const d of rest) {
+			// The size from the last sync that saw the file (empty files never count as a match).
+			const size = this.host.state.cache[d.path]?.s;
+			if (!size) continue;
+			for (const p of bySize.get(size) ?? []) {
+				let same = false;
+				try {
+					same = (await this.codec.storedSha(d.path, await this.io.read(p))) === base[d.path];
+				} catch {
+					same = false;
+				}
+				if (!same) continue;
+				kept.add(d.path);
+				keep(d.path);
+				skipped.push(`${d.path} (moved to ${p}, outside this device's sync scope; kept in the repository)`);
+				break;
+			}
+		}
+		return kept.size ? decisions.filter((d) => !(d.kind === "delete-remote" && kept.has(d.path))) : decisions;
 	}
 
 	/**
@@ -308,7 +377,9 @@ export class SyncEngine {
 		for (const f of this.io.listVault(scope)) {
 			seen.add(f.path);
 			const c = state.cache[f.path];
-			if (!c || c.m !== f.mtime || c.s !== f.size || state.base[f.path] !== c.h) out.push(f.path);
+			// A file whose only change is CRLF <-> LF syncs as unchanged, so it isn't pending either.
+			const eolOnly = this.s.ignoreLineEndingChanges && !!c?.n && state.baseNorm?.[f.path] === c.n;
+			if (!c || c.m !== f.mtime || c.s !== f.size || (state.base[f.path] !== c.h && !eolOnly)) out.push(f.path);
 		}
 		for (const p of Object.keys(state.base)) {
 			if (!seen.has(p) && !p.startsWith(cfgPrefix) && !isHiddenPath(p) && scope(p)) out.push(p);
@@ -380,6 +451,7 @@ export class SyncEngine {
 			this.snap = { ...this.host.settings };
 			// One client for the whole sync: a settings change mid-sync can't redirect it to another repository.
 			this.pinnedRemote = this.host.gh;
+			this.pinnedCodec = this.host.codec?.() ?? PLAIN;
 		}
 		try {
 			return await this.runWithRetries(mode, opts);
@@ -387,6 +459,7 @@ export class SyncEngine {
 			if (outer) {
 				this.snap = null;
 				this.pinnedRemote = null;
+				this.pinnedCodec = null;
 			}
 		}
 	}
@@ -444,7 +517,7 @@ export class SyncEngine {
 		return this.codec.storedSha(path, encodeText(text.replace(/\r\n/g, "\n")));
 	}
 
-	private async gather(initIfEmpty: boolean, opts: SyncOptions = {}, readOnly = false) {
+	private async gather(initIfEmpty: boolean, opts: SyncOptions = {}, readOnly = false, how: { mode?: SyncMode; noFastPath?: boolean } = {}) {
 		const state = this.host.state;
 		if (state.repoKey !== this.repoKey) {
 			this.host.log(`Repository changed to ${this.repoKey}. Starting from a fresh baseline (no deletions).`);
@@ -486,6 +559,7 @@ export class SyncEngine {
 		}
 		const localShas = new Map<string, string>();
 		const cacheNext: SyncState["cache"] = {};
+		let unknownLocal = false;
 		let hashed = 0;
 		for (const f of files) {
 			if (f.size > maxBytes) {
@@ -512,6 +586,14 @@ export class SyncEngine {
 				else {
 					cacheNext[p] = c;
 					localShas.set(p, c.h);
+				}
+			}
+			// A synced settings-folder/hidden file the reused cache doesn't know (e.g. a conflict copy written
+			// by an older version) is unknown until the next disk walk, not deleted: keep its baseline.
+			for (const p of Object.keys(state.base)) {
+				if (onDisk(p) && baseScope(p) && !localShas.has(p) && !skipPaths.has(p) && !state.cache[p]) {
+					skipPaths.add(p);
+					unknownLocal = true;
 				}
 			}
 		}
@@ -555,13 +637,13 @@ export class SyncEngine {
 		}
 
 		// Fast path: nothing changed anywhere since last sync.
-		const baseInScope = Object.keys(state.base).filter(scope);
+		const baseInScope = Object.keys(state.base).filter((p) => scope(p) && !state.keptMoved?.[p]);
 		const unchangedLocal = localShas.size === baseInScope.length && [...localShas].every(([p, h]) => state.base[p] === h);
 		// Anything that changes what this device syncs (patterns, folders, limits, on-demand downloads)
 		// must trigger a full comparison, even when nothing changed on either side.
 		const scopeSig = this.scopeSignature();
-		if (head && head === state.head && unchangedLocal && !state.dirty && state.scopeSig === scopeSig) {
-			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered, remoteOnly: state.remoteOnly ?? {}, scopeSig };
+		if (!how.noFastPath && head && head === state.head && unchangedLocal && !state.dirty && state.scopeSig === scopeSig) {
+			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered, remoteOnly: state.remoteOnly ?? {}, scopeSig, unknownLocal, caseRenames: [] as [string, string][] };
 		}
 
 		const remote = new Map<string, RemoteEntry>();
@@ -569,6 +651,8 @@ export class SyncEngine {
 		const remoteOnly: SyncState["remoteOnly"] = {};
 		let treeSha: string | null = null;
 		let markerSha: string | null = null;
+		// Local files renamed on another device by letter case only: [local path, new remote path].
+		const caseRenames: [string, string][] = [];
 		if (head) {
 			treeSha = await this.gh.getCommitTree(head);
 			const dsc = this.host.deviceScope?.();
@@ -576,13 +660,17 @@ export class SyncEngine {
 			const pinned = new Set(dsc?.pinned ?? []);
 			const fold = (p: string) => p.normalize("NFC").toLowerCase();
 			const lowerLocal = new Map([...localShas.keys()].map((p) => [fold(p), p]));
-			const seenLower = new Set<string>();
+			const seenLower = new Map<string, string>();
+			const listed: { raw: TreeEntry; vp: string }[] = [];
 			for (const raw of await this.gh.listTree(treeSha)) {
 				if (raw.path === MARKER_PATH) markerSha = raw.sha;
 				if (raw.type !== "blob" || (raw.mode !== "100644" && raw.mode !== "100755")) continue;
 				// Map the repository path back to a vault path (decrypt names, strip folder prefix).
 				const vp = this.codec.transformsPaths ? await this.codec.decodePath(raw.path) : raw.path;
-				if (vp === null) continue;
+				if (vp !== null) listed.push({ raw, vp });
+			}
+			const remotePaths = new Set(listed.map((x) => x.vp));
+			for (const { raw, vp } of listed) {
 				const e = { ...raw, path: vp };
 				if (!baseScope(e.path)) continue;
 				if (!safePath(e.path)) {
@@ -593,6 +681,13 @@ export class SyncEngine {
 					skip(e.path, `remote file larger than ${this.s.maxFileSizeMB} MB`);
 					continue;
 				}
+				const lower = fold(e.path);
+				const localTwin = lowerLocal.get(lower);
+				// Same name in another Unicode form (macOS/iOS store NFD, other systems NFC): the same file.
+				// Local IO and the baseline use the local spelling, remote operations the repository path.
+				if (localTwin && localTwin !== e.path && localTwin.normalize("NFC") === e.path.normalize("NFC") && !remotePaths.has(localTwin) && !seenLower.has(lower)) {
+					e.path = localTwin;
+				}
 				// Big and not on this device: leave it in the repository, unless this device had it at the
 				// last sync (then it was deleted or renamed here, and that must reach the repository).
 				const wasHere = !!state.base[e.path] && !state.remoteOnly?.[e.path];
@@ -601,13 +696,22 @@ export class SyncEngine {
 					remoteOnly[e.path] = { sha: e.sha, size: e.size ?? 0 };
 					continue;
 				}
-				const lower = fold(e.path);
-				const localTwin = lowerLocal.get(lower);
-				if (seenLower.has(lower) || (localTwin && localTwin !== e.path && !state.base[e.path])) {
-					skip(e.path, "differs only by letter case from another file");
+				const other = seenLower.get(lower) ?? (localTwin && localTwin !== e.path ? localTwin : undefined);
+				// (Not when the exact spelling also exists here: then it is a separate local file, not a rename.)
+				if (other && !seenLower.has(lower) && !state.base[e.path] && state.base[other] && !remotePaths.has(other) && !localShas.has(e.path)) {
+					// The local file is gone from the repository and a new path differing only by letter case
+					// appeared: renamed by case on another device. Rename here too instead of deleting it.
+					if (how.mode === "push") {
+						skip(e.path, `renamed from ${other} by letter case elsewhere; applied on the next two-way sync`);
+						skip(other, `renamed to ${e.path} by letter case elsewhere; applied on the next two-way sync`);
+						continue;
+					}
+					caseRenames.push([other, e.path]);
+				} else if (other && (seenLower.has(lower) || !state.base[e.path])) {
+					skip(e.path, other.normalize("NFC") === e.path.normalize("NFC") ? `same name as ${other} in another Unicode form` : `differs only by letter case from ${other}`);
 					continue;
 				}
-				seenLower.add(lower);
+				seenLower.set(lower, e.path);
 				remote.set(e.path, { sha: e.sha, mode: e.mode, raw: raw.path });
 				remoteShas.set(e.path, e.sha);
 			}
@@ -624,7 +728,7 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig };
+		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames };
 	}
 
 	private async initRemote(): Promise<string> {
@@ -665,7 +769,7 @@ export class SyncEngine {
 			commit: null,
 		};
 
-		const ctx = await this.gather(mode !== "pull", opts);
+		const ctx = await this.gather(mode !== "pull", opts, false, { mode });
 		this.checkAlive();
 		report.skipped = ctx.skipped;
 		const cacheNext = ctx.cacheNext;
@@ -682,12 +786,50 @@ export class SyncEngine {
 
 		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
 		state.dirty = false;
+		// Some remote changes are deliberately left for later (push mode, "sync current file", deferred
+		// in review, delete guard): the next sync must compare fully instead of taking the fast path.
+		let behind = ctx.unknownLocal || !!opts.only || !!opts.defer?.size;
+
+		// Renamed by letter case only on another device: rename the local file first (nothing is deleted),
+		// then compare it under its new name like any other file.
+		for (const [from, to] of ctx.caseRenames) {
+			try {
+				const c = cacheNext[from];
+				const st = await this.io.stat(from);
+				if (!c || !st || st.mtime !== c.m || st.size !== c.s) throw new EditedDuringSync(from);
+				await this.io.rename(from, to);
+				const moved = await this.io.stat(to);
+				if (moved) cacheNext[to] = { ...c, m: moved.mtime, s: moved.size };
+				delete cacheNext[from];
+				this.rekey(ctx, from, to);
+				report.renamed.push(`${from} → ${to}`);
+			} catch (e) {
+				// Leave both names as they are and try again next time.
+				for (const p of [from, to]) {
+					ctx.skipPaths.add(p);
+					ctx.localShas.delete(p);
+					ctx.remoteShas.delete(p);
+					remote.delete(p);
+				}
+				report.skipped.push(`${to} (renamed from ${from} by letter case elsewhere; not renamed here yet: ${errMsg(e)})`);
+				behind = true;
+			}
+		}
+
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
 		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
 
 		// Paths skipped for size/case keep their old base so they are not seen as deleted later.
 		const next: Record<string, string> = { ...plan.settled };
 		for (const p of ctx.skipPaths) if (state.base[p]) next[p] = state.base[p];
+		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, report.skipped, (p) => {
+			next[p] = ctx.base[p];
+			(state.keptMoved ??= {})[p] = ctx.base[p];
+		});
+		// Forget kept files that came back into scope, changed, or left the repository.
+		for (const p of Object.keys(state.keptMoved ?? {})) {
+			if (ctx.localShas.has(p) || !ctx.base[p] || ctx.remoteShas.get(p) !== state.keptMoved![p]) delete state.keptMoved![p];
+		}
 
 		// ---- delete guard ----
 		const delLocal = decisions.filter((d) => d.kind === "delete-local").map((d) => d.path);
@@ -704,6 +846,7 @@ export class SyncEngine {
 					if ((d.kind === "delete-local" || d.kind === "delete-remote") && state.base[d.path]) next[d.path] = state.base[d.path];
 				}
 				decisions = decisions.filter((d) => d.kind !== "delete-local" && d.kind !== "delete-remote");
+				behind = true;
 			}
 		}
 
@@ -880,6 +1023,15 @@ export class SyncEngine {
 			}
 		}
 
+		// Anything whose new baseline isn't what the repository holds (e.g. remote edits kept out in push
+		// mode) still has to be synced: never let the "nothing changed" fast path hide it.
+		const pushed = new Set(report.commit ? [...uploads.map((u) => u.path), ...remoteDeletes] : []);
+		for (const p of new Set([...ctx.remoteShas.keys(), ...Object.keys(next)])) {
+			if (behind) break;
+			if (ctx.skipPaths.has(p) || ctx.remoteOnly[p] || pushed.has(p)) continue;
+			if (next[p] !== ctx.remoteShas.get(p)) behind = true;
+		}
+
 		const baseNorm: Record<string, string> = {};
 		for (const [p, sha] of Object.entries(next)) {
 			const c = cacheNext[p];
@@ -895,7 +1047,7 @@ export class SyncEngine {
 		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
 		state.lastSync = Date.now();
-		state.dirty = state.dirty || editedDuringSync || report.errors.length > 0;
+		state.dirty = state.dirty || behind || editedDuringSync || report.errors.length > 0;
 		await host.saveState();
 		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
@@ -948,7 +1100,11 @@ export class SyncEngine {
 			await recordWrite(d.path, await this.codec.storedSha(d.path, keep), keep);
 			await queueUpload(d.path, keep);
 			await this.io.write(copy, other);
-			await queueUpload(copy, other);
+			// Recorded like any scanned file: settings-folder/hidden copies are only listed from the cache
+			// between disk walks, and an unrecorded copy would look deleted there.
+			const copySha = await this.codec.storedSha(copy, other);
+			await recordWrite(copy, copySha, other);
+			await queueUpload(copy, other, copySha);
 			report.conflictCopies.push(copy);
 		}
 		delete next[d.from];
@@ -983,8 +1139,11 @@ export class SyncEngine {
 			await this.assertUnchanged(d.path);
 			const copy = await this.freeCopyPath(d.path, device);
 			await this.io.write(copy, localData);
+			// Recorded like any scanned file (see renameMerge), so the copy never reads as deleted later.
+			const copySha = await this.codec.storedSha(copy, localData);
+			await recordWrite(copy, copySha, localData);
 			await writeRemote();
-			if (uploadCopy) await queueUpload(copy, localData);
+			if (uploadCopy) await queueUpload(copy, localData, copySha);
 			report.conflictCopies.push(copy);
 			host.log(`Conflict on ${d.path}: kept both, your version saved as "${copy}".`);
 		};
@@ -1209,13 +1368,19 @@ export class SyncEngine {
 	async resetToRemote(confirm: (plan: ResetPlan) => Promise<boolean>): Promise<ResetPlan> {
 		const state = this.host.state;
 		this.loadCodec();
-		const ctx = await this.gather(false, {}, true);
-		const head = ctx.upToDate ? state.head : ctx.head;
+		// Always the real remote listing: the "nothing changed" shortcut would compare against local hashes.
+		const ctx = await this.gather(false, {}, true, { noFastPath: true });
+		const head = ctx.head;
 		if (!head) throw new Error("The branch in the repository is empty. Nothing to reset to.");
-		const remoteShas = ctx.upToDate ? new Map(ctx.localShas) : ctx.remoteShas;
+		for (const [from, to] of ctx.caseRenames) {
+			this.rekey(ctx, from, to);
+			if (ctx.cacheNext[from]) ctx.cacheNext[to] = ctx.cacheNext[from];
+		}
+		const remoteShas = ctx.remoteShas;
 		const plan: ResetPlan = { overwrite: [], download: [], remove: [] };
 		for (const p of new Set([...ctx.localShas.keys(), ...remoteShas.keys()])) {
-			const l = ctx.localShas.get(p);
+			// Exact bytes on disk (a line-ending-only difference still counts here).
+			const l = ctx.localShas.has(p) ? (ctx.cacheNext[p]?.h ?? ctx.localShas.get(p)) : undefined;
 			const r = remoteShas.get(p);
 			if (r && l && l !== r) plan.overwrite.push(p);
 			else if (r && !l) plan.download.push(p);
@@ -1225,6 +1390,12 @@ export class SyncEngine {
 		if (!(await confirm(plan))) throw new SyncCancelled("Reset cancelled.");
 
 		const cacheNext = ctx.cacheNext;
+		// Renamed by letter case only in the repository: take the new name first (content is handled below).
+		for (const [from, to] of ctx.caseRenames) {
+			await this.io.rename(from, to);
+			delete cacheNext[from];
+			delete cacheNext[to];
+		}
 		const write = async (p: string) => {
 			const sha = remoteShas.get(p)!;
 			const data = await this.blob(p, sha);

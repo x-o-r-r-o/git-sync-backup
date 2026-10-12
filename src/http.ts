@@ -41,8 +41,9 @@ export function header(res: HttpResponse, name: string): string | undefined {
 export async function httpRequest(
 	transport: Transport,
 	req: HttpRequest,
-	opts: { okStatuses?: number[]; hostLabel: string },
+	opts: { okStatuses?: number[]; hostLabel: string; wait?: (ms: number) => Promise<void> },
 ): Promise<HttpResponse> {
+	const wait = opts.wait ?? sleep;
 	let lastErr: unknown;
 	for (let attempt = 0; attempt < 4; attempt++) {
 		let res: HttpResponse;
@@ -50,23 +51,24 @@ export async function httpRequest(
 			res = await transport({ ...req, headers: { "Cache-Control": "no-cache", Pragma: "no-cache", ...req.headers } });
 		} catch (e) {
 			lastErr = e;
-			await sleep(1000 * 2 ** attempt);
+			// No point waiting after the last attempt: report the failure right away.
+			if (attempt < 3) await wait(1000 * 2 ** attempt);
 			continue;
 		}
 		if (res.status < 300 || opts.okStatuses?.includes(res.status)) return res;
 		const body = (res.json ?? {}) as { message?: unknown; error?: unknown };
 		const msg = typeof body.message === "string" ? body.message : typeof body.error === "string" ? body.error : `HTTP ${res.status}`;
 		if (res.status === 429 || (res.status === 403 && header(res, "retry-after"))) {
-			const wait = Number(header(res, "retry-after") ?? 0) * 1000 || 2000 * (attempt + 1);
-			if (wait <= 60_000 && attempt < 3) {
-				await sleep(wait);
+			const ms = Number(header(res, "retry-after") ?? 0) * 1000 || 2000 * (attempt + 1);
+			if (ms <= 60_000 && attempt < 3) {
+				await wait(ms);
 				continue;
 			}
 			throw new RemoteError(`${opts.hostLabel} rate limit hit. Try again in a minute.`, res.status);
 		}
 		if (res.status >= 500 && attempt < 3) {
 			lastErr = new RemoteError(String(msg), res.status);
-			await sleep(1000 * 2 ** attempt);
+			await wait(1000 * 2 ** attempt);
 			continue;
 		}
 		if (res.status === 401) throw new RemoteError(`${opts.hostLabel} token is invalid or expired.`, 401);
@@ -89,9 +91,13 @@ export function b64decode(s: string): ArrayBuffer {
 	return out.buffer;
 }
 
-/** Ancestry via commit lists, for hosts without a compare/merge-base endpoint. */
+/**
+ * Ancestry via commit lists, for hosts without a compare/merge-base endpoint. `list` may say whether
+ * more pages follow (from a header or a `next` link); otherwise only an empty page ends the history,
+ * because hosts clamp the page size (Gitea's MAX_RESPONSE_ITEMS) and a short page proves nothing.
+ */
 export async function compareByWalking(
-	list: (sha: string, page: number) => Promise<string[]>,
+	list: (sha: string, page: number) => Promise<string[] | { shas: string[]; more?: boolean }>,
 	base: string,
 	head: string,
 ): Promise<"ahead" | "behind" | "identical" | "diverged"> {
@@ -99,9 +105,11 @@ export async function compareByWalking(
 	// Returns true (found), false (reached the root without finding it) or null (gave up: too deep).
 	const walk = async (from: string, target: string): Promise<boolean | null> => {
 		for (let page = 1; page <= 60; page++) {
-			const shas = await list(from, page);
+			const got = await list(from, page);
+			const shas = Array.isArray(got) ? got : got.shas;
+			const more = Array.isArray(got) ? undefined : got.more;
 			if (shas.includes(target)) return true;
-			if (shas.length < 50) return false;
+			if (!shas.length || more === false) return false;
 		}
 		return null;
 	};
@@ -116,7 +124,11 @@ export async function compareByWalking(
 }
 
 /** multipart/form-data body (fields and files) as one ArrayBuffer, for APIs that require it. */
-export function buildMultipart(parts: { name: string; value: string | ArrayBuffer; filename?: string }[]): { body: ArrayBuffer; contentType: string } {
+/**
+ * multipart/form-data body. `attributes` goes into the part's Content-Disposition, as Bitbucket's
+ * /src endpoint expects (`x-attributes:"executable"` keeps the executable bit).
+ */
+export function buildMultipart(parts: { name: string; value: string | ArrayBuffer; filename?: string; attributes?: string }[]): { body: ArrayBuffer; contentType: string } {
 	const boundary = `----vaultsync${Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
 	const te = new TextEncoder();
 	const chunks: Uint8Array[] = [];
@@ -124,7 +136,9 @@ export function buildMultipart(parts: { name: string; value: string | ArrayBuffe
 	for (const p of parts) {
 		const head =
 			`--${boundary}\r\nContent-Disposition: form-data; name="${esc(p.name)}"` +
-			(p.filename !== undefined ? `; filename="${esc(p.filename)}"\r\nContent-Type: application/octet-stream` : "") +
+			(p.filename !== undefined ? `; filename="${esc(p.filename)}"` : "") +
+			(p.attributes ? `; x-attributes:"${esc(p.attributes)}"` : "") +
+			(p.filename !== undefined ? "\r\nContent-Type: application/octet-stream" : "") +
 			"\r\n\r\n";
 		chunks.push(te.encode(head));
 		chunks.push(typeof p.value === "string" ? te.encode(p.value) : new Uint8Array(p.value));

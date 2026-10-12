@@ -1,11 +1,12 @@
 // GitLab (gitlab.com or self-managed) via API v4. Commits use POST /projects/:id/repository/commits,
 // which writes many files in one atomic commit.
 
-import { b64encode, httpRequest, obsidianTransport } from "./http.ts";
+import { b64encode, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward } from "./remote.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
+import { gitBlobSha, pool } from "./util.ts";
 
 const BATCH_BYTES = 8 * 1024 * 1024;
 
@@ -17,13 +18,29 @@ interface GlCommit { id: string; message?: string; title?: string; authored_date
 interface GlDiff { new_path: string; old_path: string; new_file?: boolean; deleted_file?: boolean }
 interface GlTag { name: string; commit?: { id: string } }
 
+/** Minimal JSON store (the plugin's per-repository cache file). */
+export interface SizeStore {
+	load(): Promise<unknown>;
+	save(value: unknown): Promise<void>;
+}
+
 export class GitLab implements Remote {
 	readonly kind = "gitlab" as const;
 	readonly label = "GitLab";
 	private cfg: () => HostConfig;
 	private transport: Transport;
+	/**
+	 * Blob sha → size in bytes. /repository/tree returns no sizes, but the sync engine needs them for its
+	 * size limits, so they are looked up once per blob (HEAD, X-Gitlab-Size) and remembered here. Costs
+	 * one HEAD per file on the first listing after start-up, then only for new content.
+	 */
+	private sizes = new Map<string, number>();
+	/** Device-local file that keeps `sizes` across restarts (optional). */
+	private sizeStore: SizeStore | null;
+	private sizesLoaded = false;
 
-	constructor(cfg: () => HostConfig, transport: Transport = obsidianTransport) {
+	constructor(cfg: () => HostConfig, transport: Transport = obsidianTransport, sizeStore: SizeStore | null = null) {
+		this.sizeStore = sizeStore;
 		this.cfg = cfg;
 		this.transport = transport;
 	}
@@ -103,7 +120,42 @@ export class GitLab implements Remote {
 	async getCommitTree(sha: string): Promise<string> {
 		return sha;
 	}
+	/** File list with sizes (see `sizes`). */
 	async listTree(ref: string): Promise<TreeEntry[]> {
+		const out = await this.listEntries(ref);
+		if (!this.sizesLoaded && this.sizeStore) {
+			this.sizesLoaded = true;
+			try {
+				const saved = (await this.sizeStore.load()) as { gitlabSizes?: Record<string, number> } | null;
+				for (const [sha, n] of Object.entries(saved?.gitlabSizes ?? {})) if (typeof n === "number") this.sizes.set(sha, n);
+			} catch {
+				/* no saved sizes yet */
+			}
+		}
+		const unknown = new Map<string, string>();
+		for (const e of out) if (e.type === "blob" && !this.sizes.has(e.sha) && !unknown.has(e.sha)) unknown.set(e.sha, e.path);
+		await pool([...unknown], 6, async ([sha, path]) => {
+			// A size we can't get only means that file's size limit can't apply; never fail the sync for it.
+			try {
+				const res = await this.request("HEAD", `${this.project}/repository/files/${this.file(path)}?ref=${encodeURIComponent(ref)}`, undefined, { okStatuses: [404] });
+				const size = Number(header(res, "x-gitlab-size") ?? NaN);
+				if (res.status < 300 && Number.isFinite(size)) this.sizes.set(sha, size);
+			} catch {
+				/* unknown size */
+			}
+		});
+		if (unknown.size && this.sizeStore) {
+			try {
+				await this.sizeStore.save({ gitlabSizes: Object.fromEntries(this.sizes) });
+			} catch {
+				/* best effort */
+			}
+		}
+		for (const e of out) if (e.type === "blob") e.size = this.sizes.get(e.sha);
+		return out;
+	}
+	/** File list without sizes (cheap: no per-file requests). */
+	private async listEntries(ref: string): Promise<TreeEntry[]> {
 		const out: TreeEntry[] = [];
 		let url = `${this.project}/repository/tree?ref=${encodeURIComponent(ref)}&recursive=true&per_page=100&pagination=keyset`;
 		for (let page = 0; url; page++) {
@@ -129,7 +181,7 @@ export class GitLab implements Remote {
 	async commit(req: CommitRequest): Promise<CommitResult> {
 		const head = await this.getRef(req.branch);
 		if (head !== req.parent) throw new NotFastForward();
-		const existing = new Set(req.existing ? req.existing.keys() : (await this.listTree(req.parent)).filter((e) => e.type === "blob").map((e) => e.path));
+		const existing = new Set(req.existing ? req.existing.keys() : (await this.listEntries(req.parent)).filter((e) => e.type === "blob").map((e) => e.path));
 		// GitLab only locks a file when given the last commit that touched it (per file). Look it up so a
 		// concurrent edit from another device makes our commit fail instead of silently winning.
 		const lastCommit = async (path: string): Promise<string | undefined> => {
@@ -170,6 +222,8 @@ export class GitLab implements Remote {
 			}
 			const update = existing.has(u.path);
 			batch.push({ action: update ? "update" : "create", file_path: u.path, content: b64encode(data), encoding: "base64", ...(update ? { last_commit_id: await lastCommit(u.path) } : {}) });
+			// Our own uploads need no size lookup on the next listing.
+			this.sizes.set(u.sha ?? (await gitBlobSha(data)), data.byteLength);
 			bytes += data.byteLength;
 			req.progress?.(++done, req.upserts.length);
 		}
@@ -196,7 +250,15 @@ export class GitLab implements Remote {
 	}
 	async getCommitFiles(sha: string) {
 		const c = await this.json<GlCommit>("GET", `${this.project}/repository/commits/${sha}`);
-		const diff = await this.json<GlDiff[]>("GET", `${this.project}/repository/commits/${sha}/diff?per_page=100`);
+		const diff: GlDiff[] = [];
+		for (let page = 1; page <= 30; page++) {
+			const res = await this.request("GET", `${this.project}/repository/commits/${sha}/diff?per_page=100&page=${page}`);
+			const list = (res.json as GlDiff[] | null) ?? [];
+			diff.push(...list);
+			// X-Next-Page is empty on the last page; without the header a short page is the end.
+			const next = header(res, "x-next-page");
+			if (!list.length || (next !== undefined ? !next : list.length < 100)) break;
+		}
 		return { parent: c.parent_ids?.[0] ?? null, files: diff.map((d) => ({ filename: d.deleted_file ? d.old_path : d.new_path, status: d.deleted_file ? "removed" : d.new_file ? "added" : "modified" })) };
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
@@ -204,8 +266,13 @@ export class GitLab implements Remote {
 		return res.status === 404 ? null : res.arrayBuffer;
 	}
 	async listTags() {
-		const list = await this.json<GlTag[]>("GET", `${this.project}/repository/tags?per_page=100`);
-		return list.map((t) => ({ name: t.name, sha: t.commit?.id ?? "" }));
+		const out: { name: string; sha: string }[] = [];
+		for (let page = 1; page <= 30; page++) {
+			const list = (await this.json<GlTag[] | null>("GET", `${this.project}/repository/tags?per_page=100&page=${page}`)) ?? [];
+			for (const t of list) out.push({ name: t.name, sha: t.commit?.id ?? "" });
+			if (list.length < 100) break;
+		}
+		return out;
 	}
 	async rateLimit() {
 		return null;
@@ -213,6 +280,6 @@ export class GitLab implements Remote {
 	async countFiles(branch: string): Promise<number> {
 		const head = await this.getRef(branch);
 		if (!head) return 0;
-		return (await this.listTree(head)).filter((e) => e.type === "blob").length;
+		return (await this.listEntries(head)).filter((e) => e.type === "blob").length;
 	}
 }

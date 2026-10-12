@@ -35,16 +35,24 @@ async function readJson(app: App, path: string): Promise<unknown> {
 	}
 }
 
+function obsidianSyncConnected(app: App): boolean {
+	try {
+		const sync = (app as unknown as { internalPlugins?: { plugins?: Record<string, { enabled?: boolean; instance?: { vaultId?: unknown } }> } }).internalPlugins?.plugins?.sync;
+		return !!sync?.enabled && typeof sync.instance?.vaultId === "string" && sync.instance.vaultId.length > 0;
+	} catch {
+		return false;
+	}
+}
+
 /** Names of other sync tools that look active for this vault. */
 export async function detectOtherSync(app: App): Promise<string[]> {
 	const found: string[] = [];
 	const cfg = app.vault.configDir;
 
-	// Obsidian Sync (core plugin): core-plugins.json is a list of enabled ids, or an { id: enabled } map.
-	const core = await readJson(app, `${cfg}/core-plugins.json`);
-	if ((Array.isArray(core) && core.includes("sync")) || (core && typeof core === "object" && (core as Record<string, unknown>).sync === true)) {
-		found.push("Obsidian Sync");
-	}
+	// Obsidian Sync: the core plugin is on by default in every vault, even without a subscription, so
+	// "enabled" proves nothing. Only warn when it is connected to a remote vault (read-only, internal
+	// API; if that changes, this stays quiet rather than warning everyone).
+	if (obsidianSyncConnected(app)) found.push("Obsidian Sync");
 
 	const community = await readJson(app, `${cfg}/community-plugins.json`);
 	if (Array.isArray(community)) {

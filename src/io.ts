@@ -133,10 +133,28 @@ export class VaultIO {
 	 */
 	async rename(from: string, to: string): Promise<void> {
 		await this.ensureDir(parentDir(to));
+		if (from !== to && from.normalize("NFC").toLowerCase() === to.normalize("NFC").toLowerCase()) {
+			// Only letter case (or Unicode form) changes: on case-insensitive disks (macOS, Windows, iOS)
+			// the target "exists" already, so go through a temporary name.
+			// A different file already at the target (case-sensitive disk): never overwrite or strand it.
+			const both = await this.adapter.list(parentDir(to) || "/").catch(() => null);
+			if (both?.files.some((f) => f.replace(/^\/+/, "") === to)) throw new Error(`${to} already exists`);
+			const tmp = `${to}.${Date.now().toString(36)}.renaming`;
+			await this.renameFile(from, tmp);
+			try {
+				await this.renameFile(tmp, to);
+			} catch (e) {
+				await this.renameFile(tmp, from); // put it back under its old name
+				throw e;
+			}
+		} else await this.renameFile(from, to);
+		await this.pruneEmptyDirs(parentDir(from));
+	}
+
+	private async renameFile(from: string, to: string): Promise<void> {
 		const f = this.tfile(from);
 		if (f) await this.app.vault.rename(f, to);
 		else await this.adapter.rename(from, to);
-		await this.pruneEmptyDirs(parentDir(from));
 	}
 
 	/** Moves to trash (recoverable), then removes now-empty parent folders. */

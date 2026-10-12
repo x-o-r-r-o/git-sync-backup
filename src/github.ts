@@ -80,6 +80,8 @@ export class GitHub implements Remote {
 	readonly label = "GitHub";
 	private cfg: () => GitHubConfig;
 	private expiry: { token: string; at: number | null } | null = null;
+	/** Waits between retries; replaceable in tests so they don't really sleep. */
+	delay: (ms: number) => Promise<void> = sleep;
 	constructor(cfg: () => GitHubConfig) {
 		this.cfg = cfg;
 	}
@@ -163,6 +165,7 @@ export class GitHub implements Remote {
 		const url = (c.apiBase || "https://api.github.com").replace(/\/+$/, "") + path;
 		let lastErr: unknown;
 		let reauthed = false;
+		let secondaryWaited = false;
 
 		for (let attempt = 0; attempt < 4; attempt++) {
 			let res: RequestUrlResponse;
@@ -186,7 +189,8 @@ export class GitHub implements Remote {
 			} catch (e) {
 				// Network failure (offline, DNS, TLS). Retry with backoff.
 				lastErr = e;
-				await sleep(1000 * 2 ** attempt);
+				// No point waiting after the last attempt: report the failure right away.
+				if (attempt < 3) await this.delay(1000 * 2 ** attempt);
 				continue;
 			}
 
@@ -210,16 +214,26 @@ export class GitHub implements Remote {
 				if (retryAfter) waitMs = retryAfter * 1000;
 				else if (remaining === "0" && reset) waitMs = reset * 1000 - Date.now() + 1000;
 				if (waitMs > 0 && waitMs <= 60_000 && attempt < 3) {
-					await sleep(waitMs);
+					await this.delay(waitMs);
 					continue;
 				}
 				if (waitMs > 0) {
 					throw new GitHubError(`GitHub rate limit hit. Try again in ${Math.ceil(waitMs / 60000)} min.`, res.status);
 				}
+				// Secondary rate limits often come without Retry-After; GitHub asks clients to wait at
+				// least a minute. Do that once, then give up with a readable message.
+				if (/secondary rate limit/i.test(msg)) {
+					if (!secondaryWaited && attempt < 3) {
+						secondaryWaited = true;
+						await this.delay(60_000);
+						continue;
+					}
+					throw new GitHubError("GitHub secondary rate limit hit. Try again in a minute.", res.status);
+				}
 			}
 			if (res.status >= 500 && attempt < 3) {
 				lastErr = new GitHubError(msg, res.status);
-				await sleep(1000 * 2 ** attempt);
+				await this.delay(1000 * 2 ** attempt);
 				continue;
 			}
 			if (res.status === 401) {
@@ -392,8 +406,13 @@ export class GitHub implements Remote {
 	}
 
 	async listTags(): Promise<{ name: string; sha: string }[]> {
-		const list = await this.json<GhTag[]>("GET", `${this.repoPath}/tags?per_page=100`);
-		return list.map((t) => ({ name: t.name, sha: t.commit.sha }));
+		const out: { name: string; sha: string }[] = [];
+		for (let page = 1; page <= 30; page++) {
+			const list = await this.json<GhTag[]>("GET", `${this.repoPath}/tags?per_page=100&page=${page}`);
+			for (const t of list) out.push({ name: t.name, sha: t.commit.sha });
+			if (list.length < 100) break;
+		}
+		return out;
 	}
 
 	// ---- history ----
@@ -411,8 +430,15 @@ export class GitHub implements Remote {
 	}
 
 	async getCommitFiles(sha: string): Promise<{ parent: string | null; files: { filename: string; status: string }[] }> {
-		const c = await this.json<GhCommitDetail>("GET", `${this.repoPath}/commits/${sha}`);
-		return { parent: c.parents?.[0]?.sha ?? null, files: c.files ?? [] };
+		// Files come 300 per page (GitHub stops at 3000 in total).
+		const c = await this.json<GhCommitDetail>("GET", `${this.repoPath}/commits/${sha}?per_page=300&page=1`);
+		const files = [...(c.files ?? [])];
+		for (let page = 2, last = files.length; page <= 10 && last >= 300; page++) {
+			const more = (await this.json<GhCommitDetail>("GET", `${this.repoPath}/commits/${sha}?per_page=300&page=${page}`)).files ?? [];
+			files.push(...more);
+			last = more.length;
+		}
+		return { parent: c.parents?.[0]?.sha ?? null, files };
 	}
 
 	/** File content at a commit, or null if it did not exist there. */

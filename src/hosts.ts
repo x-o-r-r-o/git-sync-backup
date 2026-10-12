@@ -80,7 +80,7 @@ export const HOSTS: Record<HostKind, HostInfo> = {
 
 export function makeRemote(kind: HostKind, cfg: () => HostConfig, cacheStore: BlobCacheStore | null = null): Remote {
 	if (kind === "bitbucket") return new Bitbucket(cfg, cacheStore);
-	if (kind === "gitlab") return new GitLab(cfg);
+	if (kind === "gitlab") return new GitLab(cfg, undefined, cacheStore);
 	if (kind === "gitea") return new Gitea(cfg);
 	return new GitHub(cfg);
 }

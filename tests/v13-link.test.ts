@@ -56,6 +56,7 @@ test("other sync tools: Obsidian Sync, sync plugins, a .git folder and cloud fol
 	};
 	const dirs = new Set([".git"]);
 	const app = {
+		internalPlugins: { plugins: { sync: { enabled: true, instance: { vaultId: "abc123" } } } },
 		vault: {
 			configDir: ".obsidian",
 			adapter: {
@@ -66,7 +67,8 @@ test("other sync tools: Obsidian Sync, sync plugins, a .git folder and cloud fol
 		},
 	};
 	assert.deepEqual(await detectOtherSync(app as never), ["Obsidian Sync", "Obsidian Git", "Remotely Save", ".git", "iCloud Drive"]);
-	files[".obsidian/core-plugins.json"] = JSON.stringify(["file-explorer"]);
+	// The Sync core plugin is on by default without a subscription: that alone is not a warning.
+	(app as { internalPlugins: { plugins: { sync: { enabled: boolean; instance: { vaultId: string } } } } }).internalPlugins.plugins.sync.instance.vaultId = "";
 	files[".obsidian/community-plugins.json"] = "not json";
 	dirs.clear();
 	(app.vault.adapter as { getBasePath?: unknown }).getBasePath = undefined; // phone

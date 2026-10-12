@@ -65,23 +65,32 @@ export class SharedFolderModal extends Modal {
 			text: tr("sh.note"),
 		});
 		const msg = contentEl.createDiv({ cls: "vsg-muted" });
+		let busy = false;
 		new Setting(contentEl).addButton((b) =>
 			b
 				.setButtonText(tr("sh.add"))
 				.setCta()
 				.onClick(async () => {
+					if (busy) return;
 					const d = this.def;
 					if (!d.folder || !d.owner || !d.repo) return void msg.setText(tr("sh.required"));
 					if ((this.plugin.settings.sharedFolders ?? []).some((f) => d.folder === f.folder || d.folder.startsWith(f.folder + "/") || f.folder.startsWith(d.folder + "/")))
 						return void msg.setText(tr("sh.overlap"));
-					if (this.token) this.plugin.setSecret(`token-shared-${d.id}`, this.token);
+					busy = true;
+					b.setDisabled(true);
 					msg.setText(tr("sh.checking"));
+					// The main token is only ever used for the same host (exactly as the sync itself does).
+					const token = this.token || (d.provider === this.plugin.settings.provider ? this.plugin.getToken() : "");
 					try {
-						const remote = makeRemote(d.provider, () => ({ token: this.token || this.plugin.getToken(), apiBase: this.plugin.getApiBaseFor(d.provider), owner: d.owner, repo: d.repo }));
-						if (!(await remote.getRepo())) throw new Error("repository not found or not accessible with this token");
+						const remote = makeRemote(d.provider, () => ({ token, apiBase: this.plugin.getApiBaseFor(d.provider), owner: d.owner, repo: d.repo }));
+						if (!(await remote.getRepo())) throw new Error(tr("sh.notFound"));
 					} catch (e) {
+						busy = false;
+						b.setDisabled(false);
 						return void msg.setText(tr("sh.noAccess", { repo: `${d.owner}/${d.repo}`, error: errMsg(e) }));
 					}
+					// Save the folder's own token only once it is known to work (empty = use the main token).
+					this.plugin.setSharedToken(d, this.token);
 					this.plugin.settings.sharedFolders = [...(this.plugin.settings.sharedFolders ?? []), d];
 					await this.plugin.saveSettings();
 					new Notice(tr("sh.added", { folder: d.folder, repo: `${d.owner}/${d.repo}` }));

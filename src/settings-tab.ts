@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
+import { App, Modal, Notice, Platform, PluginSettingTab, requireApiVersion, Setting, TextComponent } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
 import type { ConflictStrategy, NoticeLevel } from "./types.ts";
@@ -20,7 +20,8 @@ function onCommit(c: TextComponent, fn: (v: string) => Promise<void>): TextCompo
 
 interface Item {
 	name: string;
-	desc?: string | DocumentFragment;
+	/** A string, or a factory for a fragment: a DocumentFragment is emptied once it is rendered. */
+	desc?: string | (() => DocumentFragment);
 	render: (s: Setting) => unknown;
 	cls?: string;
 	searchable?: boolean;
@@ -47,8 +48,17 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 
 	private openGroups = new Set<string>();
 
+	/** Closing settings with a field still focused fires no change event: blur it first so it saves. */
+	hide(): void {
+		const active = this.containerEl.ownerDocument.activeElement;
+		if (active instanceof HTMLElement && this.containerEl.contains(active)) active.blur();
+		super.hide();
+	}
+
+	/** Obsidian 1.13+ renders the tab from getSettingDefinitions(): rebuild those. Older versions use display(). */
 	private refresh() {
-		this.display();
+		if (requireApiVersion("1.13.0")) this.update();
+		else this.display();
 	}
 
 	private groups(): Group[] {
@@ -58,6 +68,23 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		const host = HOSTS[s.provider];
 		const ds = p.deviceScope();
 		const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
+		/** Number field saved when committed (blur/Enter), clamped, and the stored value written back. */
+		const numberField = (get: () => number, set: (n: number) => void, opts: { min: number; max: number; fallback: number; integer?: boolean; after?: () => void }) => (st: Setting): unknown =>
+			st.addText((c) => {
+				c.inputEl.type = "number";
+				c.inputEl.inputMode = "decimal";
+				onCommit(c.setValue(String(get())), async (v) => {
+					let n = v.trim() === "" ? opts.fallback : Number(v);
+					if (!Number.isFinite(n)) n = opts.fallback;
+					if (opts.integer) n = Math.round(n);
+					set(Math.min(opts.max, Math.max(opts.min, n)));
+					c.setValue(String(get()));
+					await save();
+					opts.after?.();
+				});
+			});
+		/** GitHub refuses files over 100 MB without large file storage. */
+		const maxSizeCap = () => (s.lfsThresholdMB > 0 ? 2000 : 100);
 
 		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges";
 		const toggle = (key: ToggleKey, reschedule = false, redraw = false) => (st: Setting): unknown =>
@@ -95,12 +122,13 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				]
 			: [];
 
-		const tokenDesc = createFragment((f) => {
-			f.appendText(t("s.tokenDesc") + " ");
-			const first = host.tokenSteps(p.getApiBase(), this.app.vault.getName())[0];
-			f.appendText(first.text + " ");
-			if (first.link) f.createEl("a", { text: first.link.label, href: first.link.href });
-		});
+		const tokenDesc = () =>
+			createFragment((f) => {
+				f.appendText(t("s.tokenDesc") + " ");
+				const first = host.tokenSteps(p.getApiBase(), this.app.vault.getName())[0];
+				f.appendText(first.text + " ");
+				if (first.link) f.createEl("a", { text: first.link.label, href: first.link.href });
+			});
 
 		// GitHub: sign in with the GitHub App when one is available, else (or instead) paste a token.
 		const usingApp = p.usingGitHubApp();
@@ -131,9 +159,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				render: (st) =>
 					st.addText((c) => {
 						c.inputEl.type = "password";
-						c.setPlaceholder(t("s.tokenPlaceholder"))
-							.setValue(p.getToken())
-							.onChange((v) => p.setToken(v.trim()));
+						onCommit(c.setPlaceholder(t("s.tokenPlaceholder")).setValue(p.getToken()), async (v) => {
+							p.setToken(v.trim());
+						});
 					}),
 			});
 		}
@@ -220,6 +248,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 							st.addText((c) =>
 								onCommit(c.setValue(s.branch), async (v) => {
 									s.branch = v.trim() || "main";
+									c.setValue(s.branch);
 									await save();
 								}),
 							),
@@ -271,17 +300,33 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.apiBase"),
 						desc: t("s.apiBaseDesc", { hint: host.apiHint }),
-						render: (st) => st.addText((c) => onCommit(c.setValue(p.getApiBase()), async (v) => {
-							p.setApiBase(v.trim() || host.defaultApi);
-							p.rebindToken();
-							if (s.provider === "github") this.refresh();
-						})),
+						render: (st) =>
+							st.addText((c) =>
+								onCommit(c.setValue(p.getApiBase()), async (v) => {
+									const url = v.trim().replace(/\/+$/, "") || host.defaultApi;
+									// The token travels to this address: only https (http only for a local test server).
+									if (!/^https:\/\/[^\s/?#]+/i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(url)) {
+										new Notice(t("s.apiBaseInvalid"));
+										c.setValue(p.getApiBase());
+										return;
+									}
+									p.setApiBase(url);
+									p.rebindToken();
+									this.refresh();
+								}),
+							),
 					},
 					...enterpriseApp,
 					{
 						name: t("s.device"),
 						desc: t("s.deviceDesc"),
-						render: (st) => st.addText((c) => c.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim()))),
+						render: (st) =>
+							st.addText((c) =>
+								onCommit(c.setValue(p.deviceName()), async (v) => {
+									p.setDeviceName(v.trim());
+									c.setValue(p.deviceName());
+								}),
+							),
 					},
 				],
 			},
@@ -321,14 +366,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.interval"),
 						desc: t("s.intervalDesc"),
-						render: (st) =>
-							st.addText((c) =>
-								c.setValue(String(s.intervalMin)).onChange(async (v) => {
-									s.intervalMin = Math.max(0, Number(v) || 0);
-									await save();
-									p.rescheduleTriggers();
-								}),
-							),
+						render: numberField(() => s.intervalMin, (n) => (s.intervalMin = n === 0 ? 0 : Math.max(1, n)), { min: 0, max: 1440, fallback: 0, integer: true, after: () => p.rescheduleTriggers() }),
 					},
 					{ name: t("s.onResume"), desc: t("s.onResumeDesc"), render: toggle("syncOnResume", true) },
 					{ name: t("s.onBackground"), desc: t("s.onBackgroundDesc"), render: toggle("syncOnBackground", true) },
@@ -352,7 +390,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 							st.addTextArea((c) => {
 								c.inputEl.rows = 8;
 								c.inputEl.addClass("vsg-textarea");
-								c.setValue(s.excludePatterns).onChange(async (v) => {
+								onCommit(c.setValue(s.excludePatterns) as unknown as TextComponent, async (v) => {
 									s.excludePatterns = v;
 									await save();
 								});
@@ -361,24 +399,23 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.maxSize"),
 						desc: t("s.maxSizeDesc"),
-						render: (st) =>
-							st.addText((c) =>
-								c.setValue(String(s.maxFileSizeMB)).onChange(async (v) => {
-									s.maxFileSizeMB = Math.min(s.lfsThresholdMB > 0 ? 2000 : 100, Math.max(1, Number(v) || 50));
-									await save();
-								}),
-							),
+						render: numberField(() => s.maxFileSizeMB, (n) => (s.maxFileSizeMB = Math.min(maxSizeCap(), n)), { min: 1, max: 2000, fallback: 50 }),
 					},
 					{
 						name: t("s.lfs"),
 						desc: t("s.lfsDesc"),
-						render: (st) =>
-							st.addText((c) =>
-								c.setValue(String(s.lfsThresholdMB)).onChange(async (v) => {
-									s.lfsThresholdMB = Math.max(0, Number(v) || 0);
-									await save();
-								}),
-							),
+						render: numberField(() => s.lfsThresholdMB, (n) => (s.lfsThresholdMB = n), {
+							min: 0,
+							max: 2000,
+							fallback: 0,
+							after: () => {
+								// The size cap depends on large file storage: re-apply it, and warn when LFS can never apply.
+								s.maxFileSizeMB = Math.min(maxSizeCap(), s.maxFileSizeMB);
+								void save();
+								if (s.lfsThresholdMB > 0 && s.lfsThresholdMB >= s.maxFileSizeMB) new Notice(t("s.lfsAboveMax", { max: s.maxFileSizeMB }), 8000);
+								this.refresh();
+							},
+						}),
 					},
 				],
 			},
@@ -432,7 +469,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 											.setTooltip(t("s.sharedRemove"))
 											.onClick(async () => {
 												s.sharedFolders = s.sharedFolders.filter((x) => x.id !== f.id);
-												p.setSecret(`token-shared-${f.id}`, "");
+												p.setSharedToken(f, "");
 												await save();
 												this.refresh();
 											}),
@@ -457,8 +494,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 							st.addTextArea((c) => {
 								c.inputEl.rows = 3;
 								c.setPlaceholder(t("s.includePlaceholder"))
-									.setValue(ds.include.join("\n"))
-									.onChange((v) => p.setDeviceScope({ ...p.deviceScope(), include: lines(v) }));
+									.setValue(ds.include.join("\n"));
+								onCommit(c as unknown as TextComponent, async (v) => p.setDeviceScope({ ...p.deviceScope(), include: lines(v) }));
 							}),
 					},
 					{
@@ -467,13 +504,24 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						render: (st) =>
 							st.addTextArea((c) => {
 								c.inputEl.rows = 3;
-								c.setValue(ds.exclude.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), exclude: lines(v) }));
+								c.setValue(ds.exclude.join("\n"));
+								onCommit(c as unknown as TextComponent, async (v) => p.setDeviceScope({ ...p.deviceScope(), exclude: lines(v) }));
 							}),
 					},
 					{
 						name: t("s.maxDownload"),
 						desc: t("s.maxDownloadDesc"),
-						render: (st) => st.addText((c) => c.setValue(String(ds.maxDownloadMB)).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), maxDownloadMB: Math.max(0, Number(v) || 0) }))),
+						render: (st) =>
+							st.addText((c) => {
+								c.inputEl.type = "number";
+								onCommit(c.setValue(String(ds.maxDownloadMB)), async (v) => {
+									const n = Number(v);
+									// Empty or invalid: back to this platform's default (25 MB on phones, none on desktop).
+									const value = v.trim() === "" || !Number.isFinite(n) ? (Platform.isMobile ? 25 : 0) : Math.max(0, n);
+									p.setDeviceScope({ ...p.deviceScope(), maxDownloadMB: value });
+									c.setValue(String(value));
+								});
+							}),
 					},
 					{
 						name: t("s.onDemand"),
@@ -528,22 +576,24 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						desc: t("s.guardThresholdDesc"),
 						render: (st) =>
 							st
-								.addText((c) =>
-									c.setPlaceholder("10")
-										.setValue(String(s.deleteGuardMin))
-										.onChange(async (v) => {
-											s.deleteGuardMin = Math.max(0, Number(v) || 0);
-											await save();
-										}),
-								)
-								.addText((c) =>
-									c.setPlaceholder("20")
-										.setValue(String(s.deleteGuardPercent))
-										.onChange(async (v) => {
-											s.deleteGuardPercent = Math.max(0, Math.min(100, Number(v) || 0));
-											await save();
-										}),
-								),
+								.addText((c) => {
+									c.inputEl.type = "number";
+									c.inputEl.setAttr("aria-label", t("s.guardMinLabel"));
+									onCommit(c.setValue(String(s.deleteGuardMin)), async (v) => {
+										s.deleteGuardMin = Math.max(0, Math.round(Number(v)) || 0);
+										c.setValue(String(s.deleteGuardMin));
+										await save();
+									});
+								})
+								.addText((c) => {
+									c.inputEl.type = "number";
+									c.inputEl.setAttr("aria-label", t("s.guardPercentLabel"));
+									onCommit(c.setValue(String(s.deleteGuardPercent)), async (v) => {
+										s.deleteGuardPercent = Math.max(0, Math.min(100, Number(v) || 0));
+										c.setValue(String(s.deleteGuardPercent));
+										await save();
+									});
+								}),
 					},
 				],
 			},
@@ -561,8 +611,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						desc: t("s.commitMsgDesc"),
 						render: (st) =>
 							st.addText((c) =>
-								c.setValue(s.commitTemplate).onChange(async (v) => {
-									s.commitTemplate = v || "{{device}}: {{summary}}";
+								onCommit(c.setValue(s.commitTemplate), async (v) => {
+									s.commitTemplate = v.trim() || "{{device}}: {{summary}}";
+									c.setValue(s.commitTemplate);
 									await save();
 								}),
 							),
@@ -570,13 +621,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.fullScan"),
 						desc: t("s.fullScanDesc"),
-						render: (st) =>
-							st.addText((c) =>
-								c.setValue(String(s.fullScanMinutes)).onChange(async (v) => {
-									s.fullScanMinutes = Math.max(1, Number(v) || 30);
-									await save();
-								}),
-							),
+						render: numberField(() => s.fullScanMinutes, (n) => (s.fullScanMinutes = n), { min: 1, max: 1440, fallback: 30, integer: true }),
 					},
 					{
 						name: t("s.notices"),
@@ -622,35 +667,41 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				parent = det;
 			} else if (g.heading) new Setting(containerEl).setName(g.heading).setHeading();
 			for (const item of g.items) {
+				const desc = typeof item.desc === "function" ? item.desc() : item.desc;
 				if (!item.name) {
-					parent.createEl("p", { cls: "setting-item-description", text: typeof item.desc === "string" ? item.desc : (item.desc?.textContent ?? "") });
+					parent.createEl("p", { cls: "setting-item-description", text: typeof desc === "string" ? desc : (desc?.textContent ?? "") });
 					continue;
 				}
 				const st = new Setting(parent).setName(item.name);
-				if (item.desc) st.setDesc(item.desc);
+				if (desc) st.setDesc(desc);
 				if (item.cls) st.setClass(item.cls);
 				item.render(st);
 			}
 		}
 	}
 
-	/** Obsidian 1.13+: the same settings, described for settings search. */
+	/**
+	 * Obsidian 1.13+: the tab is rendered from these definitions (and they feed settings search).
+	 * Folded sections become sub-pages, so the first screen only shows the basics.
+	 */
 	getSettingDefinitions(): SettingDefinitionItem[] {
-		return this.groups().map((g) => ({
+		const toGroup = (g: Group): SettingDefinitionItem => ({
 			type: "group" as const,
 			heading: g.heading,
 			items: g.items.map((item) => ({
 				name: item.name,
-				desc: item.desc,
+				desc: typeof item.desc === "function" ? item.desc() : item.desc,
 				searchable: item.searchable ?? Boolean(item.name),
 				render: (st: Setting) => {
-					if (item.name) st.setName(item.name);
-					if (item.desc) st.setDesc(item.desc);
+					// Obsidian has already applied name and description.
 					if (item.cls) st.setClass(item.cls);
 					item.render(st);
 				},
 			})),
-		}));
+		});
+		return this.groups().map((g) =>
+			g.collapsed && g.heading ? { type: "page" as const, name: g.heading, items: [toGroup({ ...g, heading: undefined })] } : toGroup(g),
+		);
 	}
 }
 

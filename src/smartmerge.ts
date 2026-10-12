@@ -80,6 +80,32 @@ function indentOf(text: string): string | number {
 	return m[1].startsWith("\t") ? "\t" : m[1].length;
 }
 
+/** Number literals (outside strings) with more significant digits than a double keeps exactly. */
+function hasLongNumber(text: string): boolean {
+	const bare = text.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+	for (const m of bare.matchAll(/-?(\d+)(?:\.(\d+))?(?:[eE][+-]?\d+)?/g)) {
+		const digits = (m[1] + (m[2] ?? "").replace(/0+$/, "")).replace(/^0+/, "");
+		if (digits.length > 15) return true;
+	}
+	return false;
+}
+
+/** True when a parsed value can't be written back as it was read (e.g. a "__proto__" key, Infinity). */
+function lossy(v: J): boolean {
+	const walk = (x: J): boolean => {
+		if (Array.isArray(x)) return x.some(walk);
+		if (!isObj(x)) return false;
+		return Object.keys(x).some((k) => k === "__proto__" || walk(x[k]));
+	};
+	if (v === undefined) return false;
+	if (walk(v)) return true;
+	try {
+		return !eq(JSON.parse(JSON.stringify(v)), v);
+	} catch {
+		return true;
+	}
+}
+
 /** Three-way merge of JSON documents (including Obsidian .canvas files). */
 export function mergeJson(base: string, local: string, remote: string): MergeResult | null {
 	let B: J, L: J, R: J;
@@ -90,6 +116,9 @@ export function mergeJson(base: string, local: string, remote: string): MergeRes
 	} catch {
 		return null;
 	}
+	// A JSON round trip would silently change these (big ids lose digits, "__proto__" keys vanish):
+	// leave them to the line merge, which keeps the text as written.
+	if ([base, local, remote].some(hasLongNumber) || [B, L, R].some(lossy)) return null;
 	const ctx: Ctx = { conflicts: 0 };
 	const merged = mergeValue(B, L, R, ctx);
 	const text = JSON.stringify(merged, null, indentOf(local)) + (local.endsWith("\n") ? "\n" : "");

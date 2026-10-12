@@ -1,6 +1,7 @@
 // Sync health panel: what's going on, what's pending, what needs attention, and how to fix it.
 
-import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
+import { confirmPlan } from "./ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { t } from "./i18n.ts";
 
@@ -108,9 +109,23 @@ export class HealthView extends ItemView {
 		return s;
 	}
 
+	/** A button whose action can't run twice at once, and whose errors are shown instead of lost. */
 	private button(parent: HTMLElement, label: string, fn: () => unknown, cta = false) {
 		const b = parent.createEl("button", { text: label, cls: cta ? "mod-cta" : "" });
-		b.onClickEvent(() => void fn());
+		let busy = false;
+		b.onClickEvent(async () => {
+			if (busy) return;
+			busy = true;
+			b.disabled = true;
+			try {
+				await fn();
+			} catch (e) {
+				new Notice(e instanceof Error ? e.message : String(e), 8000);
+			} finally {
+				busy = false;
+				b.disabled = false;
+			}
+		});
 		return b;
 	}
 
@@ -207,12 +222,14 @@ export class HealthView extends ItemView {
 				const b = row.createDiv({ cls: "vsg-h-row-actions" });
 				if (original) {
 					this.button(b, t("h.resolve"), async () => {
+						if (p.isSyncing()) return void new Notice(t("notice.busy"));
 						if (await p.resolveConflictCopy(original, copy)) this.refresh();
 					}, true);
 					this.button(b, t("health.compare"), () => p.compareFiles(original, copy));
 				}
 				this.button(b, t("health.open"), () => void this.app.workspace.getLeaf(true).openFile(copy));
 				this.button(b, t("health.deleteCopy"), async () => {
+					if (!(await confirmPlan(this.app, t("health.deleteCopy"), t("h.deleteCopyBody"), [{ title: t("h.conflictCopy"), items: [copy.path] }], t("health.deleteCopy"), true))) return;
 					await p.trashFile(copy);
 					this.refresh();
 				});

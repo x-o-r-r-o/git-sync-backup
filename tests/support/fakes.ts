@@ -17,6 +17,8 @@ export class FakeFS {
 	dirs = new Set<string>();
 	trash: string[] = [];
 	configDir = ".obsidian";
+	/** Like Obsidian on macOS/Windows/iOS: a rename whose target differs only by letter case "already exists". */
+	caseInsensitive = false;
 
 	put(path: string, text: string) {
 		this.files.set(path, { data: enc.encode(text), mtime: ++clock });
@@ -70,6 +72,7 @@ export class FakeFS {
 				const f = fs.files.get(from);
 				if (!f) throw new Error("no such file " + from);
 				if (fs.files.has(to)) throw new Error("exists " + to);
+				if (fs.caseInsensitive && [...fs.files.keys()].some((k) => k.toLowerCase() === to.toLowerCase())) throw new Error("exists " + to);
 				fs.files.set(to, { data: f.data, mtime: ++clock });
 				fs.files.delete(from);
 			},

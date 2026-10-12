@@ -178,6 +178,7 @@ export class ApplySetupLinkModal extends Modal {
 				.addText((tx) => tx.onChange((v) => (code = v)));
 		}
 		const status = contentEl.createDiv({ cls: "vsg-muted" });
+		let busy = false;
 		new Setting(contentEl)
 			.addButton((b) => b.setButtonText(t("u.cancel")).onClick(() => this.close()))
 			.addButton((b) =>
@@ -185,21 +186,32 @@ export class ApplySetupLinkModal extends Modal {
 					.setButtonText(t("link.apply"))
 					.setCta()
 					.onClick(async () => {
+						if (busy) return;
+						busy = true;
+						b.setDisabled(true);
+						const release = () => {
+							busy = false;
+							b.setDisabled(false);
+						};
 						let token = "";
 						if (s.token) {
-							if (!code.trim()) return void status.setText(t("link.needCode"));
+							if (!code.trim()) {
+								release();
+								return void status.setText(t("link.needCode"));
+							}
 							try {
 								status.setText(t("link.decrypting"));
 								token = await decryptToken(s.token, code);
 							} catch {
+								release();
 								return void status.setText(t("link.wrongCode"));
 							}
 						}
 						try {
-							await p.applySetupPayload(s, token);
 							this.close();
+							await p.applySetupPayload(s, token);
 						} catch (e) {
-							status.setText(errMsg(e));
+							new Notice(errMsg(e), 8000);
 						}
 					}),
 			);

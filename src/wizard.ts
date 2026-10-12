@@ -52,7 +52,11 @@ export class SetupWizard extends Modal {
 		this.contentEl.createEl("p", { text: sub, cls: "vsg-muted" });
 	}
 
+	/** Bumped on every render: async steps check it after awaiting, so a stale step never draws into a newer one. */
+	private generation = 0;
+
 	private render() {
+		this.generation++;
 		this.contentEl.empty();
 		if (this.step === "connect") this.renderConnect();
 		else if (this.step === "repo") void this.renderRepo();
@@ -77,17 +81,32 @@ export class SetupWizard extends Modal {
 				});
 			});
 		const host = HOSTS[p.settings.provider];
-		if (p.settings.provider !== "github") {
-			new Setting(this.contentEl)
-				.setName(tr("w.apiUrl"))
-				.setDesc(host.apiHint)
-				.addText((t) => t.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi)));
-		}
+		// Shown for every host (GitHub Enterprise too); saved when committed, then the token links follow it.
+		new Setting(this.contentEl)
+			.setName(tr("w.apiUrl"))
+			.setDesc(host.apiHint)
+			.addText((t) => {
+				t.setValue(p.getApiBase());
+				t.inputEl.addEventListener("change", () => {
+					const url = t.getValue().trim().replace(/\/+$/, "") || host.defaultApi;
+					if (!/^https:\/\/[^\s/?#]+/i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(url)) {
+						new Notice(tr("s.apiBaseInvalid"));
+						t.setValue(p.getApiBase());
+						return;
+					}
+					p.setApiBase(url);
+					p.rebindToken();
+					this.render();
+				});
+			});
 
 		new Setting(this.contentEl)
 			.setName(tr("w.deviceName"))
 			.setDesc(tr("w.deviceNameDesc"))
-			.addText((t) => t.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim())));
+			.addText((t) => {
+				t.setValue(p.deviceName());
+				t.inputEl.addEventListener("change", () => p.setDeviceName(t.getValue().trim()));
+			});
 
 		// Another sync tool on the same vault can overwrite changes: say so before anything syncs.
 		const others = this.contentEl.createDiv();
@@ -158,6 +177,7 @@ export class SetupWizard extends Modal {
 	// ---------- 2. repository ----------
 	private async renderRepo() {
 		const p = this.plugin;
+		const gen = this.generation;
 		this.header(2, tr("w.repoTitle"), tr("w.repoSub", { user: this.login }));
 		const pick = async (owner: string, name: string, branch: string) => {
 			p.settings.owner = owner;
@@ -184,11 +204,14 @@ export class SetupWizard extends Modal {
 					.setButtonText(tr("w.create"))
 					.setCta()
 					.onClick(async () => {
+						// The new repository belongs to the signed-in account; put the old owner back if it fails.
+						const previousOwner = p.settings.owner;
 						try {
 							p.settings.owner = this.login;
 							await p.gh.createRepo(newName);
 							await pick(this.login, newName, "main");
 						} catch (e) {
+							p.settings.owner = previousOwner;
 							new Notice(tr("w.createFailed", { error: errMsg(e) }), 10000);
 						}
 					}),
@@ -198,8 +221,10 @@ export class SetupWizard extends Modal {
 		const search = this.contentEl.createEl("input", { type: "search", placeholder: tr("w.filter"), cls: "vsg-wz-search" });
 		const listEl = this.contentEl.createDiv({ cls: "vsg-wz-repos" });
 		listEl.setText(tr("w.loadingRepos"));
+		new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("connect")));
 		try {
 			const repos = await p.gh.listRepos();
+			if (gen !== this.generation) return; // the wizard moved on while the list was loading
 			const draw = () => {
 				listEl.empty();
 				const q = search.value.toLowerCase();
@@ -219,24 +244,26 @@ export class SetupWizard extends Modal {
 			draw();
 			if (!Platform.isMobile) search.focus();
 		} catch (e) {
-			listEl.setText(tr("w.listFailed", { error: errMsg(e) }));
+			if (gen === this.generation) listEl.setText(tr("w.listFailed", { error: errMsg(e) }));
 		}
-		new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("connect")));
 	}
 
 	// ---------- 3. this vault ----------
 	private async renderVault() {
 		const p = this.plugin;
+		const gen = this.generation;
 		this.header(3, tr("w.vaultTitle"), `${p.settings.owner}/${p.settings.repo} (${p.settings.branch})`);
 		const info = this.contentEl.createDiv({ cls: "vsg-wz-status", text: tr("w.looking") });
 		let remoteCount = 0;
 		try {
 			remoteCount = await p.gh.countFiles(p.settings.branch);
 		} catch (e) {
+			if (gen !== this.generation) return;
 			info.setText(tr("w.readFailed", { error: errMsg(e) }));
 			new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("repo")));
 			return;
 		}
+		if (gen !== this.generation) return;
 		const localCount = this.app.vault.getFiles().length;
 		info.setText(tr("w.counts", { local: localCount, remote: remoteCount }));
 
@@ -268,6 +295,7 @@ export class SetupWizard extends Modal {
 		let encPass = "";
 		let encWanted = false;
 		const marker = await readRemoteMarker(p).catch(() => null);
+		if (gen !== this.generation) return;
 		if (marker && !p.isEncrypted()) {
 			const box = this.contentEl.createDiv({ cls: "vsg-h-error" });
 			box.createDiv({ text: tr("w.encrypted") });

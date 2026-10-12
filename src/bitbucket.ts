@@ -11,13 +11,14 @@
 import { buildMultipart, compareByWalking, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
-import { NotFastForward } from "./remote.ts";
+import { NotFastForward, RemoteError } from "./remote.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
 import { gitBlobSha, pool } from "./util.ts";
 
 export interface BlobCache {
 	commit: string;
-	files: Record<string, { sha: string; size: number }>;
+	/** `mode` is missing in caches written before file attributes were read (= 100644). */
+	files: Record<string, { sha: string; size: number; mode?: string }>;
 	/** blob sha → a path and commit where that content can be fetched. */
 	blobs: Record<string, { path: string; commit: string }>;
 }
@@ -48,6 +49,18 @@ interface BbSrcEntry {
 	type: "commit_file" | "commit_directory";
 	path: string;
 	size?: number;
+	attributes?: string[];
+	commit?: { hash?: string };
+}
+
+/** Git file mode from a src listing entry's attributes. */
+function modeOf(e: BbSrcEntry): string {
+	const a = e.attributes ?? [];
+	if (a.includes("subrepository")) return "160000";
+	// Links stay plain files (as before 1.3): reporting them as 120000 would hide links that already
+	// synced, and they would then look deleted on the remote.
+	if (a.includes("executable")) return "100755";
+	return "100644";
 }
 interface BbDiffstat {
 	status?: string;
@@ -95,9 +108,17 @@ export class Bitbucket implements Remote {
 		const web = this.base.includes("api.bitbucket.org") ? "https://bitbucket.org" : this.base.replace(/\/2\.0$/, "").replace("//api.", "//");
 		return `${web}/${c.owner}/${c.repo}.git`;
 	}
+	/**
+	 * Git/LFS credentials. App passwords ("username:password") are used as they are; Atlassian API
+	 * tokens ("email:token") must use the fixed username x-bitbucket-api-token-auth for git; access
+	 * tokens use x-token-auth.
+	 */
 	authHeader(): string {
 		const t = this.cfg().token;
-		return `Basic ${btoa(t.includes(":") ? t : `x-token-auth:${t}`)}`;
+		const i = t.indexOf(":");
+		if (i < 0) return `Basic ${btoa(`x-token-auth:${t}`)}`;
+		if (t.slice(0, i).includes("@")) return `Basic ${btoa(`x-bitbucket-api-token-auth:${t.slice(i + 1)}`)}`;
+		return `Basic ${btoa(t)}`;
 	}
 
 	async request(method: string, path: string, body?: unknown, opts: { accept?: string; okStatuses?: number[] } = {}): Promise<HttpResponse> {
@@ -192,23 +213,37 @@ export class Bitbucket implements Remote {
 		return res.status === 404 ? null : res.arrayBuffer;
 	}
 
+	private listDir(commit: string, dir: string): Promise<BbSrcEntry[]> {
+		return this.pages<BbSrcEntry>(`${this.repoPath}/src/${commit}/${dir ? encPath(dir) + "/" : ""}?pagelen=100`, 1000);
+	}
+
+	/** Hashes one file into `files`/`blobs`. Submodules have no content to fetch: their commit is the sha. */
+	private async hashInto(commit: string, p: string, mode: string, hash: string | undefined, files: BlobCache["files"], blobs: BlobCache["blobs"]) {
+		if (mode === "160000") {
+			files[p] = { sha: hash ?? "", size: 0, mode };
+			return;
+		}
+		const data = await this.raw(commit, p);
+		if (!data) {
+			delete files[p];
+			return;
+		}
+		const sha = await gitBlobSha(data);
+		files[p] = mode === "100644" ? { sha, size: data.byteLength } : { sha, size: data.byteLength, mode };
+		blobs[sha] = { path: p, commit };
+	}
+
 	private async fullListing(commit: string, blobs: BlobCache["blobs"]): Promise<BlobCache["files"]> {
-		const paths: string[] = [];
+		const entries: BbSrcEntry[] = [];
 		const walk = async (dir: string) => {
-			for (const e of await this.pages<BbSrcEntry>(`${this.repoPath}/src/${commit}/${dir ? encPath(dir) + "/" : ""}?pagelen=100`, 1000)) {
+			for (const e of await this.listDir(commit, dir)) {
 				if (e.type === "commit_directory") await walk(e.path);
-				else paths.push(e.path);
+				else entries.push(e);
 			}
 		};
 		await walk("");
 		const files: BlobCache["files"] = {};
-		await pool(paths, 4, async (p) => {
-			const data = await this.raw(commit, p);
-			if (!data) return;
-			const sha = await gitBlobSha(data);
-			files[p] = { sha, size: data.byteLength };
-			blobs[sha] = { path: p, commit };
-		});
+		await pool(entries, 4, (e) => this.hashInto(commit, e.path, modeOf(e), e.commit?.hash, files, blobs));
 		return files;
 	}
 
@@ -234,23 +269,29 @@ export class Bitbucket implements Remote {
 		else if (cache) {
 			try {
 				const changed = await this.changedPaths(cache.commit, commit);
-				files = { ...cache.files };
-				await pool([...changed], 4, async (p) => {
-					const data = await this.raw(commit, p);
-					if (!data) {
-						delete files[p];
-						return;
-					}
-					const sha = await gitBlobSha(data);
-					files[p] = { sha, size: data.byteLength };
-					blobs[sha] = { path: p, commit };
+				const next: BlobCache["files"] = { ...cache.files };
+				// Diffstat has no file attributes: read them from the listings of the changed paths' folders.
+				const attrs = new Map<string, BbSrcEntry>();
+				const dirs = new Set([...changed].map((p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "")));
+				await pool([...dirs], 4, async (d) => {
+					// A folder that no longer exists only held deleted files.
+					const list = await this.listDir(commit, d).catch((e: unknown) => {
+						if (e instanceof RemoteError && e.status === 404) return [] as BbSrcEntry[];
+						throw e;
+					});
+					for (const e of list) if (e.type !== "commit_directory") attrs.set(e.path, e);
 				});
+				await pool([...changed], 4, async (p) => {
+					const e = attrs.get(p);
+					await this.hashInto(commit, p, e ? modeOf(e) : "100644", e?.commit?.hash, next, blobs);
+				});
+				files = next;
 			} catch {
 				files = await this.fullListing(commit, blobs);
 			}
 		} else files = await this.fullListing(commit, blobs);
 		await this.saveCache({ commit, files, blobs });
-		return Object.entries(files).map(([path, f]) => ({ path, mode: "100644", type: "blob" as const, sha: f.sha, size: f.size }));
+		return Object.entries(files).map(([path, f]) => ({ path, mode: f.mode ?? "100644", type: f.mode === "160000" ? ("commit" as const) : ("blob" as const), sha: f.sha, size: f.size }));
 	}
 
 	async getBlob(sha: string): Promise<ArrayBuffer> {
@@ -267,7 +308,7 @@ export class Bitbucket implements Remote {
 		await this.postSrc([{ name: "message", value: message }, { name: "branch", value: branch }, { name: `/${path}`, value: bytes.buffer, filename: path.split("/").pop() }]);
 	}
 
-	private async postSrc(parts: { name: string; value: string | ArrayBuffer; filename?: string }[]): Promise<HttpResponse> {
+	private async postSrc(parts: { name: string; value: string | ArrayBuffer; filename?: string; attributes?: string }[]): Promise<HttpResponse> {
 		const { body, contentType } = buildMultipart(parts);
 		return httpRequest(
 			this.transport,
@@ -281,12 +322,13 @@ export class Bitbucket implements Remote {
 		const cache = await this.loadCache();
 		const files = cache?.commit === req.parent ? { ...cache.files } : null;
 		const blobs = { ...(cache?.blobs ?? {}) };
-		const stored = new Map<string, { sha: string; size: number }>();
+		const stored = new Map<string, { sha: string; size: number; mode?: string }>();
 
 		let parent = req.parent;
 		let fastForward = true;
 		let part = 0;
-		const send = async (fileParts: { name: string; value: ArrayBuffer; filename: string }[], deletes: string[], last: boolean) => {
+		type FilePart = { name: string; value: ArrayBuffer; filename: string; attributes?: string };
+		const send = async (fileParts: FilePart[], deletes: string[], last: boolean) => {
 			if (!fileParts.length && !deletes.length) return;
 			part++;
 			const [subject, ...rest] = req.message.split("\n");
@@ -311,7 +353,7 @@ export class Bitbucket implements Remote {
 			parent = head;
 		};
 
-		let batch: { name: string; value: ArrayBuffer; filename: string }[] = [];
+		let batch: FilePart[] = [];
 		let bytes = 0;
 		let done = 0;
 		for (const u of req.upserts) {
@@ -321,8 +363,10 @@ export class Bitbucket implements Remote {
 				batch = [];
 				bytes = 0;
 			}
-			batch.push({ name: `/${u.path}`, value: data, filename: u.path.split("/").pop() ?? u.path });
-			stored.set(u.path, { sha: await gitBlobSha(data), size: data.byteLength });
+			// Bitbucket keeps the executable bit only when the part says so (x-attributes in Content-Disposition).
+			const exec = u.mode === "100755";
+			batch.push({ name: `/${u.path}`, value: data, filename: u.path.split("/").pop() ?? u.path, ...(exec ? { attributes: "executable" } : {}) });
+			stored.set(u.path, exec ? { sha: await gitBlobSha(data), size: data.byteLength, mode: "100755" } : { sha: await gitBlobSha(data), size: data.byteLength });
 			bytes += data.byteLength;
 			req.progress?.(++done, req.upserts.length);
 		}
@@ -346,7 +390,14 @@ export class Bitbucket implements Remote {
 		if (res.status === 404) {
 			const exists = await this.request("GET", `${this.repoPath}/commit/${base}`, undefined, { okStatuses: [404] });
 			if (exists.status === 404) return "missing";
-			return compareByWalking(async (sha, page) => (await this.json<BbPage<BbCommit>>("GET", `${this.repoPath}/commits/${sha}?pagelen=50&page=${page}`)).values?.map((c) => c.hash) ?? [], base, head);
+			return compareByWalking(
+				async (sha, page) => {
+					const res = await this.json<BbPage<BbCommit>>("GET", `${this.repoPath}/commits/${sha}?pagelen=50&page=${page}`);
+					return { shas: res.values?.map((c) => c.hash) ?? [], more: !!res.next };
+				},
+				base,
+				head,
+			);
 		}
 		const mb = (res.json as { hash?: string }).hash;
 		if (mb === base) return "ahead";
@@ -380,6 +431,6 @@ export class Bitbucket implements Remote {
 	}
 	async countFiles(branch: string): Promise<number> {
 		const head = await this.getRef(branch);
-		return head ? (await this.listTree(head)).length : 0;
+		return head ? (await this.listTree(head)).filter((e) => e.type === "blob").length : 0;
 	}
 }

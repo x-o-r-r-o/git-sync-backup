@@ -12,6 +12,16 @@
 - **Notifications:** new "When files changed" level, and a new default, *Automatic*, that shows changes on phones (no status bar) and only errors on desktop. Saved choices are kept.
 - **Simpler settings:** connection and sync behaviour stay open; the other sections are folded.
 
+**Fixed (full audit before release: settings, commands, sync engine, host clients)**
+- Sync engine: conflict copies in the settings folder or hidden files no longer bounce between devices; partial syncs (current file, review, push mode, delete-guard "skip") no longer hide remote changes from the next sync; a file moved out of a device's folder scope stays in the repository (remembered, not just for one sync); a case-only rename on another device is applied as a rename (never strands or overwrites a file); names that differ only in Unicode form no longer become duplicates; large numbers in JSON files are never rounded by a structured merge; line-ending-only changes no longer show as pending; encryption can't change under a running sync.
+- Host clients: Gitea history comparison works when the server returns fewer items per page; GitLab now reports file sizes (so size limits apply), remembered on the device; Bitbucket keeps executable bits and API-token LFS access; GitHub Enterprise Cloud (ghe.com) addresses; history and tags beyond the first page; GitHub's secondary rate limit is waited out once; no extra wait after the last network retry.
+- Settings: Obsidian 1.13+ draws the settings from definitions (folded sections are sub-pages); fields save when you leave them (also when settings close), numbers are validated and shown as stored, the file size cap follows large file storage, API addresses must use https, the periodic sync interval is limited to 1–1440 minutes.
+- Safety: a shared folder never sends the main token to another host and only saves its own token once it works; tokens can't be re-bound to another host; history and timeline ask to unlock an encrypted repository first; "Delete copy" asks first; status panel actions can't run twice and show errors; "Make this device match" reports failures; a queued sync with choices is never replaced.
+- SQLite side files (`-wal`, `-shm`, `-journal`) are never synced.
+- Wizard: no stray buttons after fast navigation, API address field for every host, owner restored when creating a repository fails.
+- Accessibility: labels for review checkboxes; history, timeline and diff rows work with the keyboard.
+- Other sync tools: Obsidian Sync is only reported when it is actually connected (its core plugin is on by default).
+
 **Security**
 - A pasted token is now bound to the host and API URL it was entered for. Switching hosts, a changed API URL in a synced `data.json`, or a setup link can no longer send it to another server; enter a token for the new host instead. (Before, switching hosts in settings reused the previous host's token.)
 

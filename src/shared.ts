@@ -31,10 +31,13 @@ export class SharedFolderHost implements SyncHost {
 		this.plugin = plugin;
 		this.def = def;
 		this.remote = makeRemote(def.provider, () => ({
-			token: plugin.getSecret(`token-shared-${def.id}`) || (def.provider === plugin.settings.provider ? plugin.getToken() : ""),
+			// Its own token (bound to its host), else the main token, but only for the same host.
+			token: plugin.sharedToken(def) || (def.provider === plugin.settings.provider ? plugin.getToken() : ""),
 			apiBase: plugin.getApiBaseFor(def.provider),
 			owner: def.owner,
 			repo: def.repo,
+			// A borrowed GitHub sign-in token is renewed like the main one.
+			onUnauthorized: (failed) => (plugin.sharedToken(def) ? Promise.resolve(false) : plugin.ensureFreshToken(true, failed)),
 		}), plugin.blobCacheStore(`shared-${def.id}`));
 		this.engine = new SyncEngine(this);
 	}
@@ -87,7 +90,10 @@ export class SharedFolderHost implements SyncHost {
 	}
 	deviceScope(): DeviceScope {
 		const ds = this.plugin.deviceScope();
-		return { include: [sharedFolderPattern(this.def.folder)], exclude: ds.exclude, maxDownloadMB: ds.maxDownloadMB };
+		return { include: [sharedFolderPattern(this.def.folder)], exclude: ds.exclude, maxDownloadMB: ds.maxDownloadMB, pinned: ds.pinned };
+	}
+	isUnloaded(): boolean {
+		return this.plugin.isUnloaded();
 	}
 	codec(): Codec {
 		return new Codec([new PrefixLayer(this.def.folder), new LfsLayer(this.remote, (this.plugin.settings.lfsThresholdMB ?? 0) * 1024 * 1024)]);

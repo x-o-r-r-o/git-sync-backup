@@ -18,13 +18,14 @@ import type { EncryptionMeta } from "./crypto.ts";
 import { encryptionGuard } from "./encryption.ts";
 import { LfsLayer } from "./lfs.ts";
 import type { EncryptionRecord } from "./encryption.ts";
-import { EncryptionModal } from "./encryption-ui.ts";
+import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import { DEFAULT_SETTINGS, emptyState } from "./types.ts";
 import type {
 	ConflictChoice,
 	ConflictInfo,
 	DeleteGuardChoice,
 	LocalChanges,
+	SharedFolder,
 	SyncOptions,
 	SyncState,
 	VaultSyncSettings,
@@ -83,7 +84,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private syncing = false;
 	private changedDuringSync = false;
 	private lastFailed = false;
-	private queued: { mode: SyncMode; opts: SyncOptions } | null = null;
+	private queued: { mode: SyncMode; opts: SyncOptions; manual: boolean } | null = null;
 	private logLines: string[] = [];
 	private onChangeDebounced: Debouncer<[], void> | null = null;
 	private intervalId: number | null = null;
@@ -303,7 +304,25 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	/** After the user changes the API URL in settings themselves, the token follows it. */
 	rebindToken() {
-		if (this.getSecret("token")) this.localSet("token:for", this.tokenTarget());
+		// Only within the same host (e.g. fixing a typo in a self-hosted URL): a token entered for another
+		// host stays hidden until a new one is pasted.
+		const bound = this.localGet("token:for");
+		const provider = this.settings.provider ?? "github";
+		if (this.getSecret("token") && (bound === null || bound.startsWith(`${provider}|`))) this.localSet("token:for", this.tokenTarget());
+	}
+	/** A shared folder's own token, only for the host and API URL it was entered for (empty otherwise). */
+	sharedToken(def: SharedFolder): string {
+		const token = this.getSecret(`token-shared-${def.id}`);
+		if (!token) return "";
+		const target = `${def.provider}|${this.getApiBaseFor(def.provider).replace(/\/+$/, "")}`;
+		const bound = this.localGet(`token-shared-for:${def.id}`);
+		if (bound === null) this.localSet(`token-shared-for:${def.id}`, target);
+		else if (bound !== target) return "";
+		return token;
+	}
+	setSharedToken(def: SharedFolder, token: string) {
+		this.setSecret(`token-shared-${def.id}`, token);
+		this.localSet(`token-shared-for:${def.id}`, token ? `${def.provider}|${this.getApiBaseFor(def.provider).replace(/\/+$/, "")}` : null);
 	}
 	setToken(token: string) {
 		this.setSecret("token", token);
@@ -556,6 +575,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.refreshHealth(true);
 	}
 	async lockEncryption() {
+		// Never change keys under a running sync: it would mix two encodings in one run.
+		if (this.syncing) return void new Notice(t("notice.busy"));
 		this.setSecret("encryption", "");
 		this.encLayer = null;
 		this.fullScanNeeded = true;
@@ -563,7 +584,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.refreshHealth(true);
 	}
 	openEncryption(done?: () => void) {
+		if (this.syncing) return void new Notice(t("notice.busy"));
 		new EncryptionModal(this.app, this, done).open();
+	}
+	/** An encrypted repository viewed without the key would show scrambled names: ask to unlock first. */
+	private async needsUnlock(): Promise<boolean> {
+		if (this.isEncrypted()) return false;
+		const marker = await readRemoteMarker(this).catch(() => null);
+		if (!marker) return false;
+		new Notice(t("m.unlockToBrowse"));
+		this.openEncryption();
+		return true;
 	}
 	async removeUnencryptedFiles() {
 		if (this.syncing) return void new Notice(t("notice.busy"));
@@ -898,7 +929,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			return;
 		}
 		if (this.syncing) {
-			this.queued = { mode, opts };
+			// One run is queued. A request with choices (review, current file) or a manual one is never
+			// replaced by an automatic trigger; the automatic run happens anyway after it.
+			const q = this.queued;
+			const qHasChoices = !!q && Object.keys(q.opts).length > 0;
+			// Keep a queued request with choices (review, current file); else a manual request wins over an automatic one.
+			if (!q || (!qHasChoices && (trigger === "manual" || !q.manual))) this.queued = { mode, opts, manual: trigger === "manual" };
+			if (trigger === "manual") new Notice(t("m.queued"));
 			return;
 		}
 		this.syncing = true;
@@ -943,7 +980,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			for (const [p, t] of this.writtenBySync) if (Date.now() - t > 60_000) this.writtenBySync.delete(p);
 			const q = this.queued;
 			this.queued = null;
-			if (q) window.setTimeout(() => void this.sync("change", q.mode, q.opts), 500);
+			if (q) window.setTimeout(() => void this.sync(q.manual ? "manual" : "change", q.mode, q.opts), 500);
 			else if (this.changedDuringSync) this.onChangeDebounced?.();
 			this.changedDuringSync = false;
 			this.refreshHealth(true);
@@ -962,8 +999,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (r.downloaded.length) parts.push(`↓${r.downloaded.length}`);
 		if (r.uploaded.length) parts.push(`↑${r.uploaded.length}`);
 		if (r.deletedLocal.length + r.deletedRemote.length) parts.push(`✕${r.deletedLocal.length + r.deletedRemote.length}`);
-		if (r.merged.length) parts.push(`merged ${r.merged.length}`);
-		const summary = parts.join(" ") || "no changes";
+		if (r.merged.length) parts.push(t("m.mergedN", { n: r.merged.length }));
+		const summary = parts.join(" ") || t("m.noChanges");
 		this.log(`Sync done (${trigger}, ${r.mode}, ${ms} ms): ${summary}`);
 		for (const s of r.skipped) this.log(`Skipped ${s}`);
 
@@ -988,7 +1025,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	async snapshot(manual: boolean) {
 		try {
 			const head = this.state.head ?? (await this.gh.getRef(this.settings.branch));
-			if (!head) throw new Error("Nothing to snapshot yet. Sync first.");
+			if (!head) throw new Error(t("m.nothingToSnapshot"));
 			const d = new Date();
 			const p = (n: number) => String(n).padStart(2, "0");
 			const tag = `snapshot-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
@@ -1134,13 +1171,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	openTimeline() {
 		new TimelineModal(this.app, () => this.timelineEntries(), {
-			browse: (e) => this.browseAt(e),
+			browse: (e) => void this.browseAt(e),
 			restoreVault: (e) => void this.restore(e, ""),
 			restoreFolder: (e) => new FolderSuggestModal(this.app, (f) => void this.restore(e, f.path)).open(),
 		}).open();
 	}
 
-	private browseAt(e: TimelineEntry) {
+	private async browseAt(e: TimelineEntry) {
+		if (await this.needsUnlock()) return;
 		new CommitListModal(this.app, t("m.filesAt", { sha: e.sha.slice(0, 7), date: new Date(e.date).toLocaleString() }), async () => {
 			const files = await this.engine.filesAt(e.sha);
 			return [...files]
@@ -1212,12 +1250,20 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			new Notice(n ? t("m.matched", { n }) : t("m.alreadyMatches"));
 			this.fullScanNeeded = true;
 			this.dirty.clear();
+			this.syncing = false;
+			this.setStatus("ok");
 		} catch (err) {
-			if (!(err instanceof SyncCancelled)) new Notice(t("m.resetFailed", { error: errMsg(err) }), 8000);
+			this.syncing = false;
+			if (err instanceof SyncCancelled) this.setStatus("idle");
+			else {
+				new Notice(t("m.resetFailed", { error: errMsg(err) }), 8000);
+				this.lastError = errMsg(err);
+				this.lastErrorAt = Date.now();
+				this.setStatus("error", errMsg(err));
+			}
 			this.log(errMsg(err));
 		} finally {
 			this.syncing = false;
-			this.setStatus("ok");
 			this.refreshHealth(true);
 		}
 	}
@@ -1270,7 +1316,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			},
 		});
 		this.addCommand({ id: "setup-link", name: t("cmd.setupLink"), callback: () => this.openSetupLink() });
-		this.addCommand({ id: "recover-deleted", name: t("cmd.recover"), callback: () => this.showDeletedFiles() });
+		this.addCommand({ id: "recover-deleted", name: t("cmd.recover"), callback: () => void this.showDeletedFiles() });
 		this.addCommand({
 			id: "open-repo",
 			name: t("cmd.openRepo"),
@@ -1324,7 +1370,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		}
 	}
 
-	private showDeletedFiles() {
+	private async showDeletedFiles() {
+		if (await this.needsUnlock()) return;
 		new CommitListModal(this.app, t("m.recentlyDeleted"), async () => {
 			const commits = await this.gh.listCommits(this.settings.branch, undefined, 25);
 			const rows: { label: string; sub: string; run: () => void }[] = [];
@@ -1342,7 +1389,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					rows.push({
 						label: name,
 						sub: t("m.deletedOn", { date: new Date(c.date).toLocaleString(), msg: c.message.split("\n")[0] }),
-						run: () => void this.openVersion(name, { sha: parent, message: `before ${c.sha.slice(0, 7)}`, date: c.date }),
+						run: () => void this.openVersion(name, { sha: parent, message: t("m.beforeCommit", { sha: c.sha.slice(0, 7) }), date: c.date }),
 					});
 				}
 			}

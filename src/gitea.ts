@@ -1,7 +1,7 @@
 // Gitea / Forgejo (including Codeberg) via API v1. Commits use the ChangeFiles endpoint
 // (POST /repos/{owner}/{repo}/contents), which writes many files in one atomic commit.
 
-import { b64decode, b64encode, compareByWalking, httpRequest, obsidianTransport } from "./http.ts";
+import { b64decode, b64encode, compareByWalking, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import { NotFastForward } from "./remote.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
@@ -191,7 +191,17 @@ export class Gitea implements Remote {
 	async compare(base: string, head: string): Promise<Relation> {
 		const exists = await this.request("GET", `${this.repoPath}/git/commits/${base}?stat=false&files=false`, undefined, { okStatuses: [404, 422] });
 		if (exists.status >= 300) return "missing";
-		return compareByWalking(async (sha, page) => (await this.json<GtCommit[]>("GET", `${this.repoPath}/commits?sha=${sha}&limit=50&page=${page}&stat=false&files=false&verification=false`)).map((c) => c.sha), base, head);
+		// Gitea may return fewer than `limit` items per page (MAX_RESPONSE_ITEMS), so rely on X-HasMore
+		// when the server sends it and otherwise on an empty page.
+		return compareByWalking(
+			async (sha, page) => {
+				const res = await this.request("GET", `${this.repoPath}/commits?sha=${sha}&limit=50&page=${page}&stat=false&files=false&verification=false`);
+				const hasMore = header(res, "x-hasmore");
+				return { shas: ((res.json as GtCommit[] | null) ?? []).map((c) => c.sha), more: hasMore === undefined ? undefined : hasMore === "true" };
+			},
+			base,
+			head,
+		);
 	}
 
 	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
@@ -209,8 +219,14 @@ export class Gitea implements Remote {
 		return res.status === 404 ? null : res.arrayBuffer;
 	}
 	async listTags() {
-		const list = await this.json<GtTag[]>("GET", `${this.repoPath}/tags?limit=50`);
-		return list.map((t) => ({ name: t.name, sha: t.commit?.sha ?? t.id ?? "" }));
+		// Pages may be shorter than `limit` (server-side clamp): only an empty page ends the list.
+		const out: { name: string; sha: string }[] = [];
+		for (let page = 1; page <= 30; page++) {
+			const list = (await this.json<GtTag[] | null>("GET", `${this.repoPath}/tags?limit=50&page=${page}`)) ?? [];
+			if (!list.length) break;
+			for (const t of list) out.push({ name: t.name, sha: t.commit?.sha ?? t.id ?? "" });
+		}
+		return out;
 	}
 	async rateLimit() {
 		return null;

@@ -86,7 +86,7 @@ export function renderDiff(parent: HTMLElement, oldText: string, newText: string
 							el.replaceWith(...Array.from(frag.childNodes));
 						});
 					};
-					els.forEach((el) => el.onClickEvent(expand));
+					els.forEach((el) => clickable(el, expand));
 					for (let i = n - keepTail; i < n; i++) {
 						lineEl(left, "eq", oldNo + i, strip(s.lines[i]));
 						if (mode === "split") lineEl(right, "eq", newNo + i, strip(s.lines[i]));
@@ -167,4 +167,18 @@ export function renderHunkPicker(parent: HTMLElement, localText: string, remoteT
 	});
 	if (!k) wrap.createDiv({ cls: "vsg-dv-same", text: tr("d.identical") });
 	return () => assemble(segs, picks);
+}
+
+/** Makes a clickable element usable from the keyboard and by screen readers (role, focus, Enter/Space). */
+export function clickable(el: HTMLElement, fn: () => void, label?: string) {
+	el.setAttr("role", "button");
+	el.setAttr("tabindex", "0");
+	if (label) el.setAttr("aria-label", label);
+	el.onClickEvent(fn);
+	el.addEventListener("keydown", (ev) => {
+		if (ev.key === "Enter" || ev.key === " ") {
+			ev.preventDefault();
+			fn();
+		}
+	});
 }
