@@ -8,10 +8,13 @@ import { VaultSyncSettingTab } from "./settings-tab.ts";
 import { SyncCancelled, SyncEngine } from "./sync.ts";
 import type { DeviceScope, SyncHost, SyncReport } from "./sync.ts";
 import { SetupWizard } from "./wizard.ts";
+import { SharedFolderHost, sharedFolderPattern } from "./shared.ts";
+import type { HostKind } from "./hosts.ts";
 import { Codec, PrefixLayer } from "./codec.ts";
 import { b64, EncryptionLayer, unb64 } from "./crypto.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import { encryptionGuard } from "./encryption.ts";
+import { LfsLayer } from "./lfs.ts";
 import type { EncryptionRecord } from "./encryption.ts";
 import { EncryptionModal } from "./encryption-ui.ts";
 import { DEFAULT_SETTINGS, emptyState } from "./types.ts";
@@ -38,6 +41,7 @@ import {
 	TimelineEntry,
 	TimelineModal,
 } from "./ui.ts";
+import { t } from "./i18n.ts";
 import { asText, conflictCopyOriginal, errMsg, restoredCopyPath, stamp } from "./util.ts";
 
 type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background";
@@ -49,6 +53,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private remoteCache: { kind: string; remote: Remote } | null = null;
 	lastReport: SyncReport | null = null;
 	private encLayer: EncryptionLayer | null = null;
+	private shared: { sig: string; hosts: SharedFolderHost[] } | null = null;
 	/** Set by the setup wizard to show live progress. */
 	onProgress: ((text: string) => void) | null = null;
 	lastError: string | null = null;
@@ -87,8 +92,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		await this.loadEncryption();
 
 		this.registerView(HEALTH_VIEW, (leaf) => new HealthView(leaf, this));
-		this.ribbonEl = this.addRibbonIcon("refresh-cw", "Sync with GitHub", () => this.sync("manual"));
-		this.addRibbonIcon("activity", "GitHub sync status", () => this.openHealth());
+		this.ribbonEl = this.addRibbonIcon("refresh-cw", t("ribbon.sync"), () => this.sync("manual"));
+		this.addRibbonIcon("activity", t("ribbon.status"), () => this.openHealth());
 		if (!Platform.isMobile) {
 			this.statusEl = this.addStatusBarItem();
 			this.statusEl.addClass("vsg-status");
@@ -215,7 +220,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	// The API URL is per device and per provider (a synced data.json must never redirect the token).
 	getApiBase(): string {
-		const kind = this.settings.provider ?? "github";
+		return this.getApiBaseFor(this.settings.provider ?? "github");
+	}
+	getApiBaseFor(kind: HostKind): string {
 		try {
 			return window.localStorage.getItem(this.localKey(`apiBase:${kind}`)) || (kind === "github" ? window.localStorage.getItem(this.localKey("apiBase")) : null) || HOSTS[kind].defaultApi;
 		} catch {
@@ -305,8 +312,46 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (!(e instanceof SyncCancelled)) new Notice(`Could not remove files: ${errMsg(e)}`);
 		}
 	}
+	/** Shared folders belong to their own repositories; the main vault repo never touches them. */
+	extraExcludes(): string[] {
+		return (this.settings.sharedFolders ?? []).filter((f) => f.enabled && f.folder).map((f) => sharedFolderPattern(f.folder));
+	}
+	sharedHostsCached(): SharedFolderHost[] {
+		return this.shared?.hosts ?? [];
+	}
+	async sharedHosts(): Promise<SharedFolderHost[]> {
+		const defs = (this.settings.sharedFolders ?? []).filter((f) => f.enabled && f.folder && f.owner && f.repo);
+		const sig = JSON.stringify(defs);
+		if (!this.shared || this.shared.sig !== sig) {
+			const hosts = defs.map((d) => new SharedFolderHost(this, d));
+			for (const h of hosts) await h.loadState();
+			this.shared = { sig, hosts };
+		}
+		return this.shared.hosts;
+	}
+	private async syncShared(mode: SyncMode): Promise<string[]> {
+		const errors: string[] = [];
+		for (const h of await this.sharedHosts()) {
+			if (!h.activeOnThisDevice()) continue;
+			try {
+				const r = await h.engine.run(mode);
+				h.lastError = null;
+				h.lastSync = Date.now();
+				if (!r.upToDate) h.log(`Synced: ↓${r.downloaded.length} ↑${r.uploaded.length} merged ${r.merged.length}`);
+			} catch (e) {
+				if (e instanceof SyncCancelled) continue;
+				h.lastError = errMsg(e);
+				h.log(`Sync failed: ${errMsg(e)}`);
+				errors.push(`${h.def.folder}: ${errMsg(e)}`);
+			}
+		}
+		return errors;
+	}
+
 	codec(): Codec {
-		return new Codec(this.encLayer ? [this.encLayer] : []);
+		// LFS is always present for reading pointers; it only uploads when a threshold is set.
+		const lfs = new LfsLayer(this.gh, (this.settings.lfsThresholdMB ?? 0) * 1024 * 1024);
+		return new Codec(this.encLayer ? [this.encLayer, lfs] : [lfs]);
 	}
 	checkEncryption = (markerSha: string | null): Promise<string | null> =>
 		encryptionGuard(
@@ -318,7 +363,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	progress(text: string) {
 		this.onProgress?.(text);
 		this.statusEl?.setAttr("aria-label", text);
-		this.ribbonEl?.setAttr("aria-label", `Sync with GitHub: ${text}`);
+		this.ribbonEl?.setAttr("aria-label", `${t("ribbon.sync")}: ${text}`);
 	}
 	openWizard() {
 		new SetupWizard(this.app, this).open();
@@ -465,7 +510,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.statusEl.setAttr("data-tooltip-position", "top");
 		}
 		this.ribbonEl?.toggleClass("vsg-spinning", status === "syncing");
-		this.ribbonEl?.setAttr("aria-label", `Sync with GitHub: ${title}`);
+		this.ribbonEl?.setAttr("aria-label", `${t("ribbon.sync")}: ${title}`);
 		this.refreshHealth();
 	}
 
@@ -540,6 +585,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		let written = new Set<string>();
 		try {
 			const r = await this.engine.run(mode, opts);
+			const sharedErrors = opts.defer || opts.firstSyncPrefer ? [] : await this.syncShared(mode);
+			if (sharedErrors.length) this.notify(`Shared folder sync failed:\n${sharedErrors.join("\n")}`, true);
 			written = new Set([...r.downloaded, ...r.merged, ...r.conflictCopies, ...r.deletedLocal]);
 			const now = Date.now();
 			for (const p of written) this.writtenBySync.set(p, now);
@@ -558,8 +605,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				this.log(`Sync failed: ${errMsg(e)}`);
 				this.setStatus("error", `Sync failed: ${errMsg(e)}`);
 				// Automatic syncs only warn on the first failure in a row, not every interval.
-				if (trigger === "manual") new Notice(`GitHub sync failed: ${errMsg(e)}`, 8000);
-				else if (!this.lastFailed) this.notify(`GitHub sync failed: ${errMsg(e)}`, true);
+				if (trigger === "manual") new Notice(t("notice.failed", { error: errMsg(e) }), 8000);
+				else if (!this.lastFailed) this.notify(t("notice.failed", { error: errMsg(e) }), true);
 				this.lastFailed = true;
 			}
 		} finally {
@@ -581,7 +628,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (r.upToDate) {
 			this.log(`Up to date (${trigger}).`);
 			this.setStatus(this.conflictCopies().length ? "conflict" : "ok");
-			if (trigger === "manual") this.notify("Vault is up to date.");
+			if (trigger === "manual") this.notify(t("notice.upToDate"));
 			return;
 		}
 		const parts: string[] = [];
@@ -595,13 +642,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 		if (r.errors.length) {
 			this.setStatus("error", `${r.errors.length} file(s) failed: see sync status`);
-			this.notify(`GitHub sync finished with ${r.errors.length} error(s). Open the sync status panel for details.`, true);
+			this.notify(t("notice.errors", { n: r.errors.length }), true);
 		} else if (r.conflictCopies.length) {
 			this.setStatus("conflict", `${r.conflictCopies.length} conflict copy(ies) created`);
-			this.notify(`Sync: ${r.conflictCopies.length} conflict(s). Both versions kept; compare them in the sync status panel.`, true);
+			this.notify(t("notice.conflicts", { n: r.conflictCopies.length }), true);
 		} else {
 			this.setStatus("ok");
-			this.notify(`GitHub sync: ${summary}`);
+			this.notify(t("notice.synced", { summary }));
 		}
 	}
 
@@ -741,7 +788,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	private async restore(e: TimelineEntry, folder: string) {
-		if (this.syncing) return void new Notice("A sync is running. Try again in a moment.");
+		if (this.syncing) return void new Notice(t("notice.busy"));
 		const what = folder ? `folder "${folder}"` : "whole vault";
 		this.syncing = true;
 		this.setStatus("syncing", `Restoring ${what}…`);
@@ -779,7 +826,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async resetToGitHub() {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
-		if (this.syncing) return void new Notice("A sync is running. Try again in a moment.");
+		if (this.syncing) return void new Notice(t("notice.busy"));
 		this.syncing = true;
 		this.setStatus("syncing", "Comparing with GitHub…");
 		try {
@@ -814,22 +861,22 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// ---------------- commands ----------------
 
 	private registerCommands() {
-		this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.sync("manual") });
-		this.addCommand({ id: "review", name: "Review changes and sync", callback: () => this.openReview() });
-		this.addCommand({ id: "open-status", name: "Open sync status panel", callback: () => this.openHealth() });
-		this.addCommand({ id: "pull-now", name: "Pull from GitHub only", callback: () => this.sync("manual", "pull") });
-		this.addCommand({ id: "push-now", name: "Back up to GitHub only (push)", callback: () => this.sync("manual", "push") });
-		this.addCommand({ id: "preview", name: "Preview sync (dry run)", callback: () => this.openReview() });
-		this.addCommand({ id: "timeline", name: "Timeline: restore vault or folder to an earlier point", callback: () => this.openTimeline() });
-		this.addCommand({ id: "reset-to-github", name: "Make this device match GitHub (discard local changes)", callback: () => this.resetToGitHub() });
-		this.addCommand({ id: "snapshot", name: "Create backup snapshot on GitHub", callback: () => this.snapshot(true) });
-		this.addCommand({ id: "setup-wizard", name: "Run setup wizard", callback: () => this.openWizard() });
-		this.addCommand({ id: "encryption", name: "End-to-end encryption: turn on or unlock", callback: () => this.openEncryption() });
-		this.addCommand({ id: "free-up-space", name: "Free up space on this device", callback: () => this.freeUpSpace() });
-		this.addCommand({ id: "show-log", name: "Show sync log", callback: () => this.openLog() });
+		this.addCommand({ id: "sync-now", name: t("cmd.sync"), callback: () => this.sync("manual") });
+		this.addCommand({ id: "review", name: t("cmd.review"), callback: () => this.openReview() });
+		this.addCommand({ id: "open-status", name: t("cmd.status"), callback: () => this.openHealth() });
+		this.addCommand({ id: "pull-now", name: t("cmd.pull"), callback: () => this.sync("manual", "pull") });
+		this.addCommand({ id: "push-now", name: t("cmd.push"), callback: () => this.sync("manual", "push") });
+		this.addCommand({ id: "preview", name: t("cmd.preview"), callback: () => this.openReview() });
+		this.addCommand({ id: "timeline", name: t("cmd.timeline"), callback: () => this.openTimeline() });
+		this.addCommand({ id: "reset-to-github", name: t("cmd.reset"), callback: () => this.resetToGitHub() });
+		this.addCommand({ id: "snapshot", name: t("cmd.snapshot"), callback: () => this.snapshot(true) });
+		this.addCommand({ id: "setup-wizard", name: t("cmd.wizard"), callback: () => this.openWizard() });
+		this.addCommand({ id: "encryption", name: t("cmd.encryption"), callback: () => this.openEncryption() });
+		this.addCommand({ id: "free-up-space", name: t("cmd.freeSpace"), callback: () => this.freeUpSpace() });
+		this.addCommand({ id: "show-log", name: t("cmd.log"), callback: () => this.openLog() });
 		this.addCommand({
 			id: "file-history",
-			name: "Show history of current file",
+			name: t("cmd.history"),
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file) return false;
@@ -839,7 +886,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		});
 		this.addCommand({
 			id: "compare-with-github",
-			name: "Compare current file with GitHub",
+			name: t("cmd.compare"),
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file) return false;
@@ -847,21 +894,22 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				return true;
 			},
 		});
-		this.addCommand({ id: "recover-deleted", name: "Recover deleted files", callback: () => this.showDeletedFiles() });
+		this.addCommand({ id: "recover-deleted", name: t("cmd.recover"), callback: () => this.showDeletedFiles() });
 		this.addCommand({
 			id: "open-repo",
-			name: "Open repository on GitHub",
+			name: t("cmd.openRepo"),
 			callback: async () => {
 				const repo = await this.gh.getRepo().catch(() => null);
-				window.open(repo?.html_url ?? `https://github.com/${this.settings.owner}/${this.settings.repo}`);
+				if (repo?.html_url) window.open(repo.html_url);
+				else new Notice("Could not find the repository. Check the connection settings.");
 			},
 		});
 
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				if (!(file instanceof TFile)) return;
-				menu.addItem((i) => i.setTitle("Version history (GitHub)").setIcon("history").onClick(() => this.showFileHistory(file)));
-				menu.addItem((i) => i.setTitle("Compare with GitHub").setIcon("file-diff").onClick(() => this.compareWithGitHub(file)));
+				menu.addItem((i) => i.setTitle(t("menu.history")).setIcon("history").onClick(() => this.showFileHistory(file)));
+				menu.addItem((i) => i.setTitle(t("menu.compare")).setIcon("file-diff").onClick(() => this.compareWithGitHub(file)));
 			}),
 		);
 	}

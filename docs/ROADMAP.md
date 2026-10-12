@@ -53,7 +53,8 @@ We cover 1–3. The plan below targets 4–10 and adds features no git-based plu
 - **v0.2 "Trust & visibility":** 1, 2, 3, 7, 8, 14 ✅ shipped 2026-10-12
 - **v0.3 "Correctness":** 4, 5, 6, 9 ✅ shipped 2026-10-12
 - **v0.4 "Unique":** 10 (E2E encryption) and 11 (Gitea and GitLab) ✅ shipped 2026-10-12 (GitLab/Gitea beta)
-- **Later:** 12, 13, 15
+- **v0.5 "Grows with you":** 12 (Git LFS), 13 (shared folders → own repos), 15 (i18n framework + zh-CN) ✅ shipped 2026-10-12
+- **Next:** Sign in with GitHub via GitHub App device flow ([AUTH.md](AUTH.md)), more translations
 
 ## Sources
 

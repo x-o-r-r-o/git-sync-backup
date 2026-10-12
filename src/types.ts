@@ -23,6 +23,8 @@ export interface VaultSyncSettings {
 	syncConfigDir: boolean;
 	excludePatterns: string;
 	maxFileSizeMB: number;
+	/** Files at least this large are stored with Git LFS (0 = off). */
+	lfsThresholdMB: number;
 
 	conflictStrategy: ConflictStrategy;
 	reviewBeforeManualSync: boolean;
@@ -38,6 +40,18 @@ export interface VaultSyncSettings {
 	commitTemplate: string;
 	noticeLevel: NoticeLevel;
 	wizardShown: boolean;
+	/** Folders synced to their own repositories (e.g. a team folder). No secrets in here. */
+	sharedFolders: SharedFolder[];
+}
+
+export interface SharedFolder {
+	id: string;
+	folder: string;
+	provider: "github" | "gitlab" | "gitea";
+	owner: string;
+	repo: string;
+	branch: string;
+	enabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: VaultSyncSettings = {
@@ -67,6 +81,7 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 		"{config}/plugins/*/node_modules/",
 	].join("\n"),
 	maxFileSizeMB: 50,
+	lfsThresholdMB: 0,
 
 	conflictStrategy: "auto",
 	reviewBeforeManualSync: false,
@@ -82,6 +97,7 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	commitTemplate: "{{device}}: {{summary}}",
 	noticeLevel: "errors",
 	wizardShown: false,
+	sharedFolders: [],
 };
 
 // Per-device sync state, kept in the plugin folder and never synced.
@@ -96,6 +112,8 @@ export interface SyncState {
 	baseNorm: Record<string, string>;
 	lastFullScan: number;
 	lastConfigScan: number;
+	/** Codec fingerprint the cached hashes were computed with. */
+	codecFingerprint: string;
 	lastSync: number;
 	lastSnapshot: number;
 	dirty: boolean;
@@ -110,6 +128,7 @@ export const emptyState = (repoKey = ""): SyncState => ({
 	baseNorm: {},
 	lastFullScan: 0,
 	lastConfigScan: 0,
+	codecFingerprint: "",
 	lastSync: 0,
 	lastSnapshot: 0,
 	dirty: false,

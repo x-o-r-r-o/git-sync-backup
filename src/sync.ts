@@ -41,6 +41,8 @@ export interface SyncHost {
 	markLocalChangesSynced?(covered: LocalChanges): void;
 	/** Device-local scope (not synced between devices). */
 	deviceScope?(): DeviceScope;
+	/** Folders handled by another engine (shared folders): never touched by this one. */
+	extraExcludes?(): string[];
 	/** Human-readable progress for long syncs. */
 	progress?(text: string): void;
 	/** Path/content transforms (encryption, folder mapping, LFS). Defaults to none. */
@@ -201,7 +203,15 @@ export class SyncEngine {
 		const sub = (l: string) => l.split("{config}").join(cfg);
 		const patterns = this.s.excludePatterns.split("\n").map(sub);
 		const ds = device ? this.host.deviceScope?.() : undefined;
-		const excluded = compileGlobs([...patterns, ...(ds?.exclude ?? []).map(sub), ".git/", this.host.stateFilePath]);
+		const excluded = compileGlobs([
+			...patterns,
+			...(ds?.exclude ?? []).map(sub),
+			...(this.host.extraExcludes?.() ?? []),
+			".git/",
+			this.host.stateFilePath,
+			// Every engine's state files live in the plugin folder.
+			this.host.stateFilePath.replace(/[^/]+$/, "sync-state*.json"),
+		]);
 		const includes = (ds?.include ?? []).map((x) => x.trim()).filter((x) => x && !x.startsWith("#"));
 		const included = includes.length ? compileGlobs(includes.map(sub)) : null;
 		return (p: string) => {
@@ -313,8 +323,11 @@ export class SyncEngine {
 		const cfgPrefix = this.host.app.vault.configDir + "/";
 
 		this.host.progress?.("Scanning files…");
+		// Stored forms changed (e.g. LFS turned on): cached hashes are stale, recompute them once.
+		const cacheValid = (state.codecFingerprint ?? "") === this.codec.fingerprint;
 		const files = this.io.listVault(baseScope);
-		if (configDue) files.push(...(await this.io.listConfig(baseScope)));
+		const walkConfig = this.s.syncConfigDir && (configDue || !cacheValid);
+		if (walkConfig) files.push(...(await this.io.listConfig(baseScope)));
 		const localShas = new Map<string, string>();
 		const cacheNext: SyncState["cache"] = {};
 		let hashed = 0;
@@ -323,7 +336,7 @@ export class SyncEngine {
 				skip(f.path, `local file larger than ${this.s.maxFileSizeMB} MB`);
 				continue;
 			}
-			const c = state.cache[f.path];
+			const c = cacheValid ? state.cache[f.path] : undefined;
 			if (c && c.m === f.mtime && c.s === f.size && !covered.paths.has(f.path)) {
 				cacheNext[f.path] = c;
 				localShas.set(f.path, c.h);
@@ -336,7 +349,7 @@ export class SyncEngine {
 			localShas.set(f.path, h);
 			if (++hashed % 25 === 0) await sleep(0);
 		}
-		if (this.s.syncConfigDir && !configDue) {
+		if (this.s.syncConfigDir && !walkConfig) {
 			for (const [p, c] of Object.entries(state.cache)) {
 				if (!p.startsWith(cfgPrefix) || !baseScope(p) || localShas.has(p)) continue;
 				if (c.s > maxBytes) skip(p, `local file larger than ${this.s.maxFileSizeMB} MB`);
@@ -483,6 +496,7 @@ export class SyncEngine {
 		if (ctx.upToDate) {
 			report.upToDate = true;
 			state.cache = cacheNext;
+			state.codecFingerprint = this.codec.fingerprint;
 			state.lastSync = Date.now();
 			await host.saveState();
 			host.markLocalChangesSynced?.(ctx.covered);
@@ -653,6 +667,7 @@ export class SyncEngine {
 
 		state.head = newHead;
 		state.base = next;
+		state.codecFingerprint = this.codec.fingerprint;
 		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
 		state.lastSync = Date.now();
@@ -797,7 +812,8 @@ export class SyncEngine {
 					u.sha = await gitBlobSha(stored);
 					return stored;
 				},
-				text: codec.transformsContent ? undefined : (b) => asText(u.path, b),
+				// Inline text is byte-exact whenever the stored bytes are valid UTF-8 (asText checks).
+				text: (b) => asText(u.path, b),
 			});
 		}
 		if (this.markerToAdd) {

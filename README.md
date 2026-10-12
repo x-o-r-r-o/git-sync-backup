@@ -6,6 +6,7 @@ Sync and back up an Obsidian vault across **desktop and mobile** (Windows, macOS
 - **Real merging.** If two devices edit different parts of the same note, the changes are merged line by line. If they edit the same lines, both versions are kept (or you choose).
 - **Safe by default.** Edits always win over deletions, deleted files go to the trash, and a delete guard stops accidental mass deletions.
 - **Backups built in.** Every sync is one commit, so the full history lives on GitHub. Per-file version history and restore, recovery of deleted files, and manual or daily snapshot tags.
+- **Grows with you (v0.5).** Share a folder with a team through its own repository, keep big media in Git LFS, and use the interface in your language.
 - **Private by design (v0.4).** Optional end-to-end encryption: the host only ever stores unreadable data, including file names. Tokens are kept in Obsidian's secure storage.
 - **Understands your vault (v0.3).** Renames travel as renames, canvases and frontmatter merge by structure, each device can sync only what it needs, and a setup wizard gets a new device running in a minute.
 - **See before you sync (v0.2).** Visual diffs everywhere, review-and-pick before syncing, change-by-change conflict resolution, a sync health panel, and point-in-time restore of the whole vault or one folder.
@@ -52,6 +53,19 @@ The token is stored only on the device (local storage). It is never written to `
 | Backup | One commit per sync, daily or manual snapshot tags, **Version history** in the file menu, **Recover deleted files** |
 | Visibility | Status bar (desktop), spinning ribbon icon, sync log, **Preview sync (dry run)** |
 | Other | GitHub Enterprise (custom API URL), commit message template, device names |
+
+## New in v0.5
+
+- **Shared folders** (Settings → *Shared folders*). Sync one folder with its own repository, for example `Work/` ↔ `team/notes`, while the rest of your vault stays in your private repository.
+  - The folder maps to the root of the shared repository, so collaborators can use it as a normal vault or repository.
+  - Each shared folder has its own state, can use its own token and host, and syncs after the main vault. Its status appears in the status panel.
+  - The main repository never touches shared folders.
+- **Large files with Git LFS** (Settings → *Store large files with Git LFS*). Files above a size you choose go to the host's large-file storage, and the repository keeps a small pointer.
+  - Works with GitHub, GitLab and Gitea through the standard LFS batch API.
+  - Every device reads LFS files correctly even if it doesn't upload with LFS.
+  - Turning it on converts existing big files on the next sync, with no conflicts.
+  - Check your host's LFS quota.
+- **Translations.** The interface follows Obsidian's language. Commands, the status panel and notifications are available in English and Simplified Chinese. Contributions are welcome: see [docs/TRANSLATING.md](docs/TRANSLATING.md).
 
 ## New in v0.4
 
@@ -116,7 +130,7 @@ Sync now · Review changes and sync · Open sync status panel · Run setup wizar
 ```bash
 npm install
 npm run dev      # watch build
-npm test         # unit tests + two-device simulation against an in-memory GitHub (86 tests, including fake GitLab and Gitea servers)
+npm test         # unit tests + two-device simulation against an in-memory GitHub (90 tests, including fake GitLab, Gitea and LFS servers)
 VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API (13 tests, including encrypted sync)
 npm run build    # type-check + production bundle
 ```

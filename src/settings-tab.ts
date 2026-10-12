@@ -4,6 +4,7 @@ import type { ConflictStrategy, NoticeLevel } from "./types.ts";
 import type { SyncMode } from "./plan.ts";
 import { errMsg } from "./util.ts";
 import { HOSTS } from "./hosts.ts";
+import { SharedFolderModal } from "./shared-ui.ts";
 import type { HostKind } from "./hosts.ts";
 
 export class VaultSyncSettingTab extends PluginSettingTab {
@@ -198,7 +199,16 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			.setDesc("Larger files are skipped. GitHub's hard limit is 100 MB.")
 			.addText((t) =>
 				t.setValue(String(s.maxFileSizeMB)).onChange(async (v) => {
-					s.maxFileSizeMB = Math.min(100, Math.max(1, Number(v) || 50));
+					s.maxFileSizeMB = Math.min(s.lfsThresholdMB > 0 ? 2000 : 100, Math.max(1, Number(v) || 50));
+					await save();
+				}),
+			);
+		new Setting(containerEl)
+			.setName("Store large files with Git LFS (MB)")
+			.setDesc("Files at least this big are kept in the host's large-file storage instead of the repository, keeping the repo small and fast. 0 = off. Check your host's LFS quota (GitHub's free plan is limited). With LFS on, the max file size above can go up to 2000 MB.")
+			.addText((t) =>
+				t.setValue(String(s.lfsThresholdMB)).onChange(async (v) => {
+					s.lfsThresholdMB = Math.max(0, Number(v) || 0);
 					await save();
 				}),
 			);
@@ -225,6 +235,36 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				.setDesc("GitHub only ever sees unreadable data. Also use this to unlock a repository that another device already encrypted.")
 				.addButton((b) => b.setButtonText("Turn on or unlock…").onClick(() => p.openEncryption(() => this.display())));
 		}
+
+		// ---------- shared folders ----------
+		new Setting(containerEl).setName("Shared folders").setHeading();
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text: "Sync a folder with its own repository (for example a team folder) while the rest of the vault stays private.",
+		});
+		for (const f of s.sharedFolders ?? []) {
+			new Setting(containerEl)
+				.setName(`${f.folder} ↔ ${f.owner}/${f.repo}`)
+				.setDesc(`${f.provider}, branch ${f.branch}`)
+				.addToggle((t) =>
+					t.setValue(f.enabled).onChange(async (v) => {
+						f.enabled = v;
+						await save();
+					}),
+				)
+				.addExtraButton((b) =>
+					b
+						.setIcon("trash")
+						.setTooltip("Stop syncing this folder separately")
+						.onClick(async () => {
+							s.sharedFolders = s.sharedFolders.filter((x) => x.id !== f.id);
+							p.setSecret(`token-shared-${f.id}`, "");
+							await save();
+							this.display();
+						}),
+				);
+		}
+		new Setting(containerEl).addButton((b) => b.setButtonText("Add shared folder…").onClick(() => new SharedFolderModal(this.app, p, () => this.display()).open()));
 
 		// ---------- this device ----------
 		new Setting(containerEl).setName("This device only").setHeading();

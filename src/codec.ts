@@ -7,6 +7,8 @@ import { gitBlobSha } from "./util.ts";
 export interface Layer {
 	/** Part of the sync baseline identity: changing layers starts a fresh (non-deleting) baseline. */
 	readonly id: string;
+	/** How stored forms are computed; when it changes, cached local hashes are recomputed. Defaults to id. */
+	readonly fingerprint?: string;
 	readonly transformsContent?: boolean;
 	readonly transformsPaths?: boolean;
 	encodePath?(path: string): Promise<string>;
@@ -21,12 +23,14 @@ export interface Layer {
 
 export class Codec {
 	readonly id: string;
+	readonly fingerprint: string;
 	readonly transformsContent: boolean;
 	readonly transformsPaths: boolean;
 	readonly layers: Layer[];
 	constructor(layers: Layer[] = []) {
 		this.layers = layers;
-		this.id = layers.map((l) => l.id).join("+");
+		this.id = layers.map((l) => l.id).filter(Boolean).join("+");
+		this.fingerprint = layers.map((l) => l.fingerprint ?? l.id).filter(Boolean).join("+");
 		this.transformsContent = layers.some((l) => l.transformsContent);
 		this.transformsPaths = layers.some((l) => l.transformsPaths);
 	}

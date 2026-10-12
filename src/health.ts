@@ -2,6 +2,7 @@
 
 import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
+import { t } from "./i18n.ts";
 
 export const HEALTH_VIEW = "vault-sync-health";
 
@@ -31,12 +32,12 @@ export function friendlyError(msg: string): FriendlyError {
 }
 
 function ago(ts: number): string {
-	if (!ts) return "never";
+	if (!ts) return t("time.never");
 	const s = Math.round((Date.now() - ts) / 1000);
-	if (s < 60) return "just now";
-	if (s < 3600) return `${Math.round(s / 60)} min ago`;
-	if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-	return `${Math.round(s / 86400)} d ago`;
+	if (s < 60) return t("time.now");
+	if (s < 3600) return t("time.min", { n: Math.round(s / 60) });
+	if (s < 86400) return t("time.hour", { n: Math.round(s / 3600) });
+	return t("time.day", { n: Math.round(s / 86400) });
 }
 
 export class HealthView extends ItemView {
@@ -52,7 +53,7 @@ export class HealthView extends ItemView {
 		return HEALTH_VIEW;
 	}
 	getDisplayText() {
-		return "Sync status";
+		return t("health.title");
 	}
 	getIcon() {
 		return "activity";
@@ -121,25 +122,25 @@ export class HealthView extends ItemView {
 		const st = el.createDiv({ cls: "vsg-h-status" });
 		const icon = st.createSpan({ cls: "vsg-h-big" });
 		const text = st.createDiv();
-		let headline = "Up to date";
+		let headline = t("health.upToDate");
 		let ico = "check-circle";
 		let cls = "ok";
-		if (!p.isConfigured()) [headline, ico, cls] = ["Not set up", "settings", "warn"];
-		else if (p.isSyncing()) [headline, ico, cls] = ["Syncing…", "refresh-cw", "busy"];
-		else if (p.lastError) [headline, ico, cls] = ["Last sync failed", "alert-octagon", "err"];
-		else if (p.conflictCopies().length) [headline, ico, cls] = ["Needs attention", "alert-triangle", "warn"];
-		else if (!p.state.lastSync) [headline, ico, cls] = ["Not synced yet", "cloud", "warn"];
+		if (!p.isConfigured()) [headline, ico, cls] = [t("health.notSetUp"), "settings", "warn"];
+		else if (p.isSyncing()) [headline, ico, cls] = [t("health.syncing"), "refresh-cw", "busy"];
+		else if (p.lastError) [headline, ico, cls] = [t("health.failed"), "alert-octagon", "err"];
+		else if (p.conflictCopies().length) [headline, ico, cls] = [t("health.attention"), "alert-triangle", "warn"];
+		else if (!p.state.lastSync) [headline, ico, cls] = [t("health.notSynced"), "cloud", "warn"];
 		setIcon(icon, ico);
 		st.addClass(`vsg-h-${cls}`);
 		text.createDiv({ cls: "vsg-h-headline", text: headline });
 		text.createDiv({
 			cls: "vsg-muted",
-			text: `Last sync ${ago(p.state.lastSync)} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? "two-way" : p.settings.mode === "push" ? "backup only" : "pull only"}${p.isEncrypted() ? " · 🔒 end-to-end encrypted" : ""}`,
+			text: `Last sync ${ago(p.state.lastSync)} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? "two-way" : p.settings.mode === "push" ? "backup only" : "pull only"}${p.isEncrypted() ? ` · 🔒 ${t("health.encrypted")}` : ""}`,
 		});
 		const acts = el.createDiv({ cls: "vsg-h-actions" });
-		if (!p.isConfigured()) this.button(acts, "Run setup wizard", () => p.openWizard(), true);
-		else this.button(acts, "Sync now", () => p.sync("manual"), true);
-		this.button(acts, "Review…", () => p.openReview());
+		if (!p.isConfigured()) this.button(acts, t("health.wizard"), () => p.openWizard(), true);
+		else this.button(acts, t("health.syncNow"), () => p.sync("manual"), true);
+		this.button(acts, t("health.review"), () => p.openReview());
 		this.button(acts, "↻", () => this.refresh(true)).setAttr("aria-label", "Refresh");
 
 		if (p.lastError) {
@@ -148,38 +149,50 @@ export class HealthView extends ItemView {
 			s.addClass("vsg-h-error");
 			s.createDiv({ text: f.hint });
 			s.createDiv({ cls: "vsg-muted", text: `${ago(p.lastErrorAt)} · ${p.lastError}` });
-			if (f.action === "settings") this.button(s, "Open settings", () => p.openSettings(), true);
-			if (f.action === "retry") this.button(s, "Try again", () => p.sync("manual"), true);
-			if (f.action === "encryption") this.button(s, "Enter passphrase", () => p.openEncryption(() => p.sync("manual")), true);
+			if (f.action === "settings") this.button(s, t("health.openSettings"), () => p.openSettings(), true);
+			if (f.action === "retry") this.button(s, t("health.tryAgain"), () => p.sync("manual"), true);
+			if (f.action === "encryption") this.button(s, t("health.enterPassphrase"), () => p.openEncryption(() => p.sync("manual")), true);
 		}
 
 		// ---- pending ----
-		const pend = this.section("Pending", "clock");
+		const pend = this.section(t("health.pending"), "clock");
 		const edited = p.pendingLocalCount();
-		pend.createDiv({ text: edited ? `${edited} file${edited === 1 ? "" : "s"} edited on this device since the last sync` : "No local edits waiting" });
-		if (this.remoteInfo?.ahead) pend.createDiv({ text: "GitHub has newer changes from another device", cls: "vsg-h-accent" });
-		else if (this.remoteInfo?.ahead === false) pend.createDiv({ text: "Nothing new on GitHub", cls: "vsg-muted" });
-		else if (this.loadingRemote) pend.createDiv({ text: "Checking GitHub…", cls: "vsg-muted" });
+		pend.createDiv({ text: edited ? t("health.editedN", { n: edited }) : t("health.noEdits") });
+		if (this.remoteInfo?.ahead) pend.createDiv({ text: t("health.remoteAhead"), cls: "vsg-h-accent" });
+		else if (this.remoteInfo?.ahead === false) pend.createDiv({ text: t("health.remoteSame"), cls: "vsg-muted" });
+		else if (this.loadingRemote) pend.createDiv({ text: t("health.checking"), cls: "vsg-muted" });
 		const ds = p.deviceScope();
 		if (ds.include.length || ds.exclude.length || ds.maxDownloadMB) {
 			const bits = [ds.include.length && `only ${ds.include.join(", ")}`, ds.exclude.length && `excluding ${ds.exclude.join(", ")}`, ds.maxDownloadMB && `no downloads over ${ds.maxDownloadMB} MB`].filter(Boolean);
 			pend.createDiv({ cls: "vsg-muted", text: `This device syncs ${bits.join("; ")}.` });
 		}
 		const next = p.nextScheduledSync();
-		pend.createDiv({ cls: "vsg-muted", text: next ? `Next scheduled sync ${new Date(next).toLocaleTimeString()}` : "No periodic sync scheduled" });
+		pend.createDiv({ cls: "vsg-muted", text: next ? t("health.nextSync", { time: new Date(next).toLocaleTimeString() }) : t("health.noSchedule") });
+
+		// ---- shared folders ----
+		const shared = p.sharedHostsCached();
+		if (shared.length) {
+			const s = this.section(t("health.shared"), "folder-sync");
+			for (const h of shared) {
+				const row = s.createDiv({ cls: "vsg-h-row" });
+				row.createDiv({ text: `${h.def.folder} → ${h.def.owner}/${h.def.repo}`, cls: "vsg-h-path" });
+				const status = !h.activeOnThisDevice() ? "not synced on this device" : h.lastError ? `⚠ ${h.lastError}` : h.lastSync ? `synced ${ago(h.lastSync)}` : `synced ${ago(h.state.lastSync)}`;
+				row.createDiv({ cls: h.lastError ? "vsg-h-accent" : "vsg-muted", text: status });
+			}
+		}
 
 		// ---- conflict copies ----
 		const copies = p.conflictCopies();
 		if (copies.length) {
-			const s = this.section(`Conflict copies (${copies.length})`, "git-merge");
-			s.createDiv({ cls: "vsg-muted", text: "Both versions were kept. Compare them, keep what you need, then delete the copy." });
+			const s = this.section(t("health.conflicts", { n: copies.length }), "git-merge");
+			s.createDiv({ cls: "vsg-muted", text: t("health.conflictsHint") });
 			for (const { copy, original } of copies) {
 				const row = s.createDiv({ cls: "vsg-h-row" });
 				row.createDiv({ text: copy.path, cls: "vsg-h-path" });
 				const b = row.createDiv({ cls: "vsg-h-row-actions" });
-				if (original) this.button(b, "Compare", () => p.compareFiles(original, copy));
-				this.button(b, "Open", () => void this.app.workspace.getLeaf(true).openFile(copy));
-				this.button(b, "Delete copy", async () => {
+				if (original) this.button(b, t("health.compare"), () => p.compareFiles(original, copy));
+				this.button(b, t("health.open"), () => void this.app.workspace.getLeaf(true).openFile(copy));
+				this.button(b, t("health.deleteCopy"), async () => {
 					await p.trashFile(copy);
 					this.refresh();
 				});
@@ -189,35 +202,35 @@ export class HealthView extends ItemView {
 		// ---- skipped ----
 		const skipped = p.lastReport?.skipped ?? [];
 		if (skipped.length) {
-			const s = this.section(`Skipped in last sync (${skipped.length})`, "eye-off");
+			const s = this.section(t("health.skipped", { n: skipped.length }), "eye-off");
 			const ul = s.createEl("ul", { cls: "vsg-list" });
 			for (const x of skipped.slice(0, 50)) ul.createEl("li", { text: x });
 		}
 
 		// ---- devices ----
 		if (this.remoteInfo?.devices.length) {
-			const s = this.section("Devices", "monitor-smartphone");
+			const s = this.section(t("health.devices"), "monitor-smartphone");
 			for (const [name, ts] of this.remoteInfo.devices) {
 				const row = s.createDiv({ cls: "vsg-h-row" });
-				row.createDiv({ text: name + (name === p.deviceName() ? " (this device)" : "") });
-				row.createDiv({ cls: "vsg-muted", text: `last synced ${ago(ts)}` });
+				row.createDiv({ text: name + (name === p.deviceName() ? ` ${t("health.thisDevice")}` : "") });
+				row.createDiv({ cls: "vsg-muted", text: t("health.lastSynced", { ago: ago(ts) }) });
 			}
 		}
 
 		// ---- GitHub ----
-		const gh = this.section("GitHub", "github");
+		const gh = this.section(p.hostLabel(), "server");
 		gh.createDiv({ cls: "vsg-muted", text: `API budget: ${this.remoteInfo?.budget ?? "…"}` });
 		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: `Could not check GitHub: ${this.remoteInfo.error}` });
 
 		// ---- tools ----
-		const tools = this.section("Tools", "wrench");
-		const t = tools.createDiv({ cls: "vsg-h-actions" });
-		this.button(t, "Timeline & restore", () => p.openTimeline());
-		this.button(t, "Snapshot now", () => p.snapshot(true));
-		this.button(t, "Make this device match GitHub", () => p.resetToGitHub());
-		this.button(t, "Free up space", () => p.freeUpSpace());
-		this.button(t, "Setup wizard", () => p.openWizard());
-		this.button(t, "Sync log", () => p.openLog());
-		this.button(t, "Settings", () => p.openSettings());
+		const tools = this.section(t("health.tools"), "wrench");
+		const tl = tools.createDiv({ cls: "vsg-h-actions" });
+		this.button(tl, t("health.timeline"), () => p.openTimeline());
+		this.button(tl, t("health.snapshot"), () => p.snapshot(true));
+		this.button(tl, t("health.reset"), () => p.resetToGitHub());
+		this.button(tl, t("health.freeSpace"), () => p.freeUpSpace());
+		this.button(tl, t("health.wizard"), () => p.openWizard());
+		this.button(tl, t("health.log"), () => p.openLog());
+		this.button(tl, t("health.settings"), () => p.openSettings());
 	}
 }
