@@ -1,16 +1,22 @@
 # Vault Sync for GitHub
 
-Sync and back up an Obsidian vault across **desktop and mobile** (Windows, macOS, Linux, iOS, Android) using a private GitHub repository.
+Sync and back up an Obsidian vault across **desktop and mobile** (Windows, macOS, Linux, iOS, Android) using a private Git repository on **GitHub**, **GitLab** (beta) or **Gitea / Forgejo / Codeberg** (beta), optionally **end-to-end encrypted**.
 
 - **No dependencies.** No git install, no `.git` folder, no native code. It talks to the GitHub API through Obsidian's own network layer, so it behaves the same on every device.
 - **Real merging.** If two devices edit different parts of the same note, the changes are merged line by line. If they edit the same lines, both versions are kept (or you choose).
 - **Safe by default.** Edits always win over deletions, deleted files go to the trash, and a delete guard stops accidental mass deletions.
 - **Backups built in.** Every sync is one commit, so the full history lives on GitHub. Per-file version history and restore, recovery of deleted files, and manual or daily snapshot tags.
+- **Private by design (v0.4).** Optional end-to-end encryption: the host only ever stores unreadable data, including file names. Tokens are kept in Obsidian's secure storage.
+- **Understands your vault (v0.3).** Renames travel as renames, canvases and frontmatter merge by structure, each device can sync only what it needs, and a setup wizard gets a new device running in a minute.
 - **See before you sync (v0.2).** Visual diffs everywhere, review-and-pick before syncing, change-by-change conflict resolution, a sync health panel, and point-in-time restore of the whole vault or one folder.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for the comparison with existing plugins and the gaps this one closes.
 
 ## Setup (once per device)
+
+The quickest way is the **setup wizard**. It opens automatically on first launch, or run **Setup wizard** from settings or the command palette. It connects your account, lets you pick or create a private repository, asks whether this device should upload, download or merge, and runs the first sync with progress.
+
+Manual setup:
 
 1. Create a **private** repository on GitHub, or use **Create private repo** in the settings.
 2. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
@@ -47,6 +53,36 @@ The token is stored only on the device (local storage). It is never written to `
 | Visibility | Status bar (desktop), spinning ribbon icon, sync log, **Preview sync (dry run)** |
 | Other | GitHub Enterprise (custom API URL), commit message template, device names |
 
+## New in v0.4
+
+- **End-to-end encryption** (Settings → *End-to-end encryption*, or in the setup wizard).
+  - What gets encrypted: content and file names, on your device, before upload. Files are encrypted with AES-256-GCM, the key comes from your passphrase through PBKDF2-SHA256 with 600,000 iterations, and names become opaque paths.
+  - What keeps working: change detection, merges, rename detection, history, restore and the timeline all work on the encrypted repository.
+  - Joining from another device: other devices unlock with the same passphrase. A device without it is refused instead of downloading gibberish, and so is a device with a different passphrase.
+  - Moving an existing repository to encryption: *Remove unencrypted copies* deletes the old plain files in one commit. Their history still contains them, so for full privacy start with a new, empty repository.
+  - **There is no passphrase recovery.** Keep it in a password manager.
+- **GitLab and Gitea / Forgejo / Codeberg** support (beta). Choose the host in the wizard or settings, with host-specific token instructions. Commits use GitLab's Commits API and Gitea's multi-file ChangeFiles API, so every sync is still one commit (very large uploads are split into parts).
+- **Safer tokens.**
+  - Tokens are stored in Obsidian's SecretStorage (1.11.4+), with a fallback to device-local storage on older versions.
+  - The GitHub token link prefills name, expiry and `contents=write`.
+  - "Sign in with GitHub" (GitHub App device flow) has been researched and planned: see [docs/AUTH.md](docs/AUTH.md).
+
+## New in v0.3
+
+- **Rename and move detection.** A note renamed or moved on another device is renamed here: nothing is downloaded again, and open tabs and bookmarks follow it. If you rename a note on one device while editing it on another, the edit lands under the new name instead of creating a duplicate. Moving a whole folder no longer trips the delete guard. Commit messages say "N renamed".
+- **Structure-aware merging.**
+  - `.canvas` and JSON files merge card by card and setting by setting. Text inside a card merges line by line.
+  - In Markdown, frontmatter merges key by key, and lists such as `tags` and `aliases` merge as sets. Adding tag A on your phone and tag B on your laptop gives you both.
+  - The note body still uses the line-by-line merge. Anything ambiguous is kept as both versions.
+- **Per-device scope** (Settings → *This device only*, stored on the device and not synced):
+  - sync only some folders (for example `Daily/` on your phone)
+  - exclude more patterns
+  - don't download attachments larger than N MB
+  - **Free up space**: removes local copies this device doesn't need, but only when they are identical to the copy on GitHub.
+
+  Files outside a device's scope are never uploaded, downloaded or deleted from that device.
+- **Setup wizard** with a searchable repository picker, a "create a private repo" button, an upload / download / merge choice for the first sync, and live progress.
+
 ## New in v0.2
 
 - **Visual diff viewer.** Side by side on desktop, single column on mobile, with line numbers and collapsible unchanged lines. Shown in review, version history ("Compare with current"), conflicts, and the new **Compare with GitHub** command and file-menu item.
@@ -67,7 +103,7 @@ The token is stored only on the device (local storage). It is never written to `
 
 ## Commands
 
-Sync now · Review changes and sync · Open sync status panel · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Timeline: restore vault or folder to an earlier point · Make this device match GitHub · Create backup snapshot on GitHub · Show sync log · Show history of current file · Compare current file with GitHub · Recover deleted files · Open repository on GitHub
+Sync now · Review changes and sync · Open sync status panel · Run setup wizard · End-to-end encryption: turn on or unlock · Free up space on this device · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Timeline: restore vault or folder to an earlier point · Make this device match GitHub · Create backup snapshot on GitHub · Show sync log · Show history of current file · Compare current file with GitHub · Recover deleted files · Open repository on GitHub
 
 ## Install
 
@@ -80,8 +116,8 @@ Sync now · Review changes and sync · Open sync status panel · Pull from GitHu
 ```bash
 npm install
 npm run dev      # watch build
-npm test         # unit tests + two-device simulation against an in-memory GitHub (45 tests)
-VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API (11 tests)
+npm test         # unit tests + two-device simulation against an in-memory GitHub (86 tests, including fake GitLab and Gitea servers)
+VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API (13 tests, including encrypted sync)
 npm run build    # type-check + production bundle
 ```
 
@@ -93,6 +129,13 @@ Source layout: `src/sync.ts` (engine), `src/plan.ts` (three-way decisions), `src
 - Use a fine-grained token scoped to the vault repo only. If it leaks, the damage is limited to that one repo.
 - With **settings-folder sync** on, plugin code (`.obsidian/plugins/*/main.js`) syncs too. Anyone who can push to the repo can then run code on your devices. Keep the repo private and don't give others write access.
 - Remote paths are validated (no `..`, no absolute paths, no empty segments) before anything is written.
+
+## Host notes
+
+- **GitHub:** fully supported. Every sync is one atomic commit with fast-forward-only updates.
+- **Gitea / Forgejo (1.20+), Codeberg:** beta. Atomic multi-file commits with per-file optimistic locking.
+- **GitLab:** beta. Atomic multi-file commits. If two devices push the *same* file within the same instant, the later commit can win at the branch head; the earlier version stays in history.
+- Snapshots are tags on every host. The API budget is shown for GitHub only.
 
 ## Limits
 

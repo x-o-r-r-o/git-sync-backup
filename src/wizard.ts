@@ -2,15 +2,16 @@
 // then run the first sync with live progress.
 
 import { App, Modal, Notice, Platform, Setting } from "obsidian";
-import { pollDeviceFlow, startDeviceFlow } from "./auth.ts";
+import { HOSTS } from "./hosts.ts";
+import type { HostKind } from "./hosts.ts";
+import { createEncryption, passphraseStrength } from "./crypto.ts";
+import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { errMsg } from "./util.ts";
 
 type Step = "connect" | "repo" | "vault" | "syncing" | "done";
 type FirstSync = "upload" | "download" | "merge" | "prefer-local";
 
-const FINE_GRAINED_URL = "https://github.com/settings/personal-access-tokens/new";
-const CLASSIC_URL = "https://github.com/settings/tokens/new?scopes=repo&description=Obsidian%20Vault%20Sync";
 
 export class SetupWizard extends Modal {
 	private step: Step = "connect";
@@ -58,7 +59,25 @@ export class SetupWizard extends Modal {
 	// ---------- 1. connect ----------
 	private renderConnect() {
 		const p = this.plugin;
-		this.header(1, "Set up GitHub sync", "Your notes are stored in a private GitHub repository you own. Works on desktop and mobile; nothing to install.");
+		this.header(1, "Set up vault sync", "Your notes are stored in a private git repository you own. Works on desktop and mobile; nothing to install.");
+
+		new Setting(this.contentEl)
+			.setName("Where should your vault live?")
+			.addDropdown((d) => {
+				for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? " (beta)" : ""));
+				d.setValue(p.settings.provider).onChange(async (v) => {
+					p.settings.provider = v as HostKind;
+					await p.saveSettings();
+					this.render();
+				});
+			});
+		const host = HOSTS[p.settings.provider];
+		if (p.settings.provider !== "github") {
+			new Setting(this.contentEl)
+				.setName("Server API URL")
+				.setDesc(host.apiHint)
+				.addText((t) => t.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi)));
+		}
 
 		new Setting(this.contentEl)
 			.setName("Name this device")
@@ -83,46 +102,15 @@ export class SetupWizard extends Modal {
 				.addButton((b) => b.setButtonText("Continue").setCta().onClick(() => done(p.getToken())));
 		}
 
-		const clientId = p.settings.oauthClientId.trim();
-		if (clientId) {
-			new Setting(this.contentEl)
-				.setName("Sign in with GitHub")
-				.setDesc("Approve access in your browser. Easiest option.")
-				.addButton((b) =>
-					b
-						.setButtonText("Sign in with GitHub")
-						.setCta()
-						.onClick(async () => {
-							try {
-								const code = await startDeviceFlow(p.getApiBase(), clientId);
-								status.empty();
-								status.createEl("p", { text: "Enter this code on GitHub:" });
-								const codeEl = status.createDiv({ cls: "vsg-wz-code", text: code.user_code });
-								codeEl.onClickEvent(() => navigator.clipboard?.writeText(code.user_code).then(() => new Notice("Code copied")));
-								const open = status.createEl("button", { text: "Open GitHub", cls: "mod-cta" });
-								open.onClickEvent(() => window.open(code.verification_uri));
-								status.createEl("p", { text: "Waiting for approval…", cls: "vsg-muted" });
-								window.open(code.verification_uri);
-								void navigator.clipboard?.writeText(code.user_code).catch(() => {});
-								await done(await pollDeviceFlow(p.getApiBase(), clientId, code, () => this.cancelled));
-							} catch (e) {
-								if (!this.cancelled) status.setText(`Sign-in failed: ${errMsg(e)}`);
-							}
-						}),
-				);
-		}
-
 		const tokenBox = this.contentEl.createDiv({ cls: "vsg-wz-token" });
-		tokenBox.createEl("h4", { text: clientId ? "Or paste a token" : "Paste a GitHub token" });
+		tokenBox.createEl("h4", { text: `Connect with a ${host.label.split(" ")[0]} token` });
 		const tips = tokenBox.createEl("ol", { cls: "vsg-muted" });
-		const li1 = tips.createEl("li");
-		li1.appendText("Recommended: ");
-		li1.createEl("a", { text: "create a fine-grained token", href: FINE_GRAINED_URL });
-		li1.appendText(" → Repository access: only your vault repo → Permissions: Contents = Read and write (add Administration = Read and write if you want the wizard to create the repo).");
-		const li2 = tips.createEl("li");
-		li2.appendText("Quicker: ");
-		li2.createEl("a", { text: "a classic token with the repo scope", href: CLASSIC_URL });
-		li2.appendText(" (works for all your repos).");
+		for (const step of host.tokenSteps(p.getApiBase(), this.app.vault.getName())) {
+			const li = tips.createEl("li");
+			li.appendText(step.text + (step.link ? " " : ""));
+			if (step.link) li.createEl("a", { text: step.link.label, href: step.link.href });
+		}
+		tips.createEl("li", { text: "The token is stored securely on this device only, never in synced settings." });
 		let value = "";
 		new Setting(tokenBox)
 			.setName("Token")
@@ -239,6 +227,31 @@ export class SetupWizard extends Modal {
 		}
 		this.contentEl.createEl("p", { cls: "vsg-muted", text: "Nothing is ever deleted on the first sync." });
 
+		// Encryption: unlock an encrypted repo, or offer to encrypt a new one.
+		let encPass = "";
+		let encWanted = false;
+		const marker = await readRemoteMarker(p).catch(() => null);
+		if (marker && !p.isEncrypted()) {
+			const box = this.contentEl.createDiv({ cls: "vsg-h-error" });
+			box.createDiv({ text: "🔒 This repository is end-to-end encrypted. Unlock it to continue." });
+			new Setting(box).addButton((b) => b.setButtonText("Enter passphrase").setCta().onClick(() => new EncryptionModal(this.app, p, () => this.render()).open()));
+		} else if (!marker && !p.isEncrypted() && remoteCount <= 1) {
+			const hint = this.contentEl.createDiv({ cls: "vsg-muted" });
+			new Setting(this.contentEl)
+				.setName("Encrypt end-to-end (optional)")
+				.setDesc("GitHub only sees unreadable data. Every device will need this passphrase, and it can't be recovered.")
+				.addToggle((t) => t.onChange((v) => (encWanted = v)))
+				.addText((t) => {
+					t.inputEl.type = "password";
+					t.setPlaceholder("Passphrase").onChange((v) => {
+						encPass = v;
+						hint.setText(v ? passphraseStrength(v).hint : "");
+					});
+				});
+		} else if (p.isEncrypted()) {
+			this.contentEl.createDiv({ cls: "vsg-muted", text: "🔒 End-to-end encryption is on for this device." });
+		}
+
 		new Setting(this.contentEl)
 			.setName(`Also sync settings, themes and plugins (${this.app.vault.configDir})`)
 			.addToggle((t) =>
@@ -249,7 +262,21 @@ export class SetupWizard extends Modal {
 			);
 		new Setting(this.contentEl)
 			.addButton((b) => b.setButtonText("Back").onClick(() => this.go("repo")))
-			.addButton((b) => b.setButtonText("Start first sync").setCta().onClick(() => this.go("syncing")));
+			.addButton((b) =>
+				b
+					.setButtonText("Start first sync")
+					.setCta()
+					.onClick(async () => {
+						if (marker && !p.isEncrypted()) return void new Notice("Unlock the encrypted repository first.");
+						if (encWanted) {
+							if (!passphraseStrength(encPass).ok) return void new Notice(passphraseStrength(encPass).hint);
+							if (!confirm("Have you saved this passphrase somewhere safe? Without it your notes on GitHub can't be read.")) return;
+							const { meta, master } = await createEncryption(encPass);
+							await p.saveEncryption({ meta, master });
+						}
+						this.go("syncing");
+					}),
+			);
 	}
 
 	// ---------- 4. syncing ----------

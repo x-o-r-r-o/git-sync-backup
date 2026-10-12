@@ -8,7 +8,7 @@ export const HEALTH_VIEW = "vault-sync-health";
 export interface FriendlyError {
 	title: string;
 	hint: string;
-	action: "settings" | "retry" | "none";
+	action: "settings" | "retry" | "none" | "encryption";
 }
 
 /** Turns raw error messages into plain language with a suggested fix. */
@@ -24,6 +24,8 @@ export function friendlyError(msg: string): FriendlyError {
 		return { title: "GitHub was busy", hint: "Another device was syncing at the same moment. Try again.", action: "retry" };
 	if (m.includes("network") || m.includes("failed to fetch") || m.includes("err_") || m.includes("offline") || m.includes("timed out"))
 		return { title: "Can't reach GitHub", hint: "Check your internet connection. Sync will retry automatically.", action: "retry" };
+	if (m.includes("end-to-end encrypted")) return { title: "This vault is encrypted", hint: "Enter the passphrase to sync on this device.", action: "encryption" };
+	if (m.includes("different passphrase")) return { title: "Different encryption key", hint: "The repository was encrypted with another passphrase. Unlock it again.", action: "encryption" };
 	if (m.includes("pull-only")) return { title: "Not available in pull-only mode", hint: "Switch the mode in settings to push changes.", action: "settings" };
 	return { title: "Sync failed", hint: msg, action: "retry" };
 }
@@ -132,7 +134,7 @@ export class HealthView extends ItemView {
 		text.createDiv({ cls: "vsg-h-headline", text: headline });
 		text.createDiv({
 			cls: "vsg-muted",
-			text: `Last sync ${ago(p.state.lastSync)} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? "two-way" : p.settings.mode === "push" ? "backup only" : "pull only"}`,
+			text: `Last sync ${ago(p.state.lastSync)} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? "two-way" : p.settings.mode === "push" ? "backup only" : "pull only"}${p.isEncrypted() ? " · 🔒 end-to-end encrypted" : ""}`,
 		});
 		const acts = el.createDiv({ cls: "vsg-h-actions" });
 		if (!p.isConfigured()) this.button(acts, "Run setup wizard", () => p.openWizard(), true);
@@ -148,6 +150,7 @@ export class HealthView extends ItemView {
 			s.createDiv({ cls: "vsg-muted", text: `${ago(p.lastErrorAt)} · ${p.lastError}` });
 			if (f.action === "settings") this.button(s, "Open settings", () => p.openSettings(), true);
 			if (f.action === "retry") this.button(s, "Try again", () => p.sync("manual"), true);
+			if (f.action === "encryption") this.button(s, "Enter passphrase", () => p.openEncryption(() => p.sync("manual")), true);
 		}
 
 		// ---- pending ----

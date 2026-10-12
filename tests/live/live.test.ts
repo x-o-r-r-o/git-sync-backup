@@ -269,3 +269,34 @@ test("live: renames travel as renames; canvas merges node by node", { skip: !liv
 	await a.sync();
 	assert.deepEqual(JSON.parse(a.fs.text("Board.canvas")!).nodes.map((n: { id: string }) => n.id).sort(), ["1", "2", "3"]);
 });
+
+test("live: end-to-end encrypted sync between two devices", { skip: !live }, async () => {
+	const { Codec } = await import("../../src/codec.ts");
+	const { createEncryption, EncryptionLayer, b64, unb64, MARKER_PATH } = await import("../../src/crypto.ts");
+	const { encryptionGuard } = await import("../../src/encryption.ts");
+	const branch = await freshBranch("e2ee");
+	const { meta, master } = await createEncryption("live test passphrase 123");
+	const layer = await EncryptionLayer.fromMaster(unb64(b64(master)));
+	const mk = (name: string) => {
+		const d = device(name, gh as any, { owner, repo, branch });
+		let rec: any = { meta, master: b64(master) };
+		d.host.codec = () => new Codec([layer]);
+		d.host.checkEncryption = encryptionGuard(() => rec, (r) => (rec = r), async (sha) => JSON.parse(new TextDecoder().decode(await gh.getBlob(sha))));
+		return d;
+	};
+	const a = mk("Mac"), b = mk("iPhone");
+	a.fs.put("Private/Secret plan.md", "launch on friday\n");
+	a.fs.files.set("img/x.png", { data: new Uint8Array(randomBytes(5000)), mtime: 1 });
+	await a.sync();
+	const remote = await remoteFiles(branch);
+	assert.ok(remote.has(MARKER_PATH));
+	for (const p of remote.keys()) assert.ok(!/Secret|plan|x\.png/.test(p), `leaked name ${p}`);
+	await b.sync();
+	assert.equal(b.fs.text("Private/Secret plan.md"), "launch on friday\n");
+	assert.deepEqual(b.fs.files.get("img/x.png")!.data, a.fs.files.get("img/x.png")!.data);
+	assert.equal((await b.sync()).upToDate, true);
+	b.fs.put("Private/Secret plan.md", "launch on friday\nbring snacks\n");
+	await b.sync();
+	await a.sync();
+	assert.equal(a.fs.text("Private/Secret plan.md"), "launch on friday\nbring snacks\n");
+});

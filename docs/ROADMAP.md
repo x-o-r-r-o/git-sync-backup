@@ -40,7 +40,7 @@ We cover 1–3. The plan below targets 4–10 and adds features no git-based plu
 | 6 | **Per-device selective scope**: device-local include/exclude lists, attachments optionally on demand | Gitless #19 and #39; phone storage | M | ✓ |
 | 7 | **Restore vault or folder to a point in time**, plus a "reset to GitHub" option. Timeline of commits and snapshots; always restores as a new forward commit | Obsidian Git #702 | S–M | ✓ |
 | 8 | **Incremental change tracking** from vault events; full rescan only at startup or occasionally; yield to the UI between batches | Fit #400; mobile freeze complaints | S | ✓ |
-| 9 | **Guided setup**: OAuth device flow (GitHub App scoped to one repo), searchable repo picker, "new vs existing vault" step. PAT kept as a fallback | Fit #42, #44, #49; Gitless #42; Git Sync's main selling point | S–M | ✓ |
+| 9 | **Guided setup**: wizard, repo picker and new/existing vault step ✅ v0.3. **Sign in with GitHub** via a *GitHub App + device flow* is planned, not built (see [AUTH.md](AUTH.md)); prefilled fine-grained tokens and SecretStorage shipped in v0.4 | Fit #42, #44, #49; Gitless #42 | S–M | ✓ |
 | 10 | **End-to-end encryption**: AES-GCM per file, encrypted file names and manifest, key from a passphrase; merging happens after decryption | Obsidian Git #690 and git-crypt requests; would be **unique among git plugins** | L | ✓ |
 | 11 | **More hosts**: Gitea/Forgejo (same API shape), GitLab (atomic commits API), later Bitbucket, behind a `RemoteProvider` interface | Fit #2 and #4, Git Sync #1 | M–L | ✓ |
 | 12 | **Large attachments**: Git LFS over HTTPS or a release-assets mode; large attachments remote-only on mobile | Obsidian Git #14 | L | ✓ |
@@ -51,8 +51,8 @@ We cover 1–3. The plan below targets 4–10 and adds features no git-based plu
 ## Suggested releases
 
 - **v0.2 "Trust & visibility":** 1, 2, 3, 7, 8, 14 ✅ shipped 2026-10-12
-- **v0.3 "Correctness":** 4, 5, 6, 9
-- **v0.4 "Unique":** 10 (E2E encryption) and 11 (Gitea and GitLab)
+- **v0.3 "Correctness":** 4, 5, 6, 9 ✅ shipped 2026-10-12
+- **v0.4 "Unique":** 10 (E2E encryption) and 11 (Gitea and GitLab) ✅ shipped 2026-10-12 (GitLab/Gitea beta)
 - **Later:** 12, 13, 15
 
 ## Sources

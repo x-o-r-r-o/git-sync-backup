@@ -1,23 +1,20 @@
 // Minimal GitHub REST client built on Obsidian's requestUrl, which works on desktop and
 // mobile and is not subject to CORS. No git binary, no isomorphic-git.
 
-import { requestUrl } from "obsidian";
+import { arrayBufferToBase64, requestUrl } from "obsidian";
 import type { RequestUrlResponse } from "obsidian";
-import { sleep } from "./util.ts";
+import { webBase } from "./auth.ts";
+import { NotFastForward, RemoteError } from "./remote.ts";
+import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry } from "./remote.ts";
+import { pool, sleep } from "./util.ts";
+
+export type { CommitInfo, TreeEntry } from "./remote.ts";
 
 export interface GitHubConfig {
 	token: string;
 	apiBase: string;
 	owner: string;
 	repo: string;
-}
-
-export interface TreeEntry {
-	path: string;
-	mode: string;
-	type: "blob" | "tree" | "commit";
-	sha: string;
-	size?: number;
 }
 
 export interface NewTreeEntry {
@@ -28,20 +25,13 @@ export interface NewTreeEntry {
 	content?: string;
 }
 
-export interface CommitInfo {
-	sha: string;
-	message: string;
-	date: string;
-	author: string;
-}
+export class GitHubError extends RemoteError {}
 
-export class GitHubError extends Error {
-	status: number;
-	constructor(message: string, status: number) {
-		super(message);
-		this.status = status;
-	}
-}
+// Text up to this size is sent inline in tree requests (saves one API call per file).
+const INLINE_MAX = 400 * 1024;
+const TREE_CHUNK_BYTES = 3 * 1024 * 1024;
+const TREE_CHUNK_ENTRIES = 400;
+const UPLOAD_BATCH = 8;
 
 function header(res: RequestUrlResponse, name: string): string | undefined {
 	const h = res.headers ?? {};
@@ -59,10 +49,70 @@ function safeJson(res: RequestUrlResponse): any {
 
 const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
 
-export class GitHub {
+export class GitHub implements Remote {
+	readonly kind = "github" as const;
+	readonly label = "GitHub";
 	private cfg: () => GitHubConfig;
 	constructor(cfg: () => GitHubConfig) {
 		this.cfg = cfg;
+	}
+
+	gitUrl(): string {
+		const c = this.cfg();
+		return `${webBase(c.apiBase)}/${c.owner}/${c.repo}.git`;
+	}
+
+	authHeader(): string {
+		return `Basic ${btoa(`x-access-token:${this.cfg().token}`)}`;
+	}
+
+	/**
+	 * One atomic commit: blobs → chained trees (bounded memory, bounded request size) → commit →
+	 * fast-forward-only ref update.
+	 */
+	async commit(req: CommitRequest): Promise<CommitResult> {
+		let tree = req.parentTree;
+		let chunk: NewTreeEntry[] = [];
+		let chunkBytes = 0;
+		const blobShas = new Map<string, string>();
+		const flush = async () => {
+			if (!chunk.length) return;
+			tree = await this.createTree(tree, chunk);
+			chunk = [];
+			chunkBytes = 0;
+		};
+		const ups = req.upserts;
+		for (let i = 0; i < ups.length; i += UPLOAD_BATCH) {
+			req.progress?.(Math.min(i + UPLOAD_BATCH, ups.length), ups.length);
+			// Low concurrency for writes: GitHub's secondary rate limit punishes parallel content creation.
+			await pool(ups.slice(i, i + UPLOAD_BATCH), 2, async (u) => {
+				if (u.sha) {
+					chunk.push({ path: u.path, mode: u.mode, type: "blob", sha: u.sha });
+					chunkBytes += 100;
+					return;
+				}
+				const data = await u.load();
+				const text = data.byteLength <= INLINE_MAX ? (u.text?.(data) ?? null) : null;
+				if (text !== null) {
+					chunk.push({ path: u.path, mode: u.mode, type: "blob", content: text });
+					chunkBytes += data.byteLength;
+				} else {
+					const sha = await this.createBlob(arrayBufferToBase64(data));
+					blobShas.set(u.path, sha);
+					chunk.push({ path: u.path, mode: u.mode, type: "blob", sha });
+					chunkBytes += 100;
+				}
+			});
+			if (chunkBytes >= TREE_CHUNK_BYTES || chunk.length >= TREE_CHUNK_ENTRIES) await flush();
+		}
+		for (const p of req.deletes) {
+			chunk.push({ path: p, mode: "100644", type: "blob", sha: null });
+			if (chunk.length >= TREE_CHUNK_ENTRIES) await flush();
+		}
+		await flush();
+		const sha = await this.createCommit(req.message, tree, [req.parent]);
+		if (!(await this.updateRef(req.branch, sha))) throw new NotFastForward();
+		return { sha, fastForward: true, blobShas };
 	}
 
 	private get repoPath(): string {
@@ -211,7 +261,7 @@ export class GitHub {
 	 * How `head` relates to `base`: "ahead" (head contains base), "behind" (head is older),
 	 * "identical", "diverged" (history rewritten), or "missing" (base commit no longer exists).
 	 */
-	async compare(base: string, head: string): Promise<"ahead" | "behind" | "identical" | "diverged" | "missing"> {
+	async compare(base: string, head: string): Promise<Relation> {
 		const res = await this.request("GET", `${this.repoPath}/compare/${base}...${head}?per_page=1`, undefined, {
 			okStatuses: [404],
 		});
@@ -270,7 +320,7 @@ export class GitHub {
 	}
 
 	/** Core API budget. This endpoint does not count against the limit. */
-	async rateLimit(): Promise<{ limit: number; remaining: number; reset: number }> {
+	async rateLimit(): Promise<{ limit: number; remaining: number; reset: number } | null> {
 		return (await this.json("GET", "/rate_limit")).resources.core;
 	}
 

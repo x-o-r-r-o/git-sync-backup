@@ -7,6 +7,7 @@ export type NoticeLevel = "all" | "errors" | "silent";
 // The token, API base URL and device name live in device-local storage instead, so a
 // synced data.json can never redirect a device's token to another server.
 export interface VaultSyncSettings {
+	provider: "github" | "gitlab" | "gitea";
 	owner: string;
 	repo: string;
 	branch: string;
@@ -36,12 +37,11 @@ export interface VaultSyncSettings {
 
 	commitTemplate: string;
 	noticeLevel: NoticeLevel;
-	/** GitHub OAuth App client ID for "Sign in with GitHub" (device flow). Not a secret. */
-	oauthClientId: string;
 	wizardShown: boolean;
 }
 
 export const DEFAULT_SETTINGS: VaultSyncSettings = {
+	provider: "github",
 	owner: "",
 	repo: "",
 	branch: "main",
@@ -81,7 +81,6 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 
 	commitTemplate: "{{device}}: {{summary}}",
 	noticeLevel: "errors",
-	oauthClientId: "",
 	wizardShown: false,
 };
 

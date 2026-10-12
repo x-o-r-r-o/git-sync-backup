@@ -2,7 +2,10 @@
 
 import { arrayBufferToBase64 } from "obsidian";
 import type { App } from "obsidian";
-import type { GitHub, NewTreeEntry } from "./github.ts";
+import { Codec, PLAIN } from "./codec.ts";
+import { MARKER_PATH } from "./crypto.ts";
+import { NotFastForward } from "./remote.ts";
+import type { Remote, Upsert } from "./remote.ts";
 import { compileGlobs } from "./glob.ts";
 import { VaultIO } from "./io.ts";
 import { merge3 } from "./merge.ts";
@@ -25,7 +28,7 @@ export interface SyncHost {
 	app: App;
 	settings: VaultSyncSettings;
 	state: SyncState;
-	gh: GitHub;
+	gh: Remote;
 	stateFilePath: string;
 	deviceName(): string;
 	log(msg: string): void;
@@ -40,6 +43,14 @@ export interface SyncHost {
 	deviceScope?(): DeviceScope;
 	/** Human-readable progress for long syncs. */
 	progress?(text: string): void;
+	/** Path/content transforms (encryption, folder mapping, LFS). Defaults to none. */
+	codec?(): Codec;
+	/**
+	 * Checks this device's encryption setup against the repository's marker file (blob sha or null).
+	 * Throws if the repo is encrypted and this device can't read it. Returns marker JSON to publish
+	 * when this device is the first to encrypt the repository, else null.
+	 */
+	checkEncryption?(markerSha: string | null): Promise<string | null>;
 }
 
 export interface DeviceScope {
@@ -92,12 +103,13 @@ export interface Preview {
 }
 
 export class SyncCancelled extends Error {}
-class NotFastForward extends Error {}
 class StaleRemote extends Error {}
 
 interface RemoteEntry {
 	sha: string;
 	mode: string;
+	/** Path in the repository (differs from the vault path when a codec maps paths). */
+	raw: string;
 }
 
 interface Upload {
@@ -109,11 +121,6 @@ interface Upload {
 	data?: ArrayBuffer;
 }
 
-// Inline text up to this size in tree requests (saves one API call per file).
-const INLINE_MAX = 400 * 1024;
-const TREE_CHUNK_BYTES = 3 * 1024 * 1024;
-const TREE_CHUNK_ENTRIES = 400;
-const UPLOAD_BATCH = 8;
 // The config dir is walked from disk; between full scans do it at most this often.
 const CONFIG_SCAN_MS = 5 * 60_000;
 // Larger text files skip line-ending normalisation.
@@ -129,6 +136,8 @@ export class SyncEngine {
 	private io: VaultIO;
 	private host: SyncHost;
 	private opts: SyncOptions = {};
+	private codec: Codec = PLAIN;
+	private markerToAdd: string | null = null;
 
 	constructor(host: SyncHost) {
 		this.host = host;
@@ -140,7 +149,50 @@ export class SyncEngine {
 	}
 
 	private get repoKey() {
-		return `${this.s.owner}/${this.s.repo}@${this.s.branch}`;
+		// The codec is part of the identity: enabling encryption or a folder mapping starts a fresh,
+		// non-deleting baseline instead of comparing against the wrong representation.
+		return `${this.s.owner}/${this.s.repo}@${this.s.branch}${this.codec.id ? "#" + this.codec.id : ""}`;
+	}
+
+	private loadCodec() {
+		this.codec = this.host.codec?.() ?? PLAIN;
+	}
+
+	/** Repository path of a vault path (for history lookups). */
+	remotePathOf(path: string): Promise<string> {
+		this.loadCodec();
+		return this.codec.encodePath(path);
+	}
+
+	/** Vault path of a repository path, or null if it isn't a file this vault manages. */
+	vaultPathOf(raw: string): Promise<string | null> {
+		this.loadCodec();
+		if (raw === MARKER_PATH) return Promise.resolve(null);
+		return this.codec.transformsPaths ? this.codec.decodePath(raw) : Promise.resolve(raw);
+	}
+
+	/** File content as stored at `ref`, decoded (decrypted) for display or restore. */
+	async readRemoteFile(path: string, ref: string): Promise<ArrayBuffer | null> {
+		this.loadCodec();
+		const data = await this.host.gh.getFileAt(await this.codec.encodePath(path), ref);
+		return data ? this.codec.decode(path, data) : null;
+	}
+
+	/** Decoded file list of a commit: vault path → stored entry. */
+	async filesAt(commit: string, scope = this.buildScope(false)): Promise<Map<string, RemoteEntry & { size: number }>> {
+		this.loadCodec();
+		const out = new Map<string, RemoteEntry & { size: number }>();
+		for (const e of await this.host.gh.listTree(await this.host.gh.getCommitTree(commit))) {
+			if (e.type !== "blob" || (e.mode !== "100644" && e.mode !== "100755")) continue;
+			const p = await this.vaultPathOf(e.path);
+			if (p === null || !safePath(p) || !scope(p)) continue;
+			out.set(p, { sha: e.sha, mode: e.mode, raw: e.path, size: e.size ?? 0 });
+		}
+		return out;
+	}
+
+	private async blob(path: string, sha: string): Promise<ArrayBuffer> {
+		return this.codec.decode(path, await this.host.gh.getBlob(sha));
 	}
 
 	/** Which paths this plugin manages. With `device` (default) the device-local scope applies too. */
@@ -163,6 +215,7 @@ export class SyncEngine {
 
 	/** Dry run: what would happen, without touching anything. */
 	async preview(mode: SyncMode): Promise<Preview> {
+		this.loadCodec();
 		const ctx = await this.gather(false, {}, true);
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
 		const decisions = detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas);
@@ -195,6 +248,12 @@ export class SyncEngine {
 		return this.io.read(path);
 	}
 
+	/** Decoded content of a remote blob of `path` (for diffs). */
+	readBlob(path: string, sha: string): Promise<ArrayBuffer> {
+		this.loadCodec();
+		return this.blob(path, sha);
+	}
+
 	async run(mode: SyncMode, opts: SyncOptions = {}): Promise<SyncReport> {
 		for (let attempt = 0; ; attempt++) {
 			try {
@@ -222,7 +281,7 @@ export class SyncEngine {
 		const text = asText(path, data);
 		if (text === null) return undefined;
 		if (!text.includes("\r\n")) return sha;
-		return gitBlobSha(encodeText(text.replace(/\r\n/g, "\n")));
+		return this.codec.storedSha(path, encodeText(text.replace(/\r\n/g, "\n")));
 	}
 
 	private async gather(initIfEmpty: boolean, opts: SyncOptions = {}, readOnly = false) {
@@ -271,7 +330,7 @@ export class SyncEngine {
 				continue;
 			}
 			const data = await this.io.read(f.path);
-			const h = await gitBlobSha(data);
+			const h = await this.codec.storedSha(f.path, data);
 			const n = await this.normHash(f.path, data, h);
 			cacheNext[f.path] = n ? { m: f.mtime, s: f.size, h, n } : { m: f.mtime, s: f.size, h };
 			localShas.set(f.path, h);
@@ -331,13 +390,19 @@ export class SyncEngine {
 		const remote = new Map<string, RemoteEntry>();
 		const remoteShas = new Map<string, string>();
 		let treeSha: string | null = null;
+		let markerSha: string | null = null;
 		if (head) {
 			treeSha = await this.host.gh.getCommitTree(head);
 			const deviceMax = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
 			const lowerLocal = new Map([...localShas.keys()].map((p) => [p.toLowerCase(), p]));
 			const seenLower = new Set<string>();
-			for (const e of await this.host.gh.listTree(treeSha)) {
-				if (e.type !== "blob" || (e.mode !== "100644" && e.mode !== "100755")) continue;
+			for (const raw of await this.host.gh.listTree(treeSha)) {
+				if (raw.path === MARKER_PATH) markerSha = raw.sha;
+				if (raw.type !== "blob" || (raw.mode !== "100644" && raw.mode !== "100755")) continue;
+				// Map the repository path back to a vault path (decrypt names, strip folder prefix).
+				const vp = this.codec.transformsPaths ? await this.codec.decodePath(raw.path) : raw.path;
+				if (vp === null) continue;
+				const e = { ...raw, path: vp };
 				if (!baseScope(e.path)) continue;
 				if (!safePath(e.path)) {
 					skipped.push(`${e.path} (unsafe path)`);
@@ -358,10 +423,13 @@ export class SyncEngine {
 					continue;
 				}
 				seenLower.add(lower);
-				remote.set(e.path, { sha: e.sha, mode: e.mode });
+				remote.set(e.path, { sha: e.sha, mode: e.mode, raw: raw.path });
 				remoteShas.set(e.path, e.sha);
 			}
 		}
+		// Encryption: refuse to read an encrypted repo without the key, or to mix keys.
+		if (this.host.checkEncryption && !readOnly) this.markerToAdd = await this.host.checkEncryption(head ? markerSha : null);
+		else if (this.host.checkEncryption) await this.host.checkEncryption(head ? markerSha : null);
 		for (const p of skipPaths) {
 			localShas.delete(p);
 			remoteShas.delete(p);
@@ -391,6 +459,8 @@ export class SyncEngine {
 		const host = this.host;
 		const state = host.state;
 		this.opts = opts;
+		this.loadCodec();
+		this.markerToAdd = null;
 		const report: SyncReport = {
 			mode,
 			upToDate: false,
@@ -420,6 +490,7 @@ export class SyncEngine {
 		}
 
 		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
+		state.dirty = false;
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
 		let decisions = detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas);
 
@@ -457,7 +528,7 @@ export class SyncEngine {
 			cacheNext[path] = n ? { m: st.mtime, s: st.size, h: sha, n } : { m: st.mtime, s: st.size, h: sha };
 		};
 		const queueUpload = async (path: string, data?: ArrayBuffer, sha?: string) => {
-			const hash = sha ?? (data ? await gitBlobSha(data) : await gitBlobSha(await this.io.read(path)));
+			const hash = sha ?? (await this.codec.storedSha(path, data ?? (await this.io.read(path))));
 			uploads.push({ path, data, sha: hash, mode: remote.get(path)?.mode ?? "100644" });
 		};
 		const fail = (path: string, e: unknown) => {
@@ -477,7 +548,7 @@ export class SyncEngine {
 					case "move-local": {
 						if (!(await this.io.stat(d.from))) {
 							// The old file vanished meanwhile: fall back to a plain download.
-							const data = await host.gh.getBlob(d.sha);
+							const data = await this.blob(d.path, d.sha);
 							await this.io.write(d.path, data);
 							await recordWrite(d.path, d.sha, data);
 						} else {
@@ -494,7 +565,7 @@ export class SyncEngine {
 						break;
 					}
 					case "adopt-remote-edit": {
-						const data = await host.gh.getBlob(d.sha);
+						const data = await this.blob(d.path, d.sha);
 						await this.io.write(d.path, data);
 						await recordWrite(d.path, d.sha, data);
 						await queueUpload(d.path, data, d.sha);
@@ -505,7 +576,7 @@ export class SyncEngine {
 						break;
 					}
 					case "download": {
-						const data = await host.gh.getBlob(d.sha);
+						const data = await this.blob(d.path, d.sha);
 						await this.io.write(d.path, data);
 						await recordWrite(d.path, d.sha, data);
 						next[d.path] = d.sha;
@@ -556,7 +627,10 @@ export class SyncEngine {
 		}
 		let newHead = ctx.head;
 		if (mode !== "pull" && (uploads.length || remoteDeletes.length) && ctx.head && ctx.treeSha) {
-			newHead = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, device, renames);
+			const pushed = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, remote, device, renames);
+			newHead = pushed.sha;
+			// If the host merged us onto a newer head, our baseline is incomplete: compare fully next time.
+			if (!pushed.fastForward) state.dirty = true;
 			report.commit = newHead;
 			const renamedTargets = new Set(renames.map((r) => r.split(" → ")[1]));
 			const renamedSources = new Set(renames.map((r) => r.split(" → ")[0]));
@@ -582,7 +656,7 @@ export class SyncEngine {
 		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
 		state.lastSync = Date.now();
-		state.dirty = report.errors.length > 0;
+		state.dirty = state.dirty || report.errors.length > 0;
 		await host.saveState();
 		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
@@ -599,7 +673,7 @@ export class SyncEngine {
 	): Promise<void> {
 		const host = this.host;
 		const localData = await this.io.read(d.path);
-		const remoteData = await host.gh.getBlob(d.remote);
+		const remoteData = await this.blob(d.path, d.remote);
 		const localText = asText(d.path, localData);
 		const remoteText = asText(d.path, remoteData);
 
@@ -625,11 +699,11 @@ export class SyncEngine {
 
 		// Structure-aware merge first (canvas/JSON by key and id, Markdown frontmatter by key).
 		if (d.base && localText !== null && remoteText !== null && this.s.conflictStrategy !== "local" && this.s.conflictStrategy !== "remote") {
-			const b = asText(d.path, await host.gh.getBlob(d.base));
+			const b = asText(d.path, await this.blob(d.path, d.base));
 			const smart = b === null ? null : smartMerge(d.path, b, localText, remoteText, { local: `this device (${device})`, remote: "GitHub" });
 			if (smart?.clean) {
 				const merged = encodeText(smart.text);
-				const sha = await gitBlobSha(merged);
+				const sha = await this.codec.storedSha(d.path, merged);
 				await this.io.write(d.path, merged);
 				await recordWrite(d.path, sha, merged);
 				await queueUpload(d.path, merged, sha);
@@ -651,7 +725,7 @@ export class SyncEngine {
 			if (typeof choice === "object") {
 				// Hand-picked result from the per-change conflict view.
 				const merged = encodeText(choice.custom);
-				const sha = await gitBlobSha(merged);
+				const sha = await this.codec.storedSha(d.path, merged);
 				await this.io.write(d.path, merged);
 				await recordWrite(d.path, sha, merged);
 				await queueUpload(d.path, merged, sha);
@@ -679,7 +753,7 @@ export class SyncEngine {
 				if (!d.base && strategy === "auto") return keepBoth(true);
 				let baseText = "";
 				if (d.base) {
-					const b = asText(d.path, await host.gh.getBlob(d.base));
+					const b = asText(d.path, await this.blob(d.path, d.base));
 					if (b === null) return keepBoth(true);
 					baseText = b;
 				}
@@ -687,7 +761,7 @@ export class SyncEngine {
 				if (!res || (!res.clean && strategy === "auto")) return keepBoth(true);
 				const merged = encodeText(res.text);
 				await this.io.write(d.path, merged);
-				await recordWrite(d.path, await gitBlobSha(merged), merged);
+				await recordWrite(d.path, await this.codec.storedSha(d.path, merged), merged);
 				await queueUpload(d.path, merged);
 				report.merged.push(d.path);
 				host.log(
@@ -700,49 +774,81 @@ export class SyncEngine {
 		}
 	}
 
-	private async push(head: string, baseTree: string, uploads: Upload[], deletes: string[], device: string, renames: string[] = []): Promise<string> {
-		const gh = this.host.gh;
-		// Trees are built in chained chunks (each based on the previous one), so memory stays
-		// bounded to roughly one chunk and no single request gets too large.
-		let tree = baseTree;
-		let chunk: NewTreeEntry[] = [];
-		let chunkBytes = 0;
-		const flush = async () => {
-			if (!chunk.length) return;
-			tree = await gh.createTree(tree, chunk);
-			chunk = [];
-			chunkBytes = 0;
-		};
-
-		for (let i = 0; i < uploads.length; i += UPLOAD_BATCH) {
-			this.host.progress?.(`Uploading ${Math.min(i + UPLOAD_BATCH, uploads.length)}/${uploads.length}`);
-			// Low concurrency for writes: GitHub's secondary rate limit punishes parallel content creation.
-			await pool(uploads.slice(i, i + UPLOAD_BATCH), 2, async (u) => {
-				const data = u.data ?? (await this.io.read(u.path));
-				u.data = undefined;
-				u.sha = await gitBlobSha(data);
-				const text = data.byteLength <= INLINE_MAX ? asText(u.path, data) : null;
-				if (text !== null) {
-					chunk.push({ path: u.path, mode: u.mode, type: "blob", content: text });
-					chunkBytes += data.byteLength;
-				} else {
-					const sha = await gh.createBlob(arrayBufferToBase64(data));
-					chunk.push({ path: u.path, mode: u.mode, type: "blob", sha });
-					chunkBytes += 100;
-				}
+	private async push(
+		head: string,
+		baseTree: string,
+		uploads: Upload[],
+		deletes: string[],
+		remote: Map<string, RemoteEntry>,
+		device: string,
+		renames: string[] = [],
+	): Promise<{ sha: string; fastForward: boolean }> {
+		const codec = this.codec;
+		const upserts: Upsert[] = [];
+		for (const u of uploads) {
+			upserts.push({
+				path: remote.get(u.path)?.raw ?? (await codec.encodePath(u.path)),
+				mode: u.mode,
+				load: async () => {
+					// Read late (bounded memory) and record the sha of exactly what was sent.
+					const plain = u.data ?? (await this.io.read(u.path));
+					u.data = undefined;
+					const stored = await codec.encode(u.path, plain);
+					u.sha = await gitBlobSha(stored);
+					return stored;
+				},
+				text: codec.transformsContent ? undefined : (b) => asText(u.path, b),
 			});
-			if (chunkBytes >= TREE_CHUNK_BYTES || chunk.length >= TREE_CHUNK_ENTRIES) await flush();
 		}
-		for (const p of deletes) {
-			chunk.push({ path: p, mode: "100644", type: "blob", sha: null });
-			if (chunk.length >= TREE_CHUNK_ENTRIES) await flush();
+		if (this.markerToAdd) {
+			const content = this.markerToAdd;
+			upserts.push({ path: MARKER_PATH, mode: "100644", load: async () => encodeText(content), text: () => content });
 		}
-		await flush();
+		const rawDeletes: string[] = [];
+		for (const p of deletes) rawDeletes.push(remote.get(p)?.raw ?? (await codec.encodePath(p)));
 
-		const commit = await gh.createCommit(this.commitMessage(uploads, deletes, device, renames), tree, [head]);
-		if (!(await gh.updateRef(this.s.branch, commit))) throw new NotFastForward();
-		this.host.log(`Pushed commit ${commit.slice(0, 7)} (${uploads.length} changed, ${deletes.length} deleted).`);
-		return commit;
+		const res = await this.host.gh.commit({
+			branch: this.s.branch,
+			parent: head,
+			parentTree: baseTree,
+			message: this.commitMessage(uploads, deletes, device, renames),
+			upserts,
+			deletes: rawDeletes,
+			progress: (done, total) => this.host.progress?.(`Uploading ${done}/${total}`),
+		});
+		this.host.log(`Pushed commit ${res.sha.slice(0, 7)} (${uploads.length} changed, ${deletes.length} deleted).`);
+		return res;
+	}
+
+	/**
+	 * After switching an existing repository to encryption, the old unencrypted files are still there
+	 * (sync ignores them). This deletes them in one commit. Their history keeps old copies.
+	 */
+	async removeUnencryptedFiles(confirm: (files: string[]) => Promise<boolean>): Promise<string[]> {
+		this.loadCodec();
+		if (!this.codec.has("enc:")) throw new Error("Encryption is not enabled on this device.");
+		const gh = this.host.gh;
+		const head = await gh.getRef(this.s.branch);
+		if (!head) return [];
+		const tree = await gh.getCommitTree(head);
+		const foreign: string[] = [];
+		for (const e of await gh.listTree(tree)) {
+			if (e.type !== "blob" || e.path === MARKER_PATH || e.path === ".gitattributes") continue;
+			if ((await this.codec.decodePath(e.path)) === null) foreign.push(e.path);
+		}
+		if (!foreign.length) return [];
+		if (!(await confirm(foreign))) throw new SyncCancelled("Cancelled.");
+		const device = this.host.deviceName();
+		await gh.commit({
+			branch: this.s.branch,
+			parent: head,
+			parentTree: tree,
+			message: `${device}: remove ${foreign.length} unencrypted file(s)\n\nDevice: ${device}`,
+			upserts: [],
+			deletes: foreign,
+		});
+		this.host.log(`Removed ${foreign.length} unencrypted files from the repository.`);
+		return foreign;
 	}
 
 	/**
@@ -754,10 +860,11 @@ export class SyncEngine {
 		const shared = this.buildScope(false);
 		const mine = this.buildScope(true);
 		const max = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
+		this.loadCodec();
 		const head = await this.host.gh.getRef(this.s.branch);
 		if (!head) throw new Error("The branch on GitHub is empty.");
 		const remote = new Map<string, string>();
-		for (const e of await this.host.gh.listTree(await this.host.gh.getCommitTree(head))) if (e.type === "blob") remote.set(e.path, e.sha);
+		for (const [p, e] of await this.filesAt(head, shared)) remote.set(p, e.sha);
 
 		const plan: FreeSpacePlan = { files: [], bytes: 0 };
 		for (const f of this.io.listVault(shared)) {
@@ -765,7 +872,7 @@ export class SyncEngine {
 			const r = remote.get(f.path);
 			if (!r) continue;
 			const c = state.cache[f.path];
-			const h = c && c.m === f.mtime && c.s === f.size ? c.h : await gitBlobSha(await this.io.read(f.path));
+			const h = c && c.m === f.mtime && c.s === f.size ? c.h : await this.codec.storedSha(f.path, await this.io.read(f.path));
 			if (h !== r) continue; // not safely on GitHub: keep it
 			plan.files.push(f.path);
 			plan.bytes += f.size;
@@ -787,6 +894,7 @@ export class SyncEngine {
 	 */
 	async resetToRemote(confirm: (plan: ResetPlan) => Promise<boolean>): Promise<ResetPlan> {
 		const state = this.host.state;
+		this.loadCodec();
 		const ctx = await this.gather(false, {}, true);
 		const head = ctx.upToDate ? state.head : ctx.head;
 		if (!head) throw new Error("The branch on GitHub is empty. Nothing to reset to.");
@@ -805,7 +913,7 @@ export class SyncEngine {
 		const cacheNext = ctx.cacheNext;
 		const write = async (p: string) => {
 			const sha = remoteShas.get(p)!;
-			const data = await this.host.gh.getBlob(sha);
+			const data = await this.blob(p, sha);
 			await this.io.write(p, data);
 			const st = await this.io.stat(p);
 			const n = await this.normHash(p, data, sha);
@@ -844,6 +952,7 @@ export class SyncEngine {
 	 * pulled down to this device.
 	 */
 	async restoreTo(commit: string, folder: string, confirm: (plan: RestorePlan) => Promise<boolean>): Promise<RestorePlan> {
+		this.loadCodec();
 		if (this.s.mode === "pull") throw new Error("Restore needs to push to GitHub, which pull-only mode does not allow.");
 		await this.run(this.s.mode);
 		const gh = this.host.gh;
@@ -852,41 +961,39 @@ export class SyncEngine {
 		// Restores act on GitHub for every device, so they use the shared scope, not this device's.
 		const scope = this.buildScope(false);
 		const prefix = folder.replace(/^\/+|\/+$/g, "");
-		const inScope = (p: string) => scope(p) && safePath(p) && (!prefix || p === prefix || p.startsWith(prefix + "/"));
-		const read = async (tree: string) => {
-			const m = new Map<string, { sha: string; mode: string }>();
-			for (const e of await gh.listTree(tree)) {
-				if (e.type === "blob" && (e.mode === "100644" || e.mode === "100755") && inScope(e.path)) m.set(e.path, { sha: e.sha, mode: e.mode });
-			}
-			return m;
-		};
+		const inScope = (p: string) => scope(p) && (!prefix || p === prefix || p.startsWith(prefix + "/"));
 		const headTree = await gh.getCommitTree(head);
-		const cur = await read(headTree);
-		const tgt = await read(await gh.getCommitTree(commit));
+		const cur = await this.filesAt(head, inScope);
+		const tgt = await this.filesAt(commit, inScope);
 
 		const plan: RestorePlan = { changed: [], added: [], removed: [] };
-		const entries: NewTreeEntry[] = [];
+		const upserts: Upsert[] = [];
+		const deletes: string[] = [];
 		for (const [p, e] of tgt) {
 			const c = cur.get(p);
 			if (!c) plan.added.push(p);
 			else if (c.sha !== e.sha) plan.changed.push(p);
 			else continue;
-			entries.push({ path: p, mode: e.mode, type: "blob", sha: e.sha });
+			// Reuse the old blob as stored (still encrypted if the repo is): no decrypt/re-encrypt.
+			upserts.push({ path: c?.raw ?? e.raw, mode: e.mode, sha: e.sha, load: () => gh.getBlob(e.sha) });
 		}
-		for (const p of cur.keys()) {
+		for (const [p, c] of cur) {
 			if (tgt.has(p)) continue;
 			plan.removed.push(p);
-			entries.push({ path: p, mode: "100644", type: "blob", sha: null });
+			deletes.push(c.raw);
 		}
-		if (!entries.length) return plan;
+		if (!upserts.length && !deletes.length) return plan;
 		if (!(await confirm(plan))) throw new SyncCancelled("Restore cancelled.");
 
-		let tree = headTree;
-		for (let i = 0; i < entries.length; i += TREE_CHUNK_ENTRIES) tree = await gh.createTree(tree, entries.slice(i, i + TREE_CHUNK_ENTRIES));
 		const what = prefix ? `"${prefix}"` : "vault";
 		const message = `${this.host.deviceName()}: restore ${what} to ${commit.slice(0, 7)}\n\n${plan.changed.length} restored, ${plan.added.length} brought back, ${plan.removed.length} removed\n\nDevice: ${this.host.deviceName()}`;
-		const newCommit = await gh.createCommit(message, tree, [head]);
-		if (!(await gh.updateRef(this.s.branch, newCommit))) throw new Error("Another device pushed during the restore. Nothing was changed; please try again.");
+		let newCommit: string;
+		try {
+			newCommit = (await gh.commit({ branch: this.s.branch, parent: head, parentTree: headTree, message, upserts, deletes })).sha;
+		} catch (e) {
+			if (e instanceof NotFastForward) throw new Error("Another device pushed during the restore. Nothing was changed; please try again.");
+			throw e;
+		}
 		this.host.log(`Restored ${what} to ${commit.slice(0, 7)} as commit ${newCommit.slice(0, 7)}.`);
 		await this.run("sync");
 		return plan;

@@ -3,6 +3,8 @@ import type VaultSyncPlugin from "./main.ts";
 import type { ConflictStrategy, NoticeLevel } from "./types.ts";
 import type { SyncMode } from "./plan.ts";
 import { errMsg } from "./util.ts";
+import { HOSTS } from "./hosts.ts";
+import type { HostKind } from "./hosts.ts";
 
 export class VaultSyncSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: VaultSyncPlugin) {
@@ -24,22 +26,34 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			.addButton((b) => b.setButtonText("Run setup wizard").setCta().onClick(() => p.openWizard()));
 
 		// ---------- connection ----------
-		new Setting(containerEl).setName("GitHub connection").setHeading();
-
+		new Setting(containerEl).setName("Connection").setHeading();
+		new Setting(containerEl)
+			.setName("Git host")
+			.setDesc("GitLab and Gitea/Forgejo support is in beta.")
+			.addDropdown((d) => {
+				for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? " (beta)" : ""));
+				d.setValue(s.provider).onChange(async (v) => {
+					s.provider = v as HostKind;
+					await save();
+					this.display();
+				});
+			});
+		const host = HOSTS[s.provider];
 		const tokenDesc = createFragment((f) => {
-			f.appendText("Stored only on this device, never in the synced settings. Recommended: a ");
-			f.createEl("a", { text: "fine-grained token", href: "https://github.com/settings/personal-access-tokens/new" });
-			f.appendText(' limited to your vault repo with "Contents: Read and write". Enter it once per device.');
+			f.appendText("Stored securely on this device only (Obsidian secret storage), never in the synced settings. Enter it once per device. ");
+			const first = host.tokenSteps(p.getApiBase(), this.app.vault.getName())[0];
+			f.appendText(first.text + " ");
+			if (first.link) f.createEl("a", { text: first.link.label, href: first.link.href });
 		});
 		new Setting(containerEl)
 			.setName("Personal access token")
 			.setDesc(tokenDesc)
 			.addText((t) => {
 				t.inputEl.type = "password";
-				t.setPlaceholder("github_pat_…").setValue(p.getToken()).onChange((v) => p.setToken(v.trim()));
+				t.setPlaceholder(s.provider === "github" ? "github_pat_…" : s.provider === "gitlab" ? "glpat-…" : "token").setValue(p.getToken()).onChange((v) => p.setToken(v.trim()));
 			});
 
-		new Setting(containerEl).setName("Owner").setDesc("GitHub user or organisation that owns the repo.").addText((t) =>
+		new Setting(containerEl).setName("Owner").setDesc(s.provider === "gitlab" ? "User or group path (subgroups allowed, e.g. team/notes)." : "User or organisation that owns the repo.").addText((t) =>
 			t.setPlaceholder("your-username").setValue(s.owner).onChange(async (v) => {
 				s.owner = v.trim();
 				await save();
@@ -97,8 +111,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("API base URL")
-			.setDesc("Change only for GitHub Enterprise Server, e.g. https://github.example.com/api/v3. Stored on this device only.")
-			.addText((t) => t.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim())));
+			.setDesc(`${host.apiHint}. Stored on this device only.`)
+			.addText((t) => t.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi)));
 
 		new Setting(containerEl)
 			.setName("Device name")
@@ -188,6 +202,29 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					await save();
 				}),
 			);
+
+		// ---------- encryption ----------
+		new Setting(containerEl).setName("End-to-end encryption").setHeading();
+		if (p.isEncrypted()) {
+			new Setting(containerEl)
+				.setName("Encryption is on (unlocked on this device)")
+				.setDesc("Notes, attachments and file names are encrypted before upload. Other devices need the same passphrase.")
+				.addButton((b) => b.setButtonText("Remove unencrypted copies…").onClick(() => p.removeUnencryptedFiles()))
+				.addButton((b) =>
+					b
+						.setButtonText("Lock this device")
+						.setWarning()
+						.onClick(async () => {
+							await p.lockEncryption();
+							this.display();
+						}),
+				);
+		} else {
+			new Setting(containerEl)
+				.setName("Encrypt your vault")
+				.setDesc("GitHub only ever sees unreadable data. Also use this to unlock a repository that another device already encrypted.")
+				.addButton((b) => b.setButtonText("Turn on or unlock…").onClick(() => p.openEncryption(() => this.display())));
+		}
 
 		// ---------- this device ----------
 		new Setting(containerEl).setName("This device only").setHeading();
@@ -326,15 +363,6 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					await save();
 				}),
 		);
-		new Setting(containerEl)
-			.setName("OAuth client ID")
-			.setDesc("Enables \"Sign in with GitHub\" in the setup wizard: the client ID of a GitHub OAuth App with device flow enabled. Leave empty to use tokens.")
-			.addText((t) =>
-				t.setValue(s.oauthClientId).onChange(async (v) => {
-					s.oauthClientId = v.trim();
-					await save();
-				}),
-			);
 		new Setting(containerEl)
 			.setName("Reset sync state")
 			.setDesc("Forget what was last synced on this device. The next sync compares everything and never deletes; differing files are kept as both versions.")

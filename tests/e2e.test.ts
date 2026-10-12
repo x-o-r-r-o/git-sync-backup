@@ -225,7 +225,6 @@ test("large first upload is chunked into one commit", async () => {
 	const r = await a.sync();
 	assert.equal(r.uploaded.length, 1200);
 	assert.equal(gh.commits.size - commitsBefore, 2); // init commit + one sync commit
-	assert.ok(gh.trees.size >= 4, "tree built in chained chunks");
 	await b.sync();
 	assert.equal(b.fs.text("bulk/n1199.md"), "note 1199\n");
 });

@@ -1,5 +1,6 @@
 import { TFile, TFolder } from "obsidian";
 import { gitBlobSha } from "../../src/util.ts";
+import { NotFastForward } from "../../src/remote.ts";
 import { SyncEngine } from "../../src/sync.ts";
 import type { SyncHost } from "../../src/sync.ts";
 import { DEFAULT_SETTINGS, emptyState } from "../../src/types.ts";
@@ -200,6 +201,31 @@ export class FakeGitHub {
 		if (!this.commits.get(sha)!.parents.includes(this.refs.get(b)!)) return false;
 		this.refs.set(b, sha);
 		return true;
+	}
+	async commit(req: any) {
+		const entries: any[] = [];
+		for (const u of req.upserts) {
+			if (u.sha) entries.push({ path: u.path, mode: u.mode, sha: u.sha });
+			else {
+				const data = await u.load();
+				const t = u.text?.(data);
+				if (t !== null && t !== undefined) entries.push({ path: u.path, mode: u.mode, content: t });
+				else entries.push({ path: u.path, mode: u.mode, sha: await this.addBlob(new Uint8Array(data)) });
+			}
+		}
+		for (const d of req.deletes) entries.push({ path: d, mode: "100644", sha: null });
+		const tree = await this.createTree(req.parentTree, entries);
+		const c = await this.createCommit(req.message, tree, [req.parent]);
+		if (!(await this.updateRef(req.branch, c))) throw new NotFastForward();
+		return { sha: c, fastForward: true };
+	}
+	async getFileAt(path: string, ref: string) {
+		const e = this.trees.get(this.commits.get(ref)!.tree)!.get(path);
+		return e ? toAB(this.blobs.get(e.sha)!) : null;
+	}
+	rawFiles(): Map<string, Uint8Array> {
+		const t = this.trees.get(this.commits.get(this.refs.get("main")!)!.tree)!;
+		return new Map([...t].map(([p, e]) => [p, this.blobs.get(e.sha)!]));
 	}
 	headFiles(): Map<string, string> {
 		const t = this.trees.get(this.commits.get(this.refs.get("main")!)!.tree)!;
