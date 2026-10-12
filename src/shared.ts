@@ -35,7 +35,7 @@ export class SharedFolderHost implements SyncHost {
 			apiBase: plugin.getApiBaseFor(def.provider),
 			owner: def.owner,
 			repo: def.repo,
-		}));
+		}), plugin.blobCacheStore(`shared-${def.id}`));
 		this.engine = new SyncEngine(this);
 	}
 

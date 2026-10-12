@@ -64,7 +64,7 @@ export class RemoteError extends Error {
 }
 
 export interface Remote {
-	readonly kind: "github" | "gitea" | "gitlab";
+	readonly kind: "github" | "gitea" | "gitlab" | "bitbucket";
 	readonly label: string;
 
 	getUser(): Promise<{ login: string }>;

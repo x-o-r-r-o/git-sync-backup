@@ -5,6 +5,7 @@ import { createEncryption, MARKER_PATH, passphraseStrength, unlockEncryption } f
 import type { EncryptionMeta } from "./crypto.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { errMsg } from "./util.ts";
+import { t as tr } from "./i18n.ts";
 
 export async function readRemoteMarker(plugin: VaultSyncPlugin): Promise<EncryptionMeta | null> {
 	const head = await plugin.gh.getRef(plugin.settings.branch);
@@ -20,13 +21,13 @@ export class EncryptionModal extends Modal {
 
 	async onOpen() {
 		const { contentEl } = this;
-		this.titleEl.setText("End-to-end encryption");
-		const status = contentEl.createEl("p", { text: "Checking the repository…", cls: "vsg-muted" });
+		this.titleEl.setText(tr("s.hEncryption"));
+		const status = contentEl.createEl("p", { text: tr("e.checking"), cls: "vsg-muted" });
 		let meta: EncryptionMeta | null = null;
 		try {
 			meta = await readRemoteMarker(this.plugin);
 		} catch (e) {
-			status.setText(`Could not read the repository: ${errMsg(e)}`);
+			status.setText(tr("w.readFailed", { error: errMsg(e) }));
 			return;
 		}
 		status.remove();
@@ -36,11 +37,11 @@ export class EncryptionModal extends Modal {
 
 	private renderUnlock(meta: EncryptionMeta) {
 		const { contentEl } = this;
-		this.titleEl.setText("Unlock encrypted vault");
-		contentEl.createEl("p", { text: "This repository is end-to-end encrypted. Enter its passphrase to sync on this device. The key is kept in this device's secure storage." });
+		this.titleEl.setText(tr("e.unlockTitle"));
+		contentEl.createEl("p", { text: tr("e.unlockBody") });
 		let pass = "";
 		const msg = contentEl.createDiv({ cls: "vsg-muted" });
-		new Setting(contentEl).setName("Passphrase").addText((t) => {
+		new Setting(contentEl).setName(tr("w.passphrase")).addText((t) => {
 			t.inputEl.type = "password";
 			t.onChange((v) => (pass = v));
 			t.inputEl.addEventListener("keydown", (e) => {
@@ -48,58 +49,58 @@ export class EncryptionModal extends Modal {
 			});
 		});
 		const unlock = async () => {
-			msg.setText("Unlocking… (this takes a second on purpose)");
+			msg.setText(tr("e.unlocking"));
 			try {
 				const { master } = await unlockEncryption(pass, meta);
 				await this.plugin.saveEncryption({ meta, master });
-				new Notice("Encrypted vault unlocked on this device.");
+				new Notice(tr("e.unlocked"));
 				this.close();
 				this.done?.();
 			} catch (e) {
 				msg.setText(errMsg(e));
 			}
 		};
-		new Setting(contentEl).addButton((b) => b.setButtonText("Unlock").setCta().onClick(unlock));
+		new Setting(contentEl).addButton((b) => b.setButtonText(tr("e.unlock")).setCta().onClick(unlock));
 	}
 
 	private renderEnable() {
 		const { contentEl } = this;
-		this.titleEl.setText("Turn on end-to-end encryption");
+		this.titleEl.setText(tr("e.enableTitle"));
 		const ul = contentEl.createEl("ul");
-		ul.createEl("li", { text: "Notes, attachments and file names are encrypted on this device before upload. The repository host only stores unreadable data." });
-		ul.createEl("li", { text: "Every device needs the same passphrase. There is no way to recover it: if you forget it, the copy in the repository can't be read." });
-		ul.createEl("li", { text: "If this repository already has unencrypted notes, they remain in its history. For full privacy use a new, empty repository." });
-		ul.createEl("li", { text: "You can't browse the notes on github.com any more; use the plugin's history and timeline instead." });
+		ul.createEl("li", { text: tr("e.point1") });
+		ul.createEl("li", { text: tr("e.point2") });
+		ul.createEl("li", { text: tr("e.point3") });
+		ul.createEl("li", { text: tr("e.point4") });
 		let pass = "";
 		let again = "";
 		let ack = false;
 		const hint = contentEl.createDiv({ cls: "vsg-muted" });
-		new Setting(contentEl).setName("Passphrase").addText((t) => {
+		new Setting(contentEl).setName(tr("w.passphrase")).addText((t) => {
 			t.inputEl.type = "password";
 			t.onChange((v) => {
 				pass = v;
 				hint.setText(passphraseStrength(v).hint);
 			});
 		});
-		new Setting(contentEl).setName("Repeat passphrase").addText((t) => {
+		new Setting(contentEl).setName(tr("e.repeat")).addText((t) => {
 			t.inputEl.type = "password";
 			t.onChange((v) => (again = v));
 		});
-		new Setting(contentEl).setName("I have saved the passphrase somewhere safe, for example in a password manager").addToggle((t) => t.onChange((v) => (ack = v)));
+		new Setting(contentEl).setName(tr("e.ack")).addToggle((t) => t.onChange((v) => (ack = v)));
 		const msg = contentEl.createDiv({ cls: "vsg-muted" });
 		new Setting(contentEl).addButton((b) =>
 			b
-				.setButtonText("Turn on encryption")
+				.setButtonText(tr("e.turnOn"))
 				.setCta()
 				.onClick(async () => {
 					if (!passphraseStrength(pass).ok) return void msg.setText(passphraseStrength(pass).hint);
-					if (pass !== again) return void msg.setText("The passphrases don't match.");
-					if (!ack) return void msg.setText("Please confirm you've saved the passphrase.");
-					msg.setText("Setting up… (this takes a second on purpose)");
+					if (pass !== again) return void msg.setText(tr("e.mismatch"));
+					if (!ack) return void msg.setText(tr("e.confirmSaved"));
+					msg.setText(tr("e.settingUp"));
 					try {
 						const { meta, master } = await createEncryption(pass);
 						await this.plugin.saveEncryption({ meta, master });
-						new Notice("Encryption is on. The next sync uploads everything encrypted.");
+						new Notice(tr("e.enabled"));
 						this.close();
 						this.done?.();
 					} catch (e) {

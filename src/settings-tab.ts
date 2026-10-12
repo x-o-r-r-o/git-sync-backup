@@ -1,424 +1,538 @@
 import { App, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
 import type { ConflictStrategy, NoticeLevel } from "./types.ts";
 import type { SyncMode } from "./plan.ts";
 import { errMsg } from "./util.ts";
 import { HOSTS } from "./hosts.ts";
+import type { HostKind } from "./hosts.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
 import { destructive } from "./ui.ts";
-import type { HostKind } from "./hosts.ts";
+import { t } from "./i18n.ts";
 
 /** Runs `fn` when the field is committed (blur or Enter) instead of on every keystroke. */
-function onCommit(t: TextComponent, fn: (v: string) => Promise<void>): TextComponent {
-	t.inputEl.addEventListener("change", () => void fn(t.getValue()));
-	return t;
+function onCommit(c: TextComponent, fn: (v: string) => Promise<void>): TextComponent {
+	c.inputEl.addEventListener("change", () => void fn(c.getValue()));
+	return c;
 }
 
+interface Item {
+	name: string;
+	desc?: string | DocumentFragment;
+	render: (s: Setting) => unknown;
+	cls?: string;
+	searchable?: boolean;
+}
+
+interface Group {
+	heading?: string;
+	items: Item[];
+}
+
+/**
+ * The settings are described once, as data. `display()` renders them on every Obsidian version, and
+ * `getSettingDefinitions()` exposes the same items to Obsidian 1.13+ so they appear in settings search.
+ */
 export class VaultSyncSettingTab extends PluginSettingTab {
-	constructor(app: App, private plugin: VaultSyncPlugin) {
+	private plugin: VaultSyncPlugin;
+
+	constructor(app: App, plugin: VaultSyncPlugin) {
 		super(app, plugin);
+		this.plugin = plugin;
 	}
 
-	display(): void {
-		const { containerEl } = this;
+	private refresh() {
+		this.display();
+	}
+
+	private groups(): Group[] {
 		const p = this.plugin;
 		const s = p.settings;
-		const save = async () => {
-			await p.saveSettings();
-		};
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName("Setup wizard")
-			.setDesc("Connect, pick or create a repository, and run the first sync step by step.")
-			.addButton((b) => b.setButtonText("Run setup wizard").setCta().onClick(() => p.openWizard()));
-
-		// ---------- connection ----------
-		new Setting(containerEl).setName("Connection").setHeading();
-		new Setting(containerEl)
-			.setName("Git host")
-			.setDesc("Support for hosts other than GitHub is in beta.")
-			.addDropdown((d) => {
-				for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? " (beta)" : ""));
-				d.setValue(s.provider).onChange(async (v) => {
-					s.provider = v as HostKind;
-					await save();
-					this.display();
-				});
-			});
+		const save = () => p.saveSettings();
 		const host = HOSTS[s.provider];
+		const ds = p.deviceScope();
+		const lines = (v: string) => v.split("\n").map((x) => x.trim()).filter(Boolean);
+
+		const toggle = (key: "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot", reschedule = false) => (st: Setting): unknown =>
+			st.addToggle((c) =>
+				c.setValue(s[key]).onChange(async (v) => {
+					s[key] = v;
+					await save();
+					if (reschedule) p.rescheduleTriggers();
+				}),
+			);
+
 		const tokenDesc = createFragment((f) => {
-			f.appendText("Stored securely on this device only (Obsidian secret storage), never in the synced settings. Enter it once per device. ");
+			f.appendText(t("s.tokenDesc") + " ");
 			const first = host.tokenSteps(p.getApiBase(), this.app.vault.getName())[0];
 			f.appendText(first.text + " ");
 			if (first.link) f.createEl("a", { text: first.link.label, href: first.link.href });
 		});
-		new Setting(containerEl)
-			.setName("Personal access token")
-			.setDesc(tokenDesc)
-			.addText((t) => {
-				t.inputEl.type = "password";
-				t.setPlaceholder(s.provider === "github" ? "github_pat_…" : s.provider === "gitlab" ? "glpat-…" : "token").setValue(p.getToken()).onChange((v) => p.setToken(v.trim()));
-			});
 
-		new Setting(containerEl).setName("Owner").setDesc(s.provider === "gitlab" ? "User or group path (subgroups allowed, e.g. team/notes)." : "User or organisation that owns the repo.").addText((t) =>
-			// Saved when you leave the field, so a half-typed name never gets synced to.
-			onCommit(t.setPlaceholder("Username").setValue(s.owner), async (v) => {
-				s.owner = v.trim();
-				await save();
-			}),
-		);
-		new Setting(containerEl).setName("Repository").setDesc("Use a private repository.").addText((t) =>
-			onCommit(t.setPlaceholder("Repository name").setValue(s.repo), async (v) => {
-				s.repo = v.trim();
-				await save();
-			}),
-		);
-		new Setting(containerEl).setName("Branch").addText((t) =>
-			onCommit(t.setValue(s.branch), async (v) => {
-				s.branch = v.trim() || "main";
-				await save();
-			}),
-		);
-
-		new Setting(containerEl)
-			.setName("Check setup")
-			.setDesc("Test the token and repo, or create a new private repository.")
-			.addButton((b) =>
-				b.setButtonText("Test connection").onClick(async () => {
-					try {
-						const user = await p.gh.getUser();
-						if (!s.owner) {
-							s.owner = user.login;
-							await save();
-							this.display();
-						}
-						const repo = s.repo ? await p.gh.getRepo() : null;
-						if (!s.repo) new Notice(`Signed in as ${user.login}. Now set a repository name.`);
-						else if (!repo) new Notice(`Signed in as ${user.login}, but ${s.owner}/${s.repo} was not found or is not accessible.`);
-						else new Notice(`OK: ${s.owner}/${s.repo} (${repo.private ? "private" : "PUBLIC: consider making it private"}).`);
-					} catch (e) {
-						new Notice(`Connection failed: ${errMsg(e)}`);
-					}
-				}),
-			)
-			.addButton((b) =>
-				b.setButtonText("Create private repo").onClick(async () => {
-					try {
-						const user = await p.gh.getUser();
-						if (!s.owner) s.owner = user.login;
-						if (!s.repo) s.repo = this.app.vault.getName().replace(/[^A-Za-z0-9._-]+/g, "-");
-						await save();
-						const repo = await p.gh.createRepo(s.repo, s.owner !== user.login ? s.owner : undefined);
-						new Notice(`Created ${repo.html_url}`);
-						this.display();
-					} catch (e) {
-						new Notice(`Could not create repo: ${errMsg(e)}. Fine-grained tokens need "Administration: write" for this; or create it on github.com.`);
-					}
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("API base URL")
-			.setDesc(`${host.apiHint}. Stored on this device only.`)
-			.addText((t) => t.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi)));
-
-		new Setting(containerEl)
-			.setName("Device name")
-			.setDesc("Shown in commit messages and conflict file names. Stored on this device only.")
-			.addText((t) => t.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim())));
-
-		// ---------- behaviour ----------
-		new Setting(containerEl).setName("Sync behaviour").setHeading();
-
-		new Setting(containerEl)
-			.setName("Mode")
-			.setDesc("Two-way sync, backup only (upload, never change local files), or pull only (read-only copy).")
-			.addDropdown((d) =>
-				d
-					.addOptions({ sync: "Two-way sync", push: "Backup only (push)", pull: "Pull only (mirror)" })
-					.setValue(s.mode)
-					.onChange(async (v) => {
-						s.mode = v as SyncMode;
-						await save();
-					}),
-			);
-
-		const toggle = (name: string, desc: string, key: "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground") =>
-			new Setting(containerEl).setName(name).setDesc(desc).addToggle((t) =>
-				t.setValue(s[key]).onChange(async (v) => {
-					s[key] = v;
-					await save();
-					p.rescheduleTriggers();
-				}),
-			);
-		toggle("Sync on startup", "Pull and push when the vault opens.", "syncOnStartup");
-		toggle("Sync after edits", "Sync shortly after you stop editing.", "syncOnChange");
-
-		new Setting(containerEl)
-			.setName("Edit delay (seconds)")
-			.setDesc("How long to wait after the last edit before syncing.")
-			.addSlider((sl) =>
-				sl.setLimits(5, 300, 5).setValue(s.changeDebounceSec).onChange(async (v) => {
-					s.changeDebounceSec = v;
-					await save();
-					p.rescheduleTriggers();
-				}),
-			);
-		new Setting(containerEl)
-			.setName("Periodic sync (minutes)")
-			.setDesc("Set to 0 to turn it off. Also catches changes to settings and configuration files.")
-			.addText((t) =>
-				t.setValue(String(s.intervalMin)).onChange(async (v) => {
-					s.intervalMin = Math.max(0, Number(v) || 0);
-					await save();
-					p.rescheduleTriggers();
-				}),
-			);
-		toggle("Sync when app comes back", "On mobile, sync when you switch back to Obsidian.", "syncOnResume");
-		toggle("Sync when app goes to background", "Best-effort push when you leave Obsidian (mobile) or hide the window.", "syncOnBackground");
-
-		// ---------- scope ----------
-		new Setting(containerEl).setName("What to sync").setHeading();
-
-		new Setting(containerEl)
-			.setName(`Sync settings folder (${this.app.vault.configDir})`)
-			.setDesc("Themes, snippets, hotkeys, plugins and their settings. Workspace layout is excluded by default.")
-			.addToggle((t) =>
-				t.setValue(s.syncConfigDir).onChange(async (v) => {
-					s.syncConfigDir = v;
-					await save();
-				}),
-			);
-		new Setting(containerEl)
-			.setClass("vsg-stacked")
-			.setName("Exclude patterns")
-			.setDesc("gitignore style, one per line. {config} means the settings folder. Excluded files are never uploaded, downloaded or deleted.")
-			.addTextArea((t) => {
-				t.inputEl.rows = 8;
-				t.inputEl.addClass("vsg-textarea");
-				t.setValue(s.excludePatterns).onChange(async (v) => {
-					s.excludePatterns = v;
-					await save();
-				});
-			});
-		new Setting(containerEl)
-			.setName("Maximum file size in megabytes")
-			.setDesc("Larger files are skipped. GitHub accepts files up to 100 megabytes without large file storage.")
-			.addText((t) =>
-				t.setValue(String(s.maxFileSizeMB)).onChange(async (v) => {
-					s.maxFileSizeMB = Math.min(s.lfsThresholdMB > 0 ? 2000 : 100, Math.max(1, Number(v) || 50));
-					await save();
-				}),
-			);
-		new Setting(containerEl)
-			.setName("Large file storage threshold in megabytes")
-			.setDesc("Files at least this big are kept in the host's large file storage instead of the repository, which keeps the repository small and fast. Set to 0 to turn it off. Check your host's storage quota, since free plans are limited. When it is on, the maximum file size above can go up to 2000 megabytes.")
-			.addText((t) =>
-				t.setValue(String(s.lfsThresholdMB)).onChange(async (v) => {
-					s.lfsThresholdMB = Math.max(0, Number(v) || 0);
-					await save();
-				}),
-			);
-
-		// ---------- encryption ----------
-		new Setting(containerEl).setName("End-to-end encryption").setHeading();
-		if (p.isEncrypted()) {
-			new Setting(containerEl)
-				.setName("Encryption is on (unlocked on this device)")
-				.setDesc("Notes, attachments and file names are encrypted before upload. Other devices need the same passphrase.")
-				.addButton((b) => b.setButtonText("Remove unencrypted copies…").onClick(() => p.removeUnencryptedFiles()))
-				.addButton((b) =>
-					destructive(b.setButtonText("Lock this device"))
-						.onClick(async () => {
-							await p.lockEncryption();
-							this.display();
+		return [
+			{
+				items: [
+					{
+						name: t("s.wizard"),
+						desc: t("s.wizardDesc"),
+						render: (st) => st.addButton((b) => b.setButtonText(t("s.wizardBtn")).setCta().onClick(() => p.openWizard())),
+					},
+				],
+			},
+			{
+				heading: t("s.hConnection"),
+				items: [
+					{
+						name: t("s.host"),
+						desc: t("s.hostDesc"),
+						render: (st) =>
+							st.addDropdown((d) => {
+								for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? ` (${t("s.beta")})` : ""));
+								d.setValue(s.provider).onChange(async (v) => {
+									s.provider = v as HostKind;
+									await save();
+									this.refresh();
+								});
+							}),
+					},
+					{
+						name: t("s.token"),
+						desc: tokenDesc,
+						render: (st) =>
+							st.addText((c) => {
+								c.inputEl.type = "password";
+								c.setPlaceholder(t("s.tokenPlaceholder"))
+									.setValue(p.getToken())
+									.onChange((v) => p.setToken(v.trim()));
+							}),
+					},
+					{
+						name: t("s.owner"),
+						desc: s.provider === "gitlab" ? t("s.ownerDescGitlab") : s.provider === "bitbucket" ? t("s.ownerDescBitbucket") : t("s.ownerDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								onCommit(c.setPlaceholder(t("s.ownerPlaceholder")).setValue(s.owner), async (v) => {
+									s.owner = v.trim();
+									await save();
+								}),
+							),
+					},
+					{
+						name: t("s.repo"),
+						desc: t("s.repoDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								onCommit(c.setPlaceholder(t("s.repoPlaceholder")).setValue(s.repo), async (v) => {
+									s.repo = v.trim();
+									await save();
+								}),
+							),
+					},
+					{
+						name: t("s.branch"),
+						render: (st) =>
+							st.addText((c) =>
+								onCommit(c.setValue(s.branch), async (v) => {
+									s.branch = v.trim() || "main";
+									await save();
+								}),
+							),
+					},
+					{
+						name: t("s.check"),
+						desc: t("s.checkDesc"),
+						render: (st) =>
+							st
+								.addButton((b) =>
+									b.setButtonText(t("s.test")).onClick(async () => {
+										try {
+											const user = await p.gh.getUser();
+											if (!s.owner) {
+												s.owner = user.login;
+												await save();
+												this.refresh();
+											}
+											const repo = s.repo ? await p.gh.getRepo() : null;
+											if (!s.repo) new Notice(t("s.testNoRepo", { user: user.login }));
+											else if (!repo) new Notice(t("s.testNotFound", { user: user.login, repo: `${s.owner}/${s.repo}` }));
+											else new Notice(t(repo.private ? "s.testOkPrivate" : "s.testOkPublic", { repo: `${s.owner}/${s.repo}` }));
+										} catch (e) {
+											new Notice(t("s.testFailed", { error: errMsg(e) }));
+										}
+									}),
+								)
+								.addButton((b) =>
+									b.setButtonText(t("s.createRepo")).onClick(async () => {
+										try {
+											const user = await p.gh.getUser();
+											if (!s.owner) s.owner = user.login;
+											if (!s.repo) s.repo = this.app.vault.getName().replace(/[^A-Za-z0-9._-]+/g, "-");
+											await save();
+											const repo = await p.gh.createRepo(s.repo, s.owner !== user.login ? s.owner : undefined);
+											new Notice(t("s.created", { url: repo.html_url }));
+											this.refresh();
+										} catch (e) {
+											new Notice(t("s.createFailed", { error: errMsg(e) }));
+										}
+									}),
+								),
+					},
+					{
+						name: t("s.apiBase"),
+						desc: t("s.apiBaseDesc", { hint: host.apiHint }),
+						render: (st) => st.addText((c) => c.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi))),
+					},
+					{
+						name: t("s.device"),
+						desc: t("s.deviceDesc"),
+						render: (st) => st.addText((c) => c.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim()))),
+					},
+				],
+			},
+			{
+				heading: t("s.hBehaviour"),
+				items: [
+					{
+						name: t("s.mode"),
+						desc: t("s.modeDesc"),
+						render: (st) =>
+							st.addDropdown((d) =>
+								d
+									.addOptions({ sync: t("s.modeSync"), push: t("s.modePush"), pull: t("s.modePull") })
+									.setValue(s.mode)
+									.onChange(async (v) => {
+										s.mode = v as SyncMode;
+										await save();
+									}),
+							),
+					},
+					{ name: t("s.onStartup"), desc: t("s.onStartupDesc"), render: toggle("syncOnStartup", true) },
+					{ name: t("s.onChange"), desc: t("s.onChangeDesc"), render: toggle("syncOnChange", true) },
+					{
+						name: t("s.delay"),
+						desc: t("s.delayDesc"),
+						render: (st) =>
+							st.addSlider((sl) =>
+								sl.setLimits(5, 300, 5)
+									.setValue(s.changeDebounceSec)
+									.onChange(async (v) => {
+										s.changeDebounceSec = v;
+										await save();
+										p.rescheduleTriggers();
+									}),
+							),
+					},
+					{
+						name: t("s.interval"),
+						desc: t("s.intervalDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								c.setValue(String(s.intervalMin)).onChange(async (v) => {
+									s.intervalMin = Math.max(0, Number(v) || 0);
+									await save();
+									p.rescheduleTriggers();
+								}),
+							),
+					},
+					{ name: t("s.onResume"), desc: t("s.onResumeDesc"), render: toggle("syncOnResume", true) },
+					{ name: t("s.onBackground"), desc: t("s.onBackgroundDesc"), render: toggle("syncOnBackground", true) },
+				],
+			},
+			{
+				heading: t("s.hScope"),
+				items: [
+					{ name: t("s.configDir", { dir: this.app.vault.configDir }), desc: t("s.configDirDesc"), render: toggle("syncConfigDir") },
+					{
+						name: t("s.exclude"),
+						desc: t("s.excludeDesc"),
+						cls: "vsg-stacked",
+						render: (st) =>
+							st.addTextArea((c) => {
+								c.inputEl.rows = 8;
+								c.inputEl.addClass("vsg-textarea");
+								c.setValue(s.excludePatterns).onChange(async (v) => {
+									s.excludePatterns = v;
+									await save();
+								});
+							}),
+					},
+					{
+						name: t("s.maxSize"),
+						desc: t("s.maxSizeDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								c.setValue(String(s.maxFileSizeMB)).onChange(async (v) => {
+									s.maxFileSizeMB = Math.min(s.lfsThresholdMB > 0 ? 2000 : 100, Math.max(1, Number(v) || 50));
+									await save();
+								}),
+							),
+					},
+					{
+						name: t("s.lfs"),
+						desc: t("s.lfsDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								c.setValue(String(s.lfsThresholdMB)).onChange(async (v) => {
+									s.lfsThresholdMB = Math.max(0, Number(v) || 0);
+									await save();
+								}),
+							),
+					},
+				],
+			},
+			{
+				heading: t("s.hEncryption"),
+				items: p.isEncrypted()
+					? [
+							{
+								name: t("s.encOn"),
+								desc: t("s.encOnDesc"),
+								render: (st) =>
+									st
+										.addButton((b) => b.setButtonText(t("s.encRemovePlain")).onClick(() => p.removeUnencryptedFiles()))
+										.addButton((b) =>
+											destructive(b.setButtonText(t("s.encLock"))).onClick(async () => {
+												await p.lockEncryption();
+												this.refresh();
+											}),
+										),
+							},
+						]
+					: [
+							{
+								name: t("s.encOff"),
+								desc: t("s.encOffDesc"),
+								render: (st) => st.addButton((b) => b.setButtonText(t("s.encTurnOn")).onClick(() => p.openEncryption(() => this.refresh()))),
+							},
+						],
+			},
+			{
+				heading: t("s.hShared"),
+				items: [
+					{ name: "", desc: t("s.sharedIntro"), render: () => undefined, searchable: false },
+					...(s.sharedFolders ?? []).map(
+						(f): Item => ({
+							name: `${f.folder} ↔ ${f.owner}/${f.repo}`,
+							desc: t("s.sharedRowDesc", { host: HOSTS[f.provider]?.label ?? f.provider, branch: f.branch }),
+							render: (st) =>
+								st
+									.addToggle((c) =>
+										c.setValue(f.enabled).onChange(async (v) => {
+											f.enabled = v;
+											await save();
+										}),
+									)
+									.addExtraButton((b) =>
+										b
+											.setIcon("trash")
+											.setTooltip(t("s.sharedRemove"))
+											.onClick(async () => {
+												s.sharedFolders = s.sharedFolders.filter((x) => x.id !== f.id);
+												p.setSecret(`token-shared-${f.id}`, "");
+												await save();
+												this.refresh();
+											}),
+									),
 						}),
-				);
-		} else {
-			new Setting(containerEl)
-				.setName("Encrypt your vault")
-				.setDesc("GitHub only ever sees unreadable data. Also use this to unlock a repository that another device already encrypted.")
-				.addButton((b) => b.setButtonText("Turn on or unlock…").onClick(() => p.openEncryption(() => this.display())));
+					),
+					{
+						name: t("s.sharedAdd"),
+						render: (st) => st.addButton((b) => b.setButtonText(t("s.sharedAddBtn")).onClick(() => new SharedFolderModal(this.app, p, () => this.refresh()).open())),
+					},
+				],
+			},
+			{
+				heading: t("s.hDevice"),
+				items: [
+					{ name: "", desc: t("s.deviceIntro"), render: () => undefined, searchable: false },
+					{
+						name: t("s.include"),
+						desc: t("s.includeDesc"),
+						render: (st) =>
+							st.addTextArea((c) => {
+								c.inputEl.rows = 3;
+								c.setPlaceholder(t("s.includePlaceholder"))
+									.setValue(ds.include.join("\n"))
+									.onChange((v) => p.setDeviceScope({ ...p.deviceScope(), include: lines(v) }));
+							}),
+					},
+					{
+						name: t("s.deviceExclude"),
+						desc: t("s.deviceExcludeDesc"),
+						render: (st) =>
+							st.addTextArea((c) => {
+								c.inputEl.rows = 3;
+								c.setValue(ds.exclude.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), exclude: lines(v) }));
+							}),
+					},
+					{
+						name: t("s.maxDownload"),
+						desc: t("s.maxDownloadDesc"),
+						render: (st) => st.addText((c) => c.setValue(String(ds.maxDownloadMB)).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), maxDownloadMB: Math.max(0, Number(v) || 0) }))),
+					},
+					{
+						name: t("s.onDemand"),
+						desc: t("s.onDemandDesc", { n: p.remoteOnlyFiles().length, pinned: p.pinned().length }),
+						render: (st) =>
+							st
+								.addButton((b) => b.setButtonText(t("s.onDemandBrowse")).onClick(() => p.openRemoteOnly()))
+								.addButton((b) =>
+									b.setButtonText(t("s.onDemandForget")).onClick(() => {
+										p.clearPinned();
+										new Notice(t("s.onDemandForgotten"));
+										this.refresh();
+									}),
+								),
+					},
+					{
+						name: t("s.freeSpace"),
+						desc: t("s.freeSpaceDesc"),
+						render: (st) => st.addButton((b) => b.setButtonText(t("s.freeSpaceBtn")).onClick(() => p.freeUpSpace())),
+					},
+				],
+			},
+			{
+				heading: t("s.hConflicts"),
+				items: [
+					{
+						name: t("s.strategy"),
+						render: (st) =>
+							st.addDropdown((d) =>
+								d
+									.addOptions({
+										auto: t("s.strategyAuto"),
+										markers: t("s.strategyMarkers"),
+										"keep-both": t("s.strategyBoth"),
+										ask: t("s.strategyAsk"),
+										local: t("s.strategyLocal"),
+										remote: t("s.strategyRemote", { host: host.label }),
+									})
+									.setValue(s.conflictStrategy)
+									.onChange(async (v) => {
+										s.conflictStrategy = v as ConflictStrategy;
+										await save();
+									}),
+							),
+					},
+					{ name: t("s.review"), desc: t("s.reviewDesc"), render: toggle("reviewBeforeManualSync") },
+					{ name: t("s.eol"), desc: t("s.eolDesc"), render: toggle("ignoreLineEndingChanges") },
+					{ name: t("s.guard"), desc: t("s.guardDesc"), render: toggle("deleteGuardEnabled") },
+					{
+						name: t("s.guardThreshold"),
+						desc: t("s.guardThresholdDesc"),
+						render: (st) =>
+							st
+								.addText((c) =>
+									c.setPlaceholder("10")
+										.setValue(String(s.deleteGuardMin))
+										.onChange(async (v) => {
+											s.deleteGuardMin = Math.max(0, Number(v) || 0);
+											await save();
+										}),
+								)
+								.addText((c) =>
+									c.setPlaceholder("20")
+										.setValue(String(s.deleteGuardPercent))
+										.onChange(async (v) => {
+											s.deleteGuardPercent = Math.max(0, Math.min(100, Number(v) || 0));
+											await save();
+										}),
+								),
+					},
+				],
+			},
+			{
+				heading: t("s.hBackup"),
+				items: [{ name: t("s.snapshot"), desc: t("s.snapshotDesc"), render: toggle("dailySnapshot") }],
+			},
+			{
+				heading: t("s.hAdvanced"),
+				items: [
+					{
+						name: t("s.commitMsg"),
+						desc: t("s.commitMsgDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								c.setValue(s.commitTemplate).onChange(async (v) => {
+									s.commitTemplate = v || "{{device}}: {{summary}}";
+									await save();
+								}),
+							),
+					},
+					{
+						name: t("s.fullScan"),
+						desc: t("s.fullScanDesc"),
+						render: (st) =>
+							st.addText((c) =>
+								c.setValue(String(s.fullScanMinutes)).onChange(async (v) => {
+									s.fullScanMinutes = Math.max(1, Number(v) || 30);
+									await save();
+								}),
+							),
+					},
+					{
+						name: t("s.notices"),
+						render: (st) =>
+							st.addDropdown((d) =>
+								d
+									.addOptions({ all: t("s.noticesAll"), errors: t("s.noticesErrors"), silent: t("s.noticesNone") })
+									.setValue(s.noticeLevel)
+									.onChange(async (v) => {
+										s.noticeLevel = v as NoticeLevel;
+										await save();
+									}),
+							),
+					},
+					{
+						name: t("s.resetState"),
+						desc: t("s.resetStateDesc"),
+						render: (st) =>
+							st.addButton((b) =>
+								b.setButtonText(t("s.resetBtn")).onClick(async () => {
+									await p.resetState();
+									new Notice(t("s.resetDone"));
+								}),
+							),
+					},
+				],
+			},
+		];
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		for (const g of this.groups()) {
+			if (g.heading) new Setting(containerEl).setName(g.heading).setHeading();
+			for (const item of g.items) {
+				if (!item.name) {
+					containerEl.createEl("p", { cls: "setting-item-description", text: typeof item.desc === "string" ? item.desc : (item.desc?.textContent ?? "") });
+					continue;
+				}
+				const st = new Setting(containerEl).setName(item.name);
+				if (item.desc) st.setDesc(item.desc);
+				if (item.cls) st.setClass(item.cls);
+				item.render(st);
+			}
 		}
+	}
 
-		// ---------- shared folders ----------
-		new Setting(containerEl).setName("Shared folders").setHeading();
-		containerEl.createEl("p", {
-			cls: "setting-item-description",
-			text: "Sync a folder with its own repository (for example a team folder) while the rest of the vault stays private.",
-		});
-		for (const f of s.sharedFolders ?? []) {
-			new Setting(containerEl)
-				.setName(`${f.folder} ↔ ${f.owner}/${f.repo}`)
-				.setDesc(`${f.provider}, branch ${f.branch}`)
-				.addToggle((t) =>
-					t.setValue(f.enabled).onChange(async (v) => {
-						f.enabled = v;
-						await save();
-					}),
-				)
-				.addExtraButton((b) =>
-					b
-						.setIcon("trash")
-						.setTooltip("Stop syncing this folder separately")
-						.onClick(async () => {
-							s.sharedFolders = s.sharedFolders.filter((x) => x.id !== f.id);
-							p.setSecret(`token-shared-${f.id}`, "");
-							await save();
-							this.display();
-						}),
-				);
-		}
-		new Setting(containerEl).addButton((b) => b.setButtonText("Add shared folder…").onClick(() => new SharedFolderModal(this.app, p, () => this.display()).open()));
-
-		// ---------- this device ----------
-		new Setting(containerEl).setName("This device only").setHeading();
-		containerEl.createEl("p", {
-			cls: "setting-item-description",
-			text: "These choices are stored on this device and are not synced, so a phone can sync less than a laptop. Files outside this device's scope are never uploaded, downloaded or deleted from here, and stay safe in the repository.",
-		});
-		const ds = p.deviceScope();
-		new Setting(containerEl)
-			.setName("Only sync these folders")
-			.setDesc("One folder or pattern per line, for example daily/ or projects/. Leave empty to sync everything.")
-			.addTextArea((t) => {
-				t.inputEl.rows = 3;
-				t.setPlaceholder("Daily/\nprojects/").setValue(ds.include.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), include: v.split("\n").map((x) => x.trim()).filter(Boolean) }));
-			});
-		new Setting(containerEl)
-			.setName("Also exclude on this device")
-			.setDesc("gitignore style, one per line, e.g. Attachments/ or *.mp4")
-			.addTextArea((t) => {
-				t.inputEl.rows = 3;
-				t.setValue(ds.exclude.join("\n")).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), exclude: v.split("\n").map((x) => x.trim()).filter(Boolean) }));
-			});
-		new Setting(containerEl)
-			.setName("Skip downloading files larger than this many megabytes")
-			.setDesc("Big attachments stay in the repository and are not downloaded to this device. 0 = no limit.")
-			.addText((t) => t.setValue(String(ds.maxDownloadMB)).onChange((v) => p.setDeviceScope({ ...p.deviceScope(), maxDownloadMB: Math.max(0, Number(v) || 0) })));
-		new Setting(containerEl)
-			.setName("Free up space")
-			.setDesc("Remove local copies of files this device doesn't sync, but only when they are identical to the copy in the repository.")
-			.addButton((b) => b.setButtonText("Free up space…").onClick(() => p.freeUpSpace()));
-
-		// ---------- conflicts & safety ----------
-		new Setting(containerEl).setName("Conflicts and safety").setHeading();
-
-		new Setting(containerEl)
-			.setName("When a file changed on both sides")
-			.addDropdown((d) =>
-				d
-					.addOptions({
-						auto: "Merge automatically, keep both if lines overlap (recommended)",
-						markers: "Merge, mark overlaps with <<<<<<< markers",
-						"keep-both": "Keep both (save my version as a copy)",
-						ask: "Ask me each time",
-						local: "This device wins",
-						remote: "GitHub wins",
-					})
-					.setValue(s.conflictStrategy)
-					.onChange(async (v) => {
-						s.conflictStrategy = v as ConflictStrategy;
-						await save();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Review before manual sync")
-			.setDesc("When you start a sync manually, first show every pending change with diffs and checkboxes. Automatic syncs are not affected.")
-			.addToggle((t) =>
-				t.setValue(s.reviewBeforeManualSync).onChange(async (v) => {
-					s.reviewBeforeManualSync = v;
-					await save();
-				}),
-			);
-		new Setting(containerEl)
-			.setName("Ignore line-ending-only changes")
-			.setDesc("A file whose only change is its line ending style is treated as unchanged, so editors on other operating systems don't cause needless uploads or conflicts.")
-			.addToggle((t) =>
-				t.setValue(s.ignoreLineEndingChanges).onChange(async (v) => {
-					s.ignoreLineEndingChanges = v;
-					await save();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Delete guard")
-			.setDesc("Ask before a sync deletes many files at once.")
-			.addToggle((t) =>
-				t.setValue(s.deleteGuardEnabled).onChange(async (v) => {
-					s.deleteGuardEnabled = v;
-					await save();
-				}),
-			);
-		new Setting(containerEl)
-			.setName("Delete guard threshold")
-			.setDesc("Ask when deleting more than this many files (left) or this percent of the vault (right), whichever is larger.")
-			.addText((t) =>
-				t.setPlaceholder("10").setValue(String(s.deleteGuardMin)).onChange(async (v) => {
-					s.deleteGuardMin = Math.max(0, Number(v) || 0);
-					await save();
-				}),
-			)
-			.addText((t) =>
-				t.setPlaceholder("20").setValue(String(s.deleteGuardPercent)).onChange(async (v) => {
-					s.deleteGuardPercent = Math.max(0, Math.min(100, Number(v) || 0));
-					await save();
-				}),
-			);
-
-		// ---------- backup ----------
-		new Setting(containerEl).setName("Backup").setHeading();
-		new Setting(containerEl)
-			.setName("Daily snapshot")
-			.setDesc("Once a day, tag the current state in the repository with a dated snapshot so you can always get back to it.")
-			.addToggle((t) =>
-				t.setValue(s.dailySnapshot).onChange(async (v) => {
-					s.dailySnapshot = v;
-					await save();
-				}),
-			);
-
-		// ---------- advanced ----------
-		new Setting(containerEl).setName("Advanced").setHeading();
-		new Setting(containerEl)
-			.setName("Commit message")
-			.setDesc("Variables: {{device}}, {{summary}}, {{date}}, {{count}}")
-			.addText((t) =>
-				t.setValue(s.commitTemplate).onChange(async (v) => {
-					s.commitTemplate = v || "{{device}}: {{summary}}";
-					await save();
-				}),
-			);
-		new Setting(containerEl)
-			.setName("Full rescan every (minutes)")
-			.setDesc("Between full rescans only files Obsidian reports as edited are re-checked, and the settings folder is read from disk at most every 5 minutes. Keeps phones fast.")
-			.addText((t) =>
-				t.setValue(String(s.fullScanMinutes)).onChange(async (v) => {
-					s.fullScanMinutes = Math.max(1, Number(v) || 30);
-					await save();
-				}),
-			);
-		new Setting(containerEl).setName("Notifications").addDropdown((d) =>
-			d
-				.addOptions({ all: "Every sync", errors: "Errors and conflicts only", silent: "None" })
-				.setValue(s.noticeLevel)
-				.onChange(async (v) => {
-					s.noticeLevel = v as NoticeLevel;
-					await save();
-				}),
-		);
-		new Setting(containerEl)
-			.setName("Reset sync state")
-			.setDesc("Forget what was last synced on this device. The next sync compares everything and never deletes; differing files are kept as both versions.")
-			.addButton((b) =>
-				b
-					.setButtonText("Reset")
-					.onClick(async () => {
-						await p.resetState();
-						new Notice("Sync state reset.");
-					}),
-			);
+	/** Obsidian 1.13+: the same settings, described for settings search. */
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return this.groups().map((g) => ({
+			type: "group" as const,
+			heading: g.heading,
+			items: g.items.map((item) => ({
+				name: item.name,
+				desc: item.desc,
+				searchable: item.searchable ?? Boolean(item.name),
+				render: (st: Setting) => {
+					if (item.name) st.setName(item.name);
+					if (item.desc) st.setDesc(item.desc);
+					if (item.cls) st.setClass(item.cls);
+					item.render(st);
+				},
+			})),
+		}));
 	}
 }

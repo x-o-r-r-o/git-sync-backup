@@ -11,6 +11,7 @@
 //   so devices can verify the passphrase. It never contains key material.
 
 import type { Layer } from "./codec.ts";
+import { t as tr } from "./i18n.ts";
 
 export const MARKER_PATH = ".vault-sync/encryption.json";
 const MAGIC = new Uint8Array([0x56, 0x53, 0x47, 0x31]); // "VSG1"
@@ -92,11 +93,11 @@ export class EncryptionLayer implements Layer {
 
 	async decode(path: string, blob: ArrayBuffer): Promise<ArrayBuffer> {
 		const u = new Uint8Array(blob);
-		if (u.length < 16 + 16 || !MAGIC.every((b, i) => u[i] === b)) throw new Error(`${path} is not encrypted with this vault's key`);
+		if (u.length < 16 + 16 || !MAGIC.every((b, i) => u[i] === b)) throw new Error(tr("e.notEncrypted", { path }));
 		try {
 			return await crypto.subtle.decrypt({ name: "AES-GCM", iv: ab(u.slice(4, 16)) }, this.kContent, ab(u.slice(16)));
 		} catch {
-			throw new Error(`Could not decrypt ${path}: wrong passphrase or damaged file`);
+			throw new Error(tr("e.decryptFailed", { path }));
 		}
 	}
 
@@ -148,16 +149,16 @@ export async function createEncryption(passphrase: string): Promise<{ meta: Encr
 
 /** Unlock an existing encrypted repository. Throws on a wrong passphrase. */
 export async function unlockEncryption(passphrase: string, meta: EncryptionMeta): Promise<{ master: Uint8Array; layer: EncryptionLayer }> {
-	if (meta.v !== 1 || meta.kdf !== "PBKDF2-SHA256") throw new Error("This repository uses a newer encryption format. Update the plugin.");
+	if (meta.v !== 1 || meta.kdf !== "PBKDF2-SHA256") throw new Error(tr("e.newerFormat"));
 	const master = await deriveMaster(passphrase, unb64(meta.salt), meta.iterations);
 	const layer = await EncryptionLayer.fromMaster(master);
-	if (!(await layer.verify(meta))) throw new Error("Wrong passphrase.");
+	if (!(await layer.verify(meta))) throw new Error(tr("e.wrongPass"));
 	return { master, layer };
 }
 
 export function passphraseStrength(p: string): { ok: boolean; hint: string } {
-	if (p.length < 12) return { ok: false, hint: "Use at least 12 characters. A few random words work well." };
+	if (p.length < 12) return { ok: false, hint: tr("e.passShort") };
 	const kinds = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(p)).length;
-	if (p.length < 16 && kinds < 3) return { ok: true, hint: "OK. Longer is stronger: 16+ characters or 4+ random words." };
-	return { ok: true, hint: "Strong." };
+	if (p.length < 16 && kinds < 3) return { ok: true, hint: tr("e.passOk") };
+	return { ok: true, hint: tr("e.passStrong") };
 }

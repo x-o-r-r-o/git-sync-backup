@@ -7,7 +7,7 @@ export type NoticeLevel = "all" | "errors" | "silent";
 // The token, API base URL and device name live in device-local storage instead, so a
 // synced data.json can never redirect a device's token to another server.
 export interface VaultSyncSettings {
-	provider: "github" | "gitlab" | "gitea";
+	provider: "github" | "gitlab" | "gitea" | "bitbucket";
 	owner: string;
 	repo: string;
 	branch: string;
@@ -47,7 +47,7 @@ export interface VaultSyncSettings {
 export interface SharedFolder {
 	id: string;
 	folder: string;
-	provider: "github" | "gitlab" | "gitea";
+	provider: "github" | "gitlab" | "gitea" | "bitbucket";
 	owner: string;
 	repo: string;
 	branch: string;
@@ -116,6 +116,10 @@ export interface SyncState {
 	lastConfigScan: number;
 	/** Codec fingerprint the cached hashes were computed with. */
 	codecFingerprint: string;
+	/** What was in scope at the last sync; when it changes, the next sync compares everything. */
+	scopeSig?: string;
+	/** Remote files this device chose not to download (over its size limit), available on demand. */
+	remoteOnly: Record<string, { sha: string; size: number }>;
 	lastSync: number;
 	lastSnapshot: number;
 	dirty: boolean;
@@ -131,6 +135,7 @@ export const emptyState = (repoKey = ""): SyncState => ({
 	lastFullScan: 0,
 	lastConfigScan: 0,
 	codecFingerprint: "",
+	remoteOnly: {},
 	lastSync: 0,
 	lastSnapshot: 0,
 	dirty: false,

@@ -13,9 +13,13 @@ export type Decision =
 	| { kind: "conflict"; path: string; base: string | null; local: string; remote: string }
 	// Renamed on GitHub: rename the local file instead of delete + re-download. `upload` is set when the
 	// local file was edited meanwhile, so the edit is pushed under the new name.
-	| { kind: "move-local"; path: string; from: string; sha: string; upload?: string }
+	| { kind: "move-local"; path: string; from: string; sha: string; upload?: string; replace?: boolean }
 	// Renamed here, edited on GitHub: bring GitHub's edit into the new name and drop the old path.
-	| { kind: "adopt-remote-edit"; path: string; from: string; sha: string };
+	| { kind: "adopt-remote-edit"; path: string; from: string; sha: string }
+	// Renamed (and edited) on one side while the other side edited the old file: merge both edits under
+	// the new name. `side` says where the rename happened. Shas: base of the old path, the renamed side's
+	// version at `path` (or at `from` for side "remote"), and the other side's edited old file.
+	| { kind: "rename-merge"; path: string; from: string; side: "local" | "remote"; base: string; local: string; remote: string };
 
 export interface Plan {
 	decisions: Decision[];
@@ -152,4 +156,91 @@ function push(m: Map<string, string[]>, k: string, v: string) {
 	const list = m.get(k);
 	if (list) list.push(v);
 	else m.set(k, [v]);
+}
+
+export interface SimilarityInput {
+	/** Text of each candidate file, or null if unknown/binary/too big. */
+	text: (side: "base" | "local" | "remote", path: string, sha: string) => Promise<string | null>;
+	similarity: (a: string, b: string) => number;
+	threshold?: number;
+	maxCandidates?: number;
+}
+
+const ext = (p: string) => (p.includes(".") ? p.slice(p.lastIndexOf(".")).toLowerCase() : "");
+
+/**
+ * Second pass after detectRenames: pairs the remaining delete + add decisions whose contents are
+ * similar (renamed AND edited). Only same-extension text files are compared.
+ */
+export async function detectSimilarRenames(
+	decisions: Decision[],
+	base: Record<string, string>,
+	local: Map<string, string>,
+	remote: Map<string, string>,
+	io: SimilarityInput,
+): Promise<Decision[]> {
+	const threshold = io.threshold ?? 0.5;
+	const max = io.maxCandidates ?? 30;
+	// Renamed on GitHub: old path gone remotely, a new path appeared remotely.
+	const remoteOld = decisions.filter((d) => (d.kind === "delete-local" || d.kind === "upload") && base[d.path] && !remote.has(d.path) && !("renamedFrom" in d && d.renamedFrom));
+	const remoteNew = decisions.filter((d) => d.kind === "download" && !base[d.path] && !local.has(d.path));
+	// Renamed here: old path gone locally, a new path appeared locally.
+	const localOld = decisions.filter((d) => (d.kind === "delete-remote" || d.kind === "download") && base[d.path] && !local.has(d.path) && !("renamedTo" in d && d.renamedTo));
+	const localNew = decisions.filter((d) => d.kind === "upload" && !base[d.path] && !remote.has(d.path) && !d.renamedFrom);
+
+	const replace = new Map<string, Decision | null>(); // path -> replacement (null = drop)
+	const pair = async (olds: Decision[], news: Decision[], newSide: "local" | "remote") => {
+		if (!olds.length || !news.length || olds.length > max || news.length > max) return;
+		const used = new Set<string>();
+		for (const o of olds) {
+			const baseText = await io.text("base", o.path, base[o.path]);
+			if (baseText === null) continue;
+			let best: { d: Decision; score: number } | null = null;
+			for (const n of news) {
+				if (used.has(n.path) || ext(n.path) !== ext(o.path)) continue;
+				const sha = newSide === "remote" ? remote.get(n.path)! : local.get(n.path)!;
+				const t = await io.text(newSide, n.path, sha);
+				if (t === null) continue;
+				const score = io.similarity(baseText, t);
+				if (score >= threshold && (!best || score > best.score)) best = { d: n, score };
+			}
+			if (!best) continue;
+			used.add(best.d.path);
+			const to = best.d.path;
+			const from = o.path;
+			if (newSide === "remote") {
+				const lOld = local.get(from)!;
+				const rNew = remote.get(to)!;
+				if (lOld === base[from]) {
+					// Renamed + edited on GitHub, untouched here: rename locally, then take the new content.
+					replace.set(to, { kind: "move-local", path: to, from, sha: rNew, replace: true });
+				} else {
+					replace.set(to, { kind: "rename-merge", path: to, from, side: "remote", base: base[from], local: lOld, remote: rNew });
+				}
+			} else {
+				const lNew = local.get(to)!;
+				const rOld = remote.get(from)!;
+				if (rOld === base[from]) {
+					// Renamed + edited here, untouched on GitHub: a plain upload + delete, labelled as a rename.
+					replace.set(from, { kind: "delete-remote", path: from, renamedTo: to });
+					replace.set(to, { kind: "upload", path: to, sha: lNew, renamedFrom: from });
+					continue;
+				}
+				replace.set(to, { kind: "rename-merge", path: to, from, side: "local", base: base[from], local: lNew, remote: rOld });
+			}
+			replace.set(from, null);
+		}
+	};
+	await pair(remoteOld, remoteNew, "remote");
+	await pair(localOld, localNew, "local");
+	if (!replace.size) return decisions;
+	const out: Decision[] = [];
+	for (const d of decisions) {
+		if (!replace.has(d.path)) out.push(d);
+		else {
+			const r = replace.get(d.path);
+			if (r) out.push(r);
+		}
+	}
+	return out;
 }

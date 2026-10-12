@@ -15,20 +15,21 @@ export interface FriendlyError {
 /** Turns raw error messages into plain language with a suggested fix. */
 export function friendlyError(msg: string, host = "the repository host"): FriendlyError {
 	const m = msg.toLowerCase();
-	if (/no (github )?token/.test(m)) return { title: "Not connected yet", hint: `Add a ${host} access token in the plugin settings.`, action: "settings" };
+	if (/no (github )?token/.test(m)) return { title: t("h.notConnected"), hint: t("h.notConnectedHint", { host }), action: "settings" };
 	if (m.includes("invalid or expired") || m.includes("401"))
-		return { title: `${host} didn't accept your token`, hint: "It may have expired or been revoked. Create a new token and paste it in settings.", action: "settings" };
+		return { title: t("h.badToken", { host }), hint: t("h.badTokenHint"), action: "settings" };
 	if (m.includes("not found or the token cannot access") || (m.includes("not found") && m.includes("repos")))
-		return { title: "Repository not found", hint: "Check the owner and repository name, and that the token has access to this repo.", action: "settings" };
-	if (m.includes("rate limit")) return { title: `${host} rate limit reached`, hint: `${host} allows a limited number of requests per hour. Sync will work again shortly.`, action: "none" };
+		return { title: t("h.repoMissing"), hint: t("h.repoMissingHint"), action: "settings" };
+	if (m.includes("rate limit")) return { title: t("h.rateLimit", { host }), hint: t("h.rateLimitHint", { host }), action: "none" };
 	if (m.includes("outdated branch state") || m.includes("another device pushed"))
-		return { title: `${host} was busy`, hint: "Another device was syncing at the same moment. Try again.", action: "retry" };
+		return { title: t("h.busy", { host }), hint: t("h.busyHint"), action: "retry" };
 	if (m.includes("network") || m.includes("failed to fetch") || m.includes("err_") || m.includes("offline") || m.includes("timed out"))
-		return { title: `Can't reach ${host}`, hint: "Check your internet connection. Sync will retry automatically.", action: "retry" };
-	if (m.includes("end-to-end encrypted")) return { title: "This vault is encrypted", hint: "Enter the passphrase to sync on this device.", action: "encryption" };
-	if (m.includes("different passphrase")) return { title: "Different encryption key", hint: "The repository was encrypted with another passphrase. Unlock it again.", action: "encryption" };
-	if (m.includes("pull-only")) return { title: "Not available in pull-only mode", hint: "Switch the mode in settings to push changes.", action: "settings" };
-	return { title: "Sync failed", hint: msg, action: "retry" };
+		return { title: t("h.offline", { host }), hint: t("h.offlineHint"), action: "retry" };
+	if (m.includes("end-to-end encrypted")) return { title: t("h.encrypted"), hint: t("h.encryptedHint"), action: "encryption" };
+	if (m.includes("different passphrase")) return { title: t("h.otherKey"), hint: t("h.otherKeyHint"), action: "encryption" };
+	if (m.includes("pull-only")) return { title: t("h.pullOnly"), hint: t("h.pullOnlyHint"), action: "settings" };
+	if (m.includes("was not found in")) return { title: t("h.branchMissing"), hint: msg, action: "settings" };
+	return { title: t("h.failed"), hint: msg, action: "retry" };
 }
 
 function ago(ts: number): string {
@@ -87,11 +88,11 @@ export class HealthView extends ItemView {
 			}
 			this.remoteInfo = {
 				ahead: head ? head !== p.state.head : null,
-				budget: rl ? `${rl.remaining}/${rl.limit} requests left, resets ${new Date(rl.reset * 1000).toLocaleTimeString()}` : "unknown",
+				budget: rl ? t("h.budgetValue", { left: rl.remaining, limit: rl.limit, time: new Date(rl.reset * 1000).toLocaleTimeString() }) : t("h.unknown"),
 				devices: [...devices],
 			};
 		} catch (e) {
-			this.remoteInfo = { ahead: null, budget: "unknown", devices: [], error: e instanceof Error ? e.message : String(e) };
+			this.remoteInfo = { ahead: null, budget: t("h.unknown"), devices: [], error: e instanceof Error ? e.message : String(e) };
 		} finally {
 			this.loadingRemote = false;
 			this.render();
@@ -135,7 +136,7 @@ export class HealthView extends ItemView {
 		text.createDiv({ cls: "vsg-h-headline", text: headline });
 		text.createDiv({
 			cls: "vsg-muted",
-			text: `Last sync ${ago(p.state.lastSync)} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? "two-way" : p.settings.mode === "push" ? "backup only" : "pull only"}${p.isEncrypted() ? ` · 🔒 ${t("health.encrypted")}` : ""}`,
+			text: `${t("h.lastSync", { ago: ago(p.state.lastSync) })} · ${p.settings.owner || "?"}/${p.settings.repo || "?"} (${p.settings.branch}) · ${p.settings.mode === "sync" ? t("s.modeSync") : p.settings.mode === "push" ? t("s.modePush") : t("s.modePull")}${p.isEncrypted() ? ` · 🔒 ${t("health.encrypted")}` : ""}`,
 		});
 		const acts = el.createDiv({ cls: "vsg-h-actions" });
 		if (!p.isConfigured()) this.button(acts, t("health.wizard"), () => p.openWizard(), true);
@@ -163,8 +164,8 @@ export class HealthView extends ItemView {
 		else if (this.loadingRemote) pend.createDiv({ text: t("health.checking"), cls: "vsg-muted" });
 		const ds = p.deviceScope();
 		if (ds.include.length || ds.exclude.length || ds.maxDownloadMB) {
-			const bits = [ds.include.length && `only ${ds.include.join(", ")}`, ds.exclude.length && `excluding ${ds.exclude.join(", ")}`, ds.maxDownloadMB && `no downloads over ${ds.maxDownloadMB} MB`].filter(Boolean);
-			pend.createDiv({ cls: "vsg-muted", text: `This device syncs ${bits.join("; ")}.` });
+			const bits = [ds.include.length && t("h.only", { list: ds.include.join(", ") }), ds.exclude.length && t("h.excluding", { list: ds.exclude.join(", ") }), ds.maxDownloadMB && t("h.noDownloadsOver", { mb: ds.maxDownloadMB })].filter(Boolean);
+			pend.createDiv({ cls: "vsg-muted", text: t("h.deviceScope", { what: bits.join("; ") }) });
 		}
 		const next = p.nextScheduledSync();
 		pend.createDiv({ cls: "vsg-muted", text: next ? t("health.nextSync", { time: new Date(next).toLocaleTimeString() }) : t("health.noSchedule") });
@@ -176,7 +177,7 @@ export class HealthView extends ItemView {
 			for (const h of shared) {
 				const row = s.createDiv({ cls: "vsg-h-row" });
 				row.createDiv({ text: `${h.def.folder} → ${h.def.owner}/${h.def.repo}`, cls: "vsg-h-path" });
-				const status = !h.activeOnThisDevice() ? "not synced on this device" : h.lastError ? `⚠ ${h.lastError}` : h.lastSync ? `synced ${ago(h.lastSync)}` : `synced ${ago(h.state.lastSync)}`;
+				const status = !h.activeOnThisDevice() ? t("h.notOnDevice") : h.lastError ? `⚠ ${h.lastError}` : t("health.lastSynced", { ago: ago(h.lastSync || h.state.lastSync) });
 				row.createDiv({ cls: h.lastError ? "vsg-h-accent" : "vsg-muted", text: status });
 			}
 		}
@@ -199,6 +200,16 @@ export class HealthView extends ItemView {
 			}
 		}
 
+		// ---- on demand ----
+		const onDemand = p.remoteOnlyFiles();
+		if (onDemand.length) {
+			const s = this.section(t("h.onDemand", { n: onDemand.length }), "cloud-download");
+			const mb = onDemand.reduce((n, f) => n + f.size, 0) / 1048576;
+			s.createDiv({ cls: "vsg-muted", text: t("h.onDemandHint", { mb: mb.toFixed(1) }) });
+			const row = s.createDiv({ cls: "vsg-h-actions" });
+			this.button(row, t("s.onDemandBrowse"), () => p.openRemoteOnly());
+		}
+
 		// ---- skipped ----
 		const skipped = p.lastReport?.skipped ?? [];
 		if (skipped.length) {
@@ -219,8 +230,8 @@ export class HealthView extends ItemView {
 
 		// ---- GitHub ----
 		const gh = this.section(p.hostLabel(), "server");
-		gh.createDiv({ cls: "vsg-muted", text: `API budget: ${this.remoteInfo?.budget ?? "…"}` });
-		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: `Could not check ${p.hostLabel()}: ${this.remoteInfo.error}` });
+		gh.createDiv({ cls: "vsg-muted", text: t("h.budget", { budget: this.remoteInfo?.budget ?? "…" }) });
+		if (this.remoteInfo?.error) gh.createDiv({ cls: "vsg-muted", text: t("h.checkFailed", { host: p.hostLabel(), error: this.remoteInfo.error }) });
 
 		// ---- tools ----
 		const tools = this.section(t("health.tools"), "wrench");

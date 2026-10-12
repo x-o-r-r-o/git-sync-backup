@@ -15,3 +15,14 @@ test("i18n: English default, placeholders, Chinese catalog, fallback", () => {
 	assert.equal(t("cmd.sync"), "Sync now", "unknown language falls back to English");
 	g.window = saved;
 });
+
+test("i18n: Simplified Chinese covers every English key, with the same placeholders", async () => {
+	const { en } = await import("../src/locales/en.ts");
+	const { zh } = await import("../src/locales/zh.ts");
+	const missing = Object.keys(en).filter((k) => !(k in zh));
+	assert.deepEqual(missing, [], `missing zh keys: ${missing.join(", ")}`);
+	for (const [k, v] of Object.entries(en)) {
+		const ph = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
+		assert.equal(ph((zh as Record<string, string>)[k]), ph(v), `placeholders differ for ${k}`);
+	}
+});

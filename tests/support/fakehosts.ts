@@ -221,3 +221,125 @@ export function gitlabTransport(repo: FakeRepo) {
 		return err(404, `fake gitlab: no route ${rest}`);
 	};
 }
+
+/** Parse our multipart body (the format produced by buildMultipart). */
+function parseMultipart(body: ArrayBuffer, contentType: string): { name: string; value: Uint8Array; isFile: boolean }[] {
+	const boundary = /boundary=(.+)$/.exec(contentType)![1];
+	const bytes = new Uint8Array(body);
+	const text = new TextDecoder("latin1").decode(bytes);
+	const out: { name: string; value: Uint8Array; isFile: boolean }[] = [];
+	let pos = text.indexOf(`--${boundary}`);
+	while (pos >= 0) {
+		const headStart = pos + boundary.length + 4;
+		if (text.startsWith("--", pos + boundary.length + 2)) break;
+		const headEnd = text.indexOf("\r\n\r\n", headStart);
+		const head = new TextDecoder().decode(bytes.slice(headStart, headEnd));
+		const next = text.indexOf(`\r\n--${boundary}`, headEnd + 4);
+		out.push({ name: /name="([^"]*)"/.exec(head)![1], value: bytes.slice(headEnd + 4, next), isFile: head.includes("filename=") });
+		pos = next + 2;
+	}
+	return out;
+}
+
+/** Fake Bitbucket Cloud at https://bb.test/2.0, repo me/vault. No blob hashes exposed, like the real API. */
+export function bitbucketTransport(repo: FakeRepo) {
+	const calls = { raw: 0 };
+	const transport = async (req: HttpRequest): Promise<HttpResponse> => {
+		const u = new URL(req.url);
+		const path = u.pathname.replace(/^\/2\.0/, "");
+		const q = u.searchParams;
+		const R = "/repositories/me/vault";
+		let m: RegExpExecArray | null;
+		if (path === "/user") return ok({ username: "me" });
+		if (path === R && req.method === "GET") return ok({ is_private: true, mainbranch: { name: "main" }, links: { html: { href: "https://bitbucket.test/me/vault" } } });
+		if ((m = /^\/repositories\/me\/vault\/refs\/branches\/(.+)$/.exec(path))) {
+			const h = repo.head(decodeURIComponent(m[1]));
+			return h ? ok({ target: { hash: h } }) : err(404);
+		}
+		if (path === `${R}/refs/tags` && req.method === "POST") {
+			const b = JSON.parse(req.body as string);
+			repo.tags.set(b.name, b.target.hash);
+			return ok({});
+		}
+		if (path === `${R}/refs/tags`) return ok({ values: [...repo.tags].map(([name, hash]) => ({ name, target: { hash } })) });
+		if (path === `${R}/src` && req.method === "POST") {
+			repo.interject?.();
+			repo.interject = null;
+			const parts = parseMultipart(req.body as ArrayBuffer, req.contentType!);
+			const field = (n: string) => new TextDecoder().decode(parts.find((p) => p.name === n)?.value ?? new Uint8Array());
+			const branch = field("branch");
+			const parents = field("parents");
+			const head = repo.head(branch);
+			if (parents && head && parents !== head) return err(409, "parent is not the branch tip");
+			const ops: { op: string; path: string; content?: string }[] = [];
+			const files = head ? repo.commits.get(head)!.files : new Map<string, string>();
+			for (const p of parts) {
+				if (p.name === "files") ops.push({ op: "delete", path: new TextDecoder().decode(p.value) });
+				else if (p.isFile) {
+					const fp = p.name.replace(/^\//, "");
+					ops.push({ op: files.has(fp) ? "update" : "create", path: fp, content: Buffer.from(p.value).toString("base64") });
+				}
+			}
+			await repo.apply(branch, field("message"), ops);
+			return { status: 201, json: null, arrayBuffer: new ArrayBuffer(0), headers: {} };
+		}
+		if ((m = /^\/repositories\/me\/vault\/src\/(\w+)\/(.*)$/.exec(path))) {
+			const c = repo.commits.get(m[1]);
+			if (!c) return err(404);
+			const sub = decodeURIComponent(m[2]);
+			const sha = c.files.get(sub);
+			if (sha) {
+				calls.raw++;
+				return raw(repo.blobs.get(sha)!);
+			}
+			const dir = sub.replace(/\/$/, "");
+			const prefix = dir ? dir + "/" : "";
+			const entries = new Map<string, { type: string; path: string; size?: number }>();
+			for (const [p, s] of c.files) {
+				if (!p.startsWith(prefix)) continue;
+				const rest = p.slice(prefix.length);
+				const i = rest.indexOf("/");
+				if (i < 0) entries.set(p, { type: "commit_file", path: p, size: repo.blobs.get(s)!.length });
+				else entries.set(prefix + rest.slice(0, i), { type: "commit_directory", path: prefix + rest.slice(0, i) });
+			}
+			if (!entries.size && dir) return err(404);
+			return ok({ values: [...entries.values()] });
+		}
+		if ((m = /^\/repositories\/me\/vault\/diffstat\/(\w+)\.\.(\w+)$/.exec(path))) {
+			const a = repo.commits.get(m[1])!.files;
+			const b = repo.commits.get(m[2])!.files;
+			const values: unknown[] = [];
+			for (const p of new Set([...a.keys(), ...b.keys()])) if (a.get(p) !== b.get(p)) values.push({ status: "modified", old: b.has(p) ? { path: p } : null, new: a.has(p) ? { path: p } : null });
+			return ok({ values });
+		}
+		if ((m = /^\/repositories\/me\/vault\/diffstat\/(\w+)$/.exec(path))) {
+			const c = repo.commits.get(m[1])!;
+			const par = c.parents[0] ? repo.commits.get(c.parents[0])!.files : new Map<string, string>();
+			const values: unknown[] = [];
+			for (const p of new Set([...c.files.keys(), ...par.keys()])) {
+				if (c.files.get(p) === par.get(p)) continue;
+				values.push({ status: !c.files.has(p) ? "removed" : !par.has(p) ? "added" : "modified", old: par.has(p) ? { path: p } : null, new: c.files.has(p) ? { path: p } : null });
+			}
+			return ok({ values });
+		}
+		if ((m = /^\/repositories\/me\/vault\/commit\/(\w+)$/.exec(path))) {
+			const c = repo.commits.get(m[1]);
+			return c ? ok({ hash: m[1], message: c.message, date: c.date, parents: c.parents.map((hash) => ({ hash })) }) : err(404);
+		}
+		if ((m = /^\/repositories\/me\/vault\/merge-base\/(\w+)\.\.(\w+)$/.exec(path))) {
+			if (!repo.commits.has(m[1]) || !repo.commits.has(m[2])) return err(404);
+			const ha = repo.history(m[1]);
+			const mb = repo.history(m[2]).find((x) => ha.includes(x));
+			return mb ? ok({ hash: mb }) : err(404);
+		}
+		if ((m = /^\/repositories\/me\/vault\/commits\/(.+)$/.exec(path))) {
+			const head = repo.head(decodeURIComponent(m[1])) ?? m[1];
+			const all = repo.history(head);
+			const fp = q.get("path");
+			const list = fp ? all.filter((sha) => { const c = repo.commits.get(sha)!; const par = c.parents[0] ? repo.commits.get(c.parents[0])!.files.get(fp) : undefined; return c.files.get(fp) !== par; }) : all;
+			return ok({ values: list.slice(0, Number(q.get("pagelen") ?? 30)).map((sha) => ({ hash: sha, message: repo.commits.get(sha)!.message, date: repo.commits.get(sha)!.date, author: { raw: "me" } })) });
+		}
+		return err(404, `fake bitbucket: no route ${req.method} ${path}`);
+	};
+	return { transport, calls };
+}

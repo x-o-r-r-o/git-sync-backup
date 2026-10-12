@@ -8,8 +8,8 @@ import { NotFastForward } from "./remote.ts";
 import type { Remote, Upsert } from "./remote.ts";
 import { compileGlobs } from "./glob.ts";
 import { VaultIO } from "./io.ts";
-import { merge3 } from "./merge.ts";
-import { decide, detectRenames } from "./plan.ts";
+import { lcsMatch, merge3, splitLines } from "./merge.ts";
+import { decide, detectRenames, detectSimilarRenames } from "./plan.ts";
 import { smartMerge } from "./smartmerge.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { emptyState } from "./types.ts";
@@ -62,6 +62,8 @@ export interface DeviceScope {
 	exclude: string[];
 	/** Remote files larger than this are not downloaded to this device (0 = no limit). */
 	maxDownloadMB: number;
+	/** Files downloaded on demand: always synced on this device despite the size limit. */
+	pinned?: string[];
 }
 
 export interface FreeSpacePlan {
@@ -241,7 +243,7 @@ export class SyncEngine {
 		this.loadCodec();
 		const ctx = await this.gather(false, {}, true);
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		const decisions = detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas);
+		const decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
 		return { decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
 	}
 
@@ -264,6 +266,50 @@ export class SyncEngine {
 			if (!seen.has(p) && !p.startsWith(cfgPrefix) && scope(p)) out.push(p);
 		}
 		return out;
+	}
+
+	private scopeSignature(): string {
+		const ds = this.host.deviceScope?.();
+		return JSON.stringify([
+			this.s.excludePatterns,
+			this.s.syncConfigDir,
+			this.s.maxFileSizeMB,
+			ds?.include ?? [],
+			ds?.exclude ?? [],
+			ds?.maxDownloadMB ?? 0,
+			[...(ds?.pinned ?? [])].sort(),
+			this.host.extraExcludes?.() ?? [],
+		]);
+	}
+
+	/** Renamed-and-edited files: pair leftover delete + add decisions by content similarity. */
+	private async similarRenames(decisions: Decision[], base: Record<string, string>, local: Map<string, string>, remote: Map<string, string>): Promise<Decision[]> {
+		const texts = new Map<string, string | null>();
+		const MAX = 512 * 1024;
+		return detectSimilarRenames(decisions, base, local, remote, {
+			text: async (side, path, sha) => {
+				const key = `${side}:${path}:${sha}`;
+				if (texts.has(key)) return texts.get(key)!;
+				let data: ArrayBuffer | null = null;
+				try {
+					data = side === "local" ? await this.io.read(path) : await this.blob(path, sha);
+				} catch {
+					data = null;
+				}
+				const t = data && data.byteLength <= MAX ? asText(path, data) : null;
+				texts.set(key, t);
+				return t;
+			},
+			similarity: (a, b) => {
+				const A = splitLines(a);
+				const B = splitLines(b);
+				if (!A.length && !B.length) return 1;
+				const m = lcsMatch(A, B);
+				if (!m) return 0;
+				const matches = m.reduce((n, x) => n + (x >= 0 ? 1 : 0), 0);
+				return (2 * matches) / (A.length + B.length);
+			},
+		});
 	}
 
 	/** Content of a local file (for diffs). */
@@ -424,17 +470,23 @@ export class SyncEngine {
 		// Fast path: nothing changed anywhere since last sync.
 		const baseInScope = Object.keys(state.base).filter(scope);
 		const unchangedLocal = localShas.size === baseInScope.length && [...localShas].every(([p, h]) => state.base[p] === h);
-		if (head && head === state.head && unchangedLocal && !state.dirty) {
-			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered };
+		// Anything that changes what this device syncs (patterns, folders, limits, on-demand downloads)
+		// must trigger a full comparison, even when nothing changed on either side.
+		const scopeSig = this.scopeSignature();
+		if (head && head === state.head && unchangedLocal && !state.dirty && state.scopeSig === scopeSig) {
+			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered, remoteOnly: state.remoteOnly ?? {}, scopeSig };
 		}
 
 		const remote = new Map<string, RemoteEntry>();
 		const remoteShas = new Map<string, string>();
+		const remoteOnly: SyncState["remoteOnly"] = {};
 		let treeSha: string | null = null;
 		let markerSha: string | null = null;
 		if (head) {
 			treeSha = await this.host.gh.getCommitTree(head);
-			const deviceMax = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
+			const dsc = this.host.deviceScope?.();
+			const deviceMax = (dsc?.maxDownloadMB ?? 0) * 1024 * 1024;
+			const pinned = new Set(dsc?.pinned ?? []);
 			const fold = (p: string) => p.normalize("NFC").toLowerCase();
 			const lowerLocal = new Map([...localShas.keys()].map((p) => [fold(p), p]));
 			const seenLower = new Set<string>();
@@ -454,8 +506,9 @@ export class SyncEngine {
 					skip(e.path, `remote file larger than ${this.s.maxFileSizeMB} MB`);
 					continue;
 				}
-				if (deviceMax && (e.size ?? 0) > deviceMax && !localShas.has(e.path)) {
-					skip(e.path, "larger than this device's download limit");
+				if (deviceMax && (e.size ?? 0) > deviceMax && !localShas.has(e.path) && !pinned.has(e.path)) {
+					skip(e.path, "larger than this device's download limit; available on demand");
+					remoteOnly[e.path] = { sha: e.sha, size: e.size ?? 0 };
 					continue;
 				}
 				const lower = fold(e.path);
@@ -477,7 +530,7 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered };
+		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig };
 	}
 
 	private async initRemote(): Promise<string> {
@@ -535,7 +588,7 @@ export class SyncEngine {
 		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
 		state.dirty = false;
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		let decisions = detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas);
+		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
 
 		// Paths skipped for size/case keep their old base so they are not seen as deleted later.
 		const next: Record<string, string> = { ...plan.settled };
@@ -601,7 +654,7 @@ export class SyncEngine {
 		};
 
 		// ---- apply simple decisions (parallel) ----
-		const simple = decisions.filter((d) => d.kind !== "conflict");
+		const simple = decisions.filter((d) => d.kind !== "conflict" && d.kind !== "rename-merge");
 		let done = 0;
 		const downloads = simple.filter((d) => d.kind === "download" || d.kind === "adopt-remote-edit").length;
 		await pool(simple, 4, async (d) => {
@@ -617,9 +670,16 @@ export class SyncEngine {
 						} else {
 							await this.assertUnchanged(d.from);
 							await this.io.rename(d.from, d.path);
-							const old = cacheNext[d.from];
-							const st = await this.io.stat(d.path);
-							if (st) cacheNext[d.path] = { m: st.mtime, s: st.size, h: d.upload ?? d.sha, ...(old?.n ? { n: old.n } : {}) };
+							if (d.replace) {
+								// Renamed and edited remotely: after the rename, take the new content.
+								const data = await this.blob(d.path, d.sha);
+								await this.io.write(d.path, data);
+								await recordWrite(d.path, d.sha, data);
+							} else {
+								const old = cacheNext[d.from];
+								const st = await this.io.stat(d.path);
+								if (st) cacheNext[d.path] = { m: st.mtime, s: st.size, h: d.upload ?? d.sha, ...(old?.n ? { n: old.n } : {}) };
+							}
 						}
 						delete cacheNext[d.from];
 						delete next[d.from];
@@ -675,11 +735,13 @@ export class SyncEngine {
 
 		// ---- conflicts (sequential, may prompt) ----
 		for (const d of decisions) {
-			if (d.kind !== "conflict") continue;
+			if (d.kind !== "conflict" && d.kind !== "rename-merge") continue;
 			try {
-				await this.resolveConflict(d, mode, device, next, report, queueUpload, recordWrite);
+				if (d.kind === "conflict") await this.resolveConflict(d, mode, device, next, report, queueUpload, recordWrite);
+				else await this.renameMerge(d, device, next, cacheNext, report, remoteDeletes, renames, queueUpload, recordWrite);
 			} catch (e) {
 				fail(d.path, e);
+				if (d.kind === "rename-merge" && state.base[d.from]) next[d.from] = state.base[d.from];
 			}
 		}
 
@@ -720,6 +782,8 @@ export class SyncEngine {
 
 		state.head = newHead;
 		state.base = next;
+		state.remoteOnly = ctx.remoteOnly;
+		state.scopeSig = ctx.scopeSig;
 		state.codecFingerprint = this.codec.fingerprint;
 		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
@@ -728,6 +792,62 @@ export class SyncEngine {
 		await host.saveState();
 		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
+	}
+
+	/** One side renamed (and edited) a file that the other side edited: merge both under the new name. */
+	private async renameMerge(
+		d: Extract<Decision, { kind: "rename-merge" }>,
+		device: string,
+		next: Record<string, string>,
+		cacheNext: SyncState["cache"],
+		report: SyncReport,
+		remoteDeletes: string[],
+		renames: string[],
+		queueUpload: (path: string, data?: ArrayBuffer, sha?: string) => Promise<void>,
+		recordWrite: (path: string, sha: string, data?: ArrayBuffer) => Promise<void>,
+	): Promise<void> {
+		const localPath = d.side === "remote" ? d.from : d.path;
+		await this.assertUnchanged(localPath);
+		if (d.side === "remote") await this.assertUnchanged(d.path);
+		const baseText = asText(d.from, await this.blob(d.from, d.base));
+		const localData = await this.io.read(localPath);
+		const remoteData = await this.blob(d.side === "remote" ? d.path : d.from, d.remote);
+		const localText = asText(localPath, localData);
+		const remoteText = asText(d.path, remoteData);
+		const res = baseText !== null && localText !== null && remoteText !== null ? merge3(baseText, localText, remoteText, { local: `this device (${device})`, remote: this.host.gh.label }) : null;
+
+		if (res?.clean) {
+			const merged = encodeText(res.text);
+			const sha = await this.codec.storedSha(d.path, merged);
+			if (d.side === "remote") {
+				await this.io.remove(d.from);
+				delete cacheNext[d.from];
+			}
+			await this.io.write(d.path, merged);
+			await recordWrite(d.path, sha, merged);
+			await queueUpload(d.path, merged, sha);
+			report.merged.push(d.path);
+		} else {
+			// Overlapping edits: keep this device's version under the new name and the other side's as a copy.
+			const copy = conflictCopyPath(d.path, d.side === "remote" ? device : this.host.gh.label);
+			const keep = d.side === "remote" ? remoteData : localData;
+			const other = d.side === "remote" ? localData : remoteData;
+			if (d.side === "remote") {
+				await this.io.remove(d.from);
+				delete cacheNext[d.from];
+			}
+			await this.io.write(d.path, keep);
+			await recordWrite(d.path, await this.codec.storedSha(d.path, keep), keep);
+			await queueUpload(d.path, keep);
+			await this.io.write(copy, other);
+			await queueUpload(copy, other);
+			report.conflictCopies.push(copy);
+		}
+		delete next[d.from];
+		if (d.side === "local") remoteDeletes.push(d.from);
+		renames.push(`${d.from} → ${d.path}`);
+		report.renamed.push(`${d.from} → ${d.path} (renamed and edited on both sides, merged)`);
+		this.host.log(`${d.from} was renamed to ${d.path} while also edited elsewhere: ${res?.clean ? "merged both edits" : "kept both versions"}.`);
 	}
 
 	private async resolveConflict(
@@ -938,6 +1058,7 @@ export class SyncEngine {
 		const shared = this.buildScope(false);
 		const mine = this.buildScope(true);
 		const max = (this.host.deviceScope?.().maxDownloadMB ?? 0) * 1024 * 1024;
+		const pinned = new Set(this.host.deviceScope?.().pinned ?? []);
 		this.loadCodec();
 		const head = await this.host.gh.getRef(this.s.branch);
 		if (!head) throw new Error("The branch in the repository is empty.");
@@ -946,7 +1067,7 @@ export class SyncEngine {
 
 		const plan: FreeSpacePlan = { files: [], bytes: 0 };
 		for (const f of this.io.listVault(shared)) {
-			if (mine(f.path) && !(max && f.size > max)) continue;
+			if (mine(f.path) && !(max && f.size > max && !pinned.has(f.path))) continue;
 			const r = remote.get(f.path);
 			if (!r) continue;
 			const c = state.cache[f.path];

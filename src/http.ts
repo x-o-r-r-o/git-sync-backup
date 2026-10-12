@@ -114,3 +114,29 @@ export async function compareByWalking(
 	if (fwd === null || back === null) return "ahead";
 	return "diverged";
 }
+
+/** multipart/form-data body (fields and files) as one ArrayBuffer, for APIs that require it. */
+export function buildMultipart(parts: { name: string; value: string | ArrayBuffer; filename?: string }[]): { body: ArrayBuffer; contentType: string } {
+	const boundary = `----vaultsync${Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
+	const te = new TextEncoder();
+	const chunks: Uint8Array[] = [];
+	const esc = (s: string) => s.replace(/"/g, "%22").replace(/\r|\n/g, " ");
+	for (const p of parts) {
+		const head =
+			`--${boundary}\r\nContent-Disposition: form-data; name="${esc(p.name)}"` +
+			(p.filename !== undefined ? `; filename="${esc(p.filename)}"\r\nContent-Type: application/octet-stream` : "") +
+			"\r\n\r\n";
+		chunks.push(te.encode(head));
+		chunks.push(typeof p.value === "string" ? te.encode(p.value) : new Uint8Array(p.value));
+		chunks.push(te.encode("\r\n"));
+	}
+	chunks.push(te.encode(`--${boundary}--\r\n`));
+	const total = chunks.reduce((n, c) => n + c.length, 0);
+	const out = new Uint8Array(total);
+	let o = 0;
+	for (const c of chunks) {
+		out.set(c, o);
+		o += c.length;
+	}
+	return { body: out.buffer, contentType: `multipart/form-data; boundary=${boundary}` };
+}

@@ -1,4 +1,4 @@
-// First-run setup: connect to GitHub, pick or create a repo, decide how this vault relates to it,
+// First-run setup: connect to a Git host, pick or create a repo, decide how this vault relates to it,
 // then run the first sync with live progress.
 
 import { App, Modal, Notice, Platform, Setting } from "obsidian";
@@ -9,6 +9,7 @@ import { createEncryption, passphraseStrength } from "./crypto.ts";
 import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { errMsg } from "./util.ts";
+import { t as tr } from "./i18n.ts";
 
 type Step = "connect" | "repo" | "vault" | "syncing" | "done";
 type FirstSync = "upload" | "download" | "merge" | "prefer-local";
@@ -41,7 +42,7 @@ export class SetupWizard extends Modal {
 	}
 
 	private header(n: number, title: string, sub: string) {
-		const steps = ["Connect", "Repository", "This vault", "First sync"];
+		const steps = [tr("w.stepConnect"), tr("w.stepRepo"), tr("w.stepVault"), tr("w.stepSync")];
 		const bar = this.contentEl.createDiv({ cls: "vsg-wz-steps" });
 		steps.forEach((s, i) => bar.createSpan({ text: `${i + 1}. ${s}`, cls: i + 1 === n ? "is-active" : i + 1 < n ? "is-done" : "" }));
 		this.titleEl.setText(title);
@@ -60,12 +61,12 @@ export class SetupWizard extends Modal {
 	// ---------- 1. connect ----------
 	private renderConnect() {
 		const p = this.plugin;
-		this.header(1, "Set up vault sync", "Your notes are stored in a private git repository you own. Works on desktop and mobile; nothing to install.");
+		this.header(1, tr("w.title"), tr("w.sub"));
 
 		new Setting(this.contentEl)
-			.setName("Where should your vault live?")
+			.setName(tr("w.where"))
 			.addDropdown((d) => {
-				for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? " (beta)" : ""));
+				for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label + (h.beta ? ` (${tr("s.beta")})` : ""));
 				d.setValue(p.settings.provider).onChange(async (v) => {
 					p.settings.provider = v as HostKind;
 					await p.saveSettings();
@@ -75,14 +76,14 @@ export class SetupWizard extends Modal {
 		const host = HOSTS[p.settings.provider];
 		if (p.settings.provider !== "github") {
 			new Setting(this.contentEl)
-				.setName("Server API URL")
+				.setName(tr("w.apiUrl"))
 				.setDesc(host.apiHint)
 				.addText((t) => t.setValue(p.getApiBase()).onChange((v) => p.setApiBase(v.trim() || host.defaultApi)));
 		}
 
 		new Setting(this.contentEl)
-			.setName("Name this device")
-			.setDesc("Shown in history and on conflict copies.")
+			.setName(tr("w.deviceName"))
+			.setDesc(tr("w.deviceNameDesc"))
 			.addText((t) => t.setValue(p.deviceName()).onChange((v) => p.setDeviceName(v.trim())));
 
 		const status = this.contentEl.createDiv({ cls: "vsg-wz-status" });
@@ -90,38 +91,38 @@ export class SetupWizard extends Modal {
 			p.setToken(token);
 			try {
 				this.login = (await p.gh.getUser()).login;
-				new Notice(`Signed in as ${this.login}`);
+				new Notice(tr("w.signedIn", { user: this.login }));
 				this.go("repo");
 			} catch (e) {
-				status.setText(`That token didn't work: ${errMsg(e)}`);
+				status.setText(tr("w.tokenFailed", { error: errMsg(e) }));
 			}
 		};
 
 		if (p.getToken()) {
 			new Setting(this.contentEl)
-				.setName("Already connected on this device")
-				.addButton((b) => b.setButtonText("Continue").setCta().onClick(() => done(p.getToken())));
+				.setName(tr("w.alreadyConnected"))
+				.addButton((b) => b.setButtonText(tr("w.continue")).setCta().onClick(() => done(p.getToken())));
 		}
 
 		const tokenBox = this.contentEl.createDiv({ cls: "vsg-wz-token" });
-		tokenBox.createEl("h4", { text: `Connect with a ${host.label.split(" ")[0]} token` });
+		tokenBox.createEl("h4", { text: tr("w.connectWith", { host: host.label.split(" ")[0] }) });
 		const tips = tokenBox.createEl("ol", { cls: "vsg-muted" });
 		for (const step of host.tokenSteps(p.getApiBase(), this.app.vault.getName())) {
 			const li = tips.createEl("li");
 			li.appendText(step.text + (step.link ? " " : ""));
 			if (step.link) li.createEl("a", { text: step.link.label, href: step.link.href });
 		}
-		tips.createEl("li", { text: "The token is stored securely on this device only, never in synced settings." });
+		tips.createEl("li", { text: tr("w.tokenStored") });
 		let value = "";
 		new Setting(tokenBox)
-			.setName("Token")
+			.setName(tr("w.token"))
 			.addText((t) => {
 				t.inputEl.type = "password";
-				t.setPlaceholder("Paste your token").onChange((v) => (value = v.trim()));
+				t.setPlaceholder(tr("s.tokenPlaceholder")).onChange((v) => (value = v.trim()));
 			})
 			.addButton((b) =>
-				b.setButtonText("Continue").onClick(() => {
-					if (!value) return void status.setText("Paste a token first.");
+				b.setButtonText(tr("w.continue")).onClick(() => {
+					if (!value) return void status.setText(tr("w.pasteFirst"));
 					void done(value);
 				}),
 			);
@@ -130,7 +131,7 @@ export class SetupWizard extends Modal {
 	// ---------- 2. repository ----------
 	private async renderRepo() {
 		const p = this.plugin;
-		this.header(2, "Choose a repository", `Signed in as ${this.login}. Pick the repository for this vault, or create a new private one.`);
+		this.header(2, tr("w.repoTitle"), tr("w.repoSub", { user: this.login }));
 		const pick = async (owner: string, name: string, branch: string) => {
 			p.settings.owner = owner;
 			p.settings.repo = name;
@@ -141,11 +142,11 @@ export class SetupWizard extends Modal {
 
 		let newName = this.app.vault.getName().replace(/[^A-Za-z0-9._-]+/g, "-");
 		new Setting(this.contentEl)
-			.setName("Create a new private repository")
+			.setName(tr("w.createNew"))
 			.addText((t) => t.setValue(newName).onChange((v) => (newName = v.trim())))
 			.addButton((b) =>
 				b
-					.setButtonText("Create")
+					.setButtonText(tr("w.create"))
 					.setCta()
 					.onClick(async () => {
 						try {
@@ -153,28 +154,28 @@ export class SetupWizard extends Modal {
 							await p.gh.createRepo(newName);
 							await pick(this.login, newName, "main");
 						} catch (e) {
-							new Notice(`Could not create the repository: ${errMsg(e)}. Fine-grained tokens need Administration = Read and write; or create it on github.com and pick it below.`, 10000);
+							new Notice(tr("w.createFailed", { error: errMsg(e) }), 10000);
 						}
 					}),
 			);
 
-		this.contentEl.createEl("h4", { text: "Or use an existing repository" });
-		const search = this.contentEl.createEl("input", { type: "search", placeholder: "Filter…", cls: "vsg-wz-search" });
+		this.contentEl.createEl("h4", { text: tr("w.useExisting") });
+		const search = this.contentEl.createEl("input", { type: "search", placeholder: tr("w.filter"), cls: "vsg-wz-search" });
 		const listEl = this.contentEl.createDiv({ cls: "vsg-wz-repos" });
-		listEl.setText("Loading your repositories…");
+		listEl.setText(tr("w.loadingRepos"));
 		try {
 			const repos = await p.gh.listRepos();
 			const draw = () => {
 				listEl.empty();
 				const q = search.value.toLowerCase();
 				const shown = repos.filter((r) => `${r.owner}/${r.name}`.toLowerCase().includes(q)).slice(0, 100);
-				if (!shown.length) listEl.createDiv({ cls: "vsg-muted", text: "No repositories match." });
+				if (!shown.length) listEl.createDiv({ cls: "vsg-muted", text: tr("w.noMatch") });
 				for (const r of shown) {
 					const row = listEl.createDiv({ cls: "vsg-wz-repo" });
 					row.createSpan({ text: `${r.owner}/${r.name}` });
-					row.createSpan({ text: r.private ? "private" : "PUBLIC", cls: r.private ? "vsg-badge" : "vsg-badge vsg-badge-warn" });
+					row.createSpan({ text: r.private ? tr("w.private") : tr("w.public"), cls: r.private ? "vsg-badge" : "vsg-badge vsg-badge-warn" });
 					row.onClickEvent(async () => {
-						if (!r.private && !(await confirmPlan(this.app, "Public repository", `${r.owner}/${r.name} is public: anyone on the internet could read your notes. Use a private repository unless you mean to publish them.`, [], "Use it anyway", true))) return;
+						if (!r.private && !(await confirmPlan(this.app, tr("w.publicTitle"), tr("w.publicBody", { repo: `${r.owner}/${r.name}` }), [], tr("w.useAnyway"), true))) return;
 						void pick(r.owner, r.name, r.defaultBranch);
 					});
 				}
@@ -183,36 +184,36 @@ export class SetupWizard extends Modal {
 			draw();
 			if (!Platform.isMobile) search.focus();
 		} catch (e) {
-			listEl.setText(`Could not list repositories: ${errMsg(e)}`);
+			listEl.setText(tr("w.listFailed", { error: errMsg(e) }));
 		}
-		new Setting(this.contentEl).addButton((b) => b.setButtonText("Back").onClick(() => this.go("connect")));
+		new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("connect")));
 	}
 
 	// ---------- 3. this vault ----------
 	private async renderVault() {
 		const p = this.plugin;
-		this.header(3, "This vault and the repository", `${p.settings.owner}/${p.settings.repo} (${p.settings.branch})`);
-		const info = this.contentEl.createDiv({ cls: "vsg-wz-status", text: "Looking at both sides…" });
+		this.header(3, tr("w.vaultTitle"), `${p.settings.owner}/${p.settings.repo} (${p.settings.branch})`);
+		const info = this.contentEl.createDiv({ cls: "vsg-wz-status", text: tr("w.looking") });
 		let remoteCount = 0;
 		try {
 			remoteCount = await p.gh.countFiles(p.settings.branch);
 		} catch (e) {
-			info.setText(`Could not read the repository: ${errMsg(e)}`);
-			new Setting(this.contentEl).addButton((b) => b.setButtonText("Back").onClick(() => this.go("repo")));
+			info.setText(tr("w.readFailed", { error: errMsg(e) }));
+			new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("repo")));
 			return;
 		}
 		const localCount = this.app.vault.getFiles().length;
-		info.setText(`This vault: ${localCount} file${localCount === 1 ? "" : "s"} · Repository: ${remoteCount} file${remoteCount === 1 ? "" : "s"}`);
+		info.setText(tr("w.counts", { local: localCount, remote: remoteCount }));
 
 		const options: [FirstSync, string, string][] = [];
-		if (remoteCount <= 1) options.push(["upload", "Upload this vault", "This is the first device. Everything here is copied to GitHub."]);
+		if (remoteCount <= 1) options.push(["upload", tr("w.optUpload"), tr("w.optUploadDesc")]);
 		else if (localCount <= 3) {
-			options.push(["download", "Download the vault from GitHub", "This device is new. Files from GitHub replace any starter files here."]);
-			options.push(["merge", "Merge, keep both when different", "Nothing is overwritten; differing files are kept side by side."]);
+			options.push(["download", tr("w.optDownload"), tr("w.optDownloadDesc")]);
+			options.push(["merge", tr("w.optMerge"), tr("w.optMergeDesc")]);
 		} else {
-			options.push(["merge", "Merge, keep both when different (safest)", "Files only on one side are copied over. Files that differ are kept side by side."]);
-			options.push(["download", "Merge, GitHub wins when different", "Use the repository's version when a file exists on both sides."]);
-			options.push(["prefer-local", "Merge, this device wins when different", "Use this device's version when a file exists on both sides."]);
+			options.push(["merge", tr("w.optMergeSafe"), tr("w.optMergeSafeDesc")]);
+			options.push(["download", tr("w.optRemoteWins"), tr("w.optRemoteWinsDesc")]);
+			options.push(["prefer-local", tr("w.optLocalWins"), tr("w.optLocalWinsDesc")]);
 		}
 		this.choice = options[0][0];
 		const group = this.contentEl.createDiv({ cls: "vsg-wz-options" });
@@ -226,7 +227,7 @@ export class SetupWizard extends Modal {
 			t.createDiv({ text: title, cls: "vsg-commit-title" });
 			t.createDiv({ text: desc, cls: "vsg-muted" });
 		}
-		this.contentEl.createEl("p", { cls: "vsg-muted", text: "Nothing is ever deleted on the first sync." });
+		this.contentEl.createEl("p", { cls: "vsg-muted", text: tr("w.neverDeletes") });
 
 		// Encryption: unlock an encrypted repo, or offer to encrypt a new one.
 		let encPass = "";
@@ -234,27 +235,27 @@ export class SetupWizard extends Modal {
 		const marker = await readRemoteMarker(p).catch(() => null);
 		if (marker && !p.isEncrypted()) {
 			const box = this.contentEl.createDiv({ cls: "vsg-h-error" });
-			box.createDiv({ text: "🔒 This repository is end-to-end encrypted. Unlock it to continue." });
-			new Setting(box).addButton((b) => b.setButtonText("Enter passphrase").setCta().onClick(() => new EncryptionModal(this.app, p, () => this.render()).open()));
+			box.createDiv({ text: tr("w.encrypted") });
+			new Setting(box).addButton((b) => b.setButtonText(tr("health.enterPassphrase")).setCta().onClick(() => new EncryptionModal(this.app, p, () => this.render()).open()));
 		} else if (!marker && !p.isEncrypted() && remoteCount <= 1) {
 			const hint = this.contentEl.createDiv({ cls: "vsg-muted" });
 			new Setting(this.contentEl)
-				.setName("Encrypt end-to-end (optional)")
-				.setDesc("GitHub only sees unreadable data. Every device will need this passphrase, and it can't be recovered.")
+				.setName(tr("w.encryptOpt"))
+				.setDesc(tr("w.encryptOptDesc"))
 				.addToggle((t) => t.onChange((v) => (encWanted = v)))
 				.addText((t) => {
 					t.inputEl.type = "password";
-					t.setPlaceholder("Passphrase").onChange((v) => {
+					t.setPlaceholder(tr("w.passphrase")).onChange((v) => {
 						encPass = v;
 						hint.setText(v ? passphraseStrength(v).hint : "");
 					});
 				});
 		} else if (p.isEncrypted()) {
-			this.contentEl.createDiv({ cls: "vsg-muted", text: "🔒 End-to-end encryption is on for this device." });
+			this.contentEl.createDiv({ cls: "vsg-muted", text: tr("w.encOnDevice") });
 		}
 
 		new Setting(this.contentEl)
-			.setName(`Also sync settings, themes and plugins (${this.app.vault.configDir})`)
+			.setName(tr("w.alsoConfig", { dir: this.app.vault.configDir }))
 			.addToggle((t) =>
 				t.setValue(p.settings.syncConfigDir).onChange(async (v) => {
 					p.settings.syncConfigDir = v;
@@ -262,16 +263,16 @@ export class SetupWizard extends Modal {
 				}),
 			);
 		new Setting(this.contentEl)
-			.addButton((b) => b.setButtonText("Back").onClick(() => this.go("repo")))
+			.addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("repo")))
 			.addButton((b) =>
 				b
-					.setButtonText("Start first sync")
+					.setButtonText(tr("w.start"))
 					.setCta()
 					.onClick(async () => {
-						if (marker && !p.isEncrypted()) return void new Notice("Unlock the encrypted repository first.");
+						if (marker && !p.isEncrypted()) return void new Notice(tr("w.unlockFirst"));
 						if (encWanted) {
 							if (!passphraseStrength(encPass).ok) return void new Notice(passphraseStrength(encPass).hint);
-							if (!(await confirmPlan(this.app, "Save your passphrase", "Have you saved this passphrase somewhere safe? There is no way to recover it, and without it the copy in the repository can't be read.", [], "I have saved it"))) return;
+							if (!(await confirmPlan(this.app, tr("w.saveTitle"), tr("w.saveBody"), [], tr("w.saved")))) return;
 							const { meta, master } = await createEncryption(encPass);
 							await p.saveEncryption({ meta, master });
 						}
@@ -283,8 +284,8 @@ export class SetupWizard extends Modal {
 	// ---------- 4. syncing ----------
 	private renderSyncing() {
 		const p = this.plugin;
-		this.header(4, "First sync", "This can take a while for a large vault. You can close this window; sync continues in the background.");
-		const prog = this.contentEl.createDiv({ cls: "vsg-wz-progress", text: "Starting…" });
+		this.header(4, tr("w.syncTitle"), tr("w.syncSub"));
+		const prog = this.contentEl.createDiv({ cls: "vsg-wz-progress", text: tr("w.starting") });
 		p.onProgress = (t) => prog.setText(t);
 		const prefer = this.choice === "download" ? "remote" : this.choice === "prefer-local" ? "local" : undefined;
 		void p.firstSync(prefer).then((r) => {
@@ -297,14 +298,14 @@ export class SetupWizard extends Modal {
 
 	// ---------- done ----------
 	private renderDone() {
-		this.titleEl.setText("You're all set");
+		this.titleEl.setText(tr("w.doneTitle"));
 		this.contentEl.createEl("p", { text: this.resultText });
 		const ul = this.contentEl.createEl("ul", { cls: "vsg-muted" });
-		ul.createEl("li", { text: "Sync runs on startup, after edits and periodically. The ribbon button syncs now." });
-		ul.createEl("li", { text: "The sync status panel (activity icon) shows what's pending and anything that needs attention." });
-		ul.createEl("li", { text: "On each other device: install the plugin and run this wizard with the same repository." });
+		ul.createEl("li", { text: tr("w.tip1") });
+		ul.createEl("li", { text: tr("w.tip2") });
+		ul.createEl("li", { text: tr("w.tip3") });
 		new Setting(this.contentEl)
-			.addButton((b) => b.setButtonText("Open sync status").onClick(() => void this.plugin.openHealth().then(() => this.close())))
-			.addButton((b) => b.setButtonText("Done").setCta().onClick(() => this.close()));
+			.addButton((b) => b.setButtonText(tr("w.openStatus")).onClick(() => void this.plugin.openHealth().then(() => this.close())))
+			.addButton((b) => b.setButtonText(tr("w.done")).setCta().onClick(() => this.close()));
 	}
 }

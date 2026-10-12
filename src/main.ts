@@ -1,6 +1,7 @@
 import { debounce, Debouncer, normalizePath, Notice, Platform, Plugin, setIcon, TAbstractFile, TFile } from "obsidian";
 import { HOSTS, makeRemote } from "./hosts.ts";
 import type { Remote } from "./remote.ts";
+import type { BlobCache, BlobCacheStore } from "./bitbucket.ts";
 import { HEALTH_VIEW, HealthView } from "./health.ts";
 import { VaultIO } from "./io.ts";
 import type { Decision, SyncMode } from "./plan.ts";
@@ -29,6 +30,7 @@ import type {
 	VaultSyncSettings,
 } from "./types.ts";
 import {
+	RemoteOnlyModal,
 	CommitListModal,
 	ConflictModal,
 	confirmPlan,
@@ -93,6 +95,20 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		await this.loadEncryption();
 
 		this.registerView(HEALTH_VIEW, (leaf) => new HealthView(leaf, this));
+		// Reading view: offer to download embeds whose file wasn't downloaded to this device.
+		this.registerMarkdownPostProcessor((el, ctx) => {
+			if (!Object.keys(this.state.remoteOnly ?? {}).length) return;
+			el.querySelectorAll(".internal-embed").forEach((embed) => {
+				const src = embed.getAttribute("src");
+				if (!src || this.app.metadataCache.getFirstLinkpathDest(src.split("#")[0], ctx.sourcePath)) return;
+				const f = this.remoteOnlyFor(src);
+				if (!f || embed.nextElementSibling?.hasClass("vsg-ondemand")) return;
+				const box = createDiv({ cls: "vsg-ondemand" });
+				box.createSpan({ text: t("m.embedMissing", { path: f.path, mb: (f.size / 1048576).toFixed(1) }) + " " });
+				box.createEl("button", { text: t("m.download") }).onClickEvent(() => void this.downloadOnDemand([f.path]));
+				embed.after(box);
+			});
+		});
 		this.ribbonEl = this.addRibbonIcon("refresh-cw", t("ribbon.sync"), () => this.sync("manual"));
 		this.addRibbonIcon("activity", t("ribbon.status"), () => this.openHealth());
 		if (!Platform.isMobile) {
@@ -214,13 +230,27 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	/** The git host client for the configured provider (rebuilt when the provider changes). */
 	get gh(): Remote {
 		const kind = this.settings.provider ?? "github";
-		if (!this.remoteCache || this.remoteCache.kind !== kind) {
+		const key = `${kind}|${this.settings.owner}|${this.settings.repo}`;
+		if (!this.remoteCache || this.remoteCache.kind !== key) {
 			this.remoteCache = {
-				kind,
-				remote: makeRemote(kind, () => ({ token: this.getToken(), apiBase: this.getApiBase(), owner: this.settings.owner, repo: this.settings.repo })),
+				kind: key,
+				remote: makeRemote(
+					kind,
+					() => ({ token: this.getToken(), apiBase: this.getApiBase(), owner: this.settings.owner, repo: this.settings.repo }),
+					this.blobCacheStore(`${this.settings.owner}-${this.settings.repo}`),
+				),
 			};
 		}
 		return this.remoteCache.remote;
+	}
+	/** Per-repository hash cache for hosts without blob hashes (Bitbucket). Never synced. */
+	blobCacheStore(key: string): BlobCacheStore {
+		const path = normalizePath(this.stateFilePath.replace(/sync-state\.json$/, `sync-state-cache-${key.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`));
+		const adapter = this.app.vault.adapter;
+		return {
+			load: async () => (await adapter.exists(path) ? (JSON.parse(await adapter.read(path)) as BlobCache) : null),
+			save: async (c) => adapter.write(path, JSON.stringify(c)),
+		};
 	}
 	hostLabel(): string {
 		return HOSTS[this.settings.provider ?? "github"].label;
@@ -266,11 +296,56 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				exclude: Array.isArray(raw.exclude) ? raw.exclude.map(String) : [],
 				// Phones default to a 25 MB download limit (big files are memory-heavy on mobile); 0 = no limit.
 				maxDownloadMB: raw.maxDownloadMB === undefined ? (Platform.isMobile ? 25 : 0) : Number(raw.maxDownloadMB) || 0,
+				pinned: this.pinned(),
 			};
 		} catch {
 			return { include: [], exclude: [], maxDownloadMB: 0 };
 		}
 	}
+	/** Files this device downloaded on demand (kept in sync despite the size limit). */
+	pinned(): string[] {
+		try {
+			const v = JSON.parse(this.localGet("pinned") ?? "[]") as unknown;
+			return Array.isArray(v) ? v.map(String) : [];
+		} catch {
+			return [];
+		}
+	}
+	private setPinned(paths: string[]) {
+		this.localSet("pinned", JSON.stringify([...new Set(paths)]));
+	}
+	/** Remote files not downloaded to this device, largest first. */
+	remoteOnlyFiles(): { path: string; size: number }[] {
+		return Object.entries(this.state.remoteOnly ?? {})
+			.map(([path, e]) => ({ path, size: e.size }))
+			.sort((a, b) => b.size - a.size);
+	}
+	/** Download remote-only files now and keep them synced on this device. */
+	async downloadOnDemand(paths: string[]) {
+		if (!paths.length) return;
+		this.setPinned([...this.pinned(), ...paths]);
+		new Notice(paths.length === 1 ? t("m.downloadingOne", { path: paths[0] }) : t("m.downloadingMany", { n: paths.length }));
+		await this.sync("manual", this.settings.mode, { firstSyncPrefer: undefined });
+	}
+	clearPinned() {
+		this.setPinned([]);
+	}
+	openRemoteOnly() {
+		const files = this.remoteOnlyFiles();
+		if (!files.length) return void new Notice(t("m.allLocal"));
+		new RemoteOnlyModal(this.app, files, (f) => void this.downloadOnDemand([f.path])).open();
+	}
+	/** Finds the remote-only file an embed or link points to. */
+	private remoteOnlyFor(linkpath: string): { path: string; size: number } | null {
+		const clean = linkpath.split("#")[0].split("|")[0];
+		const all = this.remoteOnlyFiles();
+		const exact = all.find((f) => f.path === clean);
+		if (exact) return exact;
+		const base = clean.split("/").pop()!;
+		const candidates = all.filter((f) => f.path.endsWith("/" + clean) || f.path.split("/").pop() === base);
+		return candidates.sort((a, b) => a.path.length - b.path.length)[0] ?? null;
+	}
+
 	setDeviceScope(scope: DeviceScope) {
 		this.localSet("scope", JSON.stringify(scope));
 		this.fullScanNeeded = true;
@@ -315,11 +390,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.syncing = true;
 		try {
 			const removed = await this.engine.removeUnencryptedFiles((files) =>
-				confirmPlan(this.app, "Remove unencrypted copies", "Delete these unencrypted files from the repository in one commit. Your notes stay safe: their encrypted copies are already uploaded. Note: older versions remain in the repository's history.", [{ title: `Delete from ${this.hostLabel()}`, items: files }], "Remove", true),
+				confirmPlan(this.app, t("m.plainTitle"), t("m.plainBody"), [{ title: t("m.deleteFrom", { host: this.hostLabel() }), items: files }], t("m.remove"), true),
 			);
-			new Notice(removed.length ? `Removed ${removed.length} unencrypted file(s) from the repository.` : "No unencrypted files found.");
+			new Notice(removed.length ? t("m.plainRemoved", { n: removed.length }) : t("m.plainNone"));
 		} catch (e) {
-			if (!(e instanceof SyncCancelled)) new Notice(`Could not remove files: ${errMsg(e)}`);
+			if (!(e instanceof SyncCancelled)) new Notice(t("m.removeFailed", { error: errMsg(e) }));
 		} finally {
 			this.syncing = false;
 		}
@@ -384,17 +459,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	/** First sync from the setup wizard. Returns a one-line summary. */
 	async firstSync(prefer?: "local" | "remote"): Promise<string> {
 		await this.sync("manual", this.settings.mode, prefer ? { firstSyncPrefer: prefer } : { firstSyncPrefer: undefined });
-		if (this.lastError) return `The first sync failed: ${this.lastError}. You can retry from the sync status panel.`;
+		if (this.lastError) return t("m.firstFailed", { error: this.lastError });
 		const r = this.lastReport;
-		if (!r) return "Sync finished.";
-		if (r.upToDate) return "Everything was already in sync.";
+		if (!r) return t("m.syncFinished");
+		if (r.upToDate) return t("m.alreadyInSync");
 		const parts = [
-			r.downloaded.length && `${r.downloaded.length} downloaded`,
-			r.uploaded.length && `${r.uploaded.length} uploaded`,
-			r.conflictCopies.length && `${r.conflictCopies.length} kept as both versions`,
-			r.skipped.length && `${r.skipped.length} skipped (see status panel)`,
+			r.downloaded.length && t("m.nDownloaded", { n: r.downloaded.length }),
+			r.uploaded.length && t("m.nUploaded", { n: r.uploaded.length }),
+			r.conflictCopies.length && t("m.nBoth", { n: r.conflictCopies.length }),
+			r.skipped.length && t("m.nSkipped", { n: r.skipped.length }),
 		].filter(Boolean);
-		return `First sync complete: ${parts.join(", ") || "no changes"}.`;
+		return t("m.firstDone", { summary: parts.join(", ") || t("m.noChanges") });
 	}
 
 	async freeUpSpace() {
@@ -412,16 +487,16 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const plan = await this.engine.freeUpSpace((p) =>
 				confirmPlan(
 					this.app,
-					"Free up space on this device",
-					`Remove ${p.files.length} local file(s) (${(p.bytes / 1048576).toFixed(1)} MB) that this device doesn't sync (outside its folders or above its download limit). Each one is identical to the copy in the repository, which is kept. They go to the trash.`,
-					[{ title: "Remove from this device", items: p.files }],
-					"Free up space",
+					t("cmd.freeSpace"),
+					t("m.freeBody", { n: p.files.length, mb: (p.bytes / 1048576).toFixed(1) }),
+					[{ title: t("m.removeHere"), items: p.files }],
+					t("s.freeSpace"),
 				),
 			);
-			if (!plan.files.length) new Notice("Nothing to remove: no local files outside this device's scope are safely in the repository.");
-			else new Notice(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB.`);
+			if (!plan.files.length) new Notice(t("m.freeNothing"));
+			else new Notice(t("m.freed", { mb: (plan.bytes / 1048576).toFixed(1) }));
 		} catch (e) {
-			if (!(e instanceof SyncCancelled)) new Notice(`Could not free up space: ${errMsg(e)}`);
+			if (!(e instanceof SyncCancelled)) new Notice(t("m.freeFailed", { error: errMsg(e) }));
 		}
 		this.refreshHealth();
 	}
@@ -522,15 +597,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			offline: "wifi-off",
 			conflict: "alert-triangle",
 		};
-		const last = this.state?.lastSync ? `Last sync ${new Date(this.state.lastSync).toLocaleTimeString()}` : "Not synced yet";
-		const title = detail || (status === "syncing" ? "Syncing…" : last);
+		const last = this.state?.lastSync ? t("h.lastSync", { ago: new Date(this.state.lastSync).toLocaleTimeString() }) : t("health.notSynced");
+		const title = detail || (status === "syncing" ? t("health.syncing") : last);
 		if (this.statusEl) {
 			this.statusEl.empty();
 			const icon = this.statusEl.createSpan({ cls: `vsg-icon vsg-${status}` });
 			setIcon(icon, icons[status]);
 			const pending = this.dirty.size;
 			if (pending && status !== "syncing") this.statusEl.createSpan({ cls: "vsg-pending", text: String(pending) });
-			this.statusEl.setAttr("aria-label", `${title}. Click for sync status.`);
+			this.statusEl.setAttr("aria-label", t("m.statusTip", { title }));
 			this.statusEl.setAttr("data-tooltip-position", "top");
 		}
 		this.ribbonEl?.toggleClass("vsg-spinning", status === "syncing");
@@ -578,8 +653,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// ---------------- sync ----------------
 
 	private configProblem(): string | null {
-		if (!this.getToken()) return "Add an access token in Settings → Vault Sync for Git.";
-		if (!this.settings.owner || !this.settings.repo) return "Set the repository owner and name in the plugin settings.";
+		if (!this.getToken()) return t("m.needToken");
+		if (!this.settings.owner || !this.settings.repo) return t("m.needRepo");
 		return null;
 	}
 
@@ -593,7 +668,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			return this.openReview();
 		}
 		if (trigger !== "manual" && !navigator.onLine) {
-			this.setStatus("offline", "Offline: will sync when back online");
+			this.setStatus("offline", t("m.offline"));
 			return;
 		}
 		if (this.syncing) {
@@ -610,7 +685,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		try {
 			const r = await this.engine.run(mode, opts);
 			const sharedErrors = opts.defer || opts.firstSyncPrefer ? [] : await this.syncShared(mode);
-			if (sharedErrors.length) this.notify(`Shared folder sync failed:\n${sharedErrors.join("\n")}`, true);
+			if (sharedErrors.length) this.notify(`${t("m.sharedFailed")}\n${sharedErrors.join("\n")}`, true);
 			written = new Set([...r.downloaded, ...r.merged, ...r.conflictCopies, ...r.deletedLocal]);
 			const now = Date.now();
 			for (const p of written) this.writtenBySync.set(p, now);
@@ -627,7 +702,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				this.lastError = errMsg(e);
 				this.lastErrorAt = Date.now();
 				this.log(`Sync failed: ${errMsg(e)}`);
-				this.setStatus("error", `Sync failed: ${errMsg(e)}`);
+				this.setStatus("error", t("notice.failed", { error: errMsg(e) }));
 				// Automatic syncs only warn on the first failure in a row, not every interval.
 				if (trigger === "manual") new Notice(t("notice.failed", { error: errMsg(e) }), 8000);
 				else if (!this.lastFailed) this.notify(t("notice.failed", { error: errMsg(e) }), true);
@@ -665,10 +740,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		for (const s of r.skipped) this.log(`Skipped ${s}`);
 
 		if (r.errors.length) {
-			this.setStatus("error", `${r.errors.length} file(s) failed: see sync status`);
+			this.setStatus("error", t("m.filesFailed", { n: r.errors.length }));
 			this.notify(t("notice.errors", { n: r.errors.length }), true);
 		} else if (r.conflictCopies.length) {
-			this.setStatus("conflict", `${r.conflictCopies.length} conflict copy(ies) created`);
+			this.setStatus("conflict", t("m.copiesCreated", { n: r.conflictCopies.length }));
 			this.notify(t("notice.conflicts", { n: r.conflictCopies.length }), true);
 		} else {
 			this.setStatus("ok");
@@ -693,10 +768,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.state.lastSnapshot = Date.now();
 			await this.saveState();
 			this.log(`Created snapshot tag ${tag} at ${head.slice(0, 7)}.`);
-			if (manual) new Notice(`Snapshot created: ${tag}`);
+			if (manual) new Notice(t("m.snapshotOk", { tag }));
 		} catch (e) {
 			this.log(`Snapshot failed: ${errMsg(e)}`);
-			if (manual) new Notice(`Snapshot failed: ${errMsg(e)}`);
+			if (manual) new Notice(t("m.snapshotFailed", { error: errMsg(e) }));
 		}
 	}
 
@@ -721,21 +796,21 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				let newData: ArrayBuffer | null;
 				const H = this.hostLabel();
 				let oldLabel = H;
-				let newLabel = "This device";
+				let newLabel = t("u.thisDevice");
 				if (d.kind === "move-local") {
 					oldData = await local(d.from);
 					newData = await blobOf(d.path, remoteSha);
-					oldLabel = `This device (${d.from})`;
+					oldLabel = `${t("u.thisDevice")} (${d.from})`;
 					newLabel = `${H} (${d.path})`;
 				} else if (d.kind === "adopt-remote-edit") {
 					oldData = await local(d.path);
 					newData = await blobOf(d.path, d.sha);
-					oldLabel = `This device (${d.path})`;
+					oldLabel = `${t("u.thisDevice")} (${d.path})`;
 					newLabel = `${H} (${d.from})`;
 				} else if (d.kind === "download" || d.kind === "delete-local") {
 					oldData = await local(d.path);
 					newData = await blobOf(d.path, remoteSha);
-					oldLabel = "This device";
+					oldLabel = t("u.thisDevice");
 					newLabel = H;
 				} else {
 					oldData = await blobOf(d.path, remoteSha);
@@ -747,7 +822,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			};
 			new ReviewModal(this.app, pv.decisions, pv.skipped, loadDiff, (deferred) => void this.sync("manual", this.settings.mode, { defer: deferred })).open();
 		} catch (e) {
-			new Notice(`Could not prepare review: ${errMsg(e)}`);
+			new Notice(t("m.reviewFailed", { error: errMsg(e) }));
 		}
 	}
 
@@ -758,7 +833,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const localData = await this.app.vault.readBinary(file);
 			const o = await this.textOf(file.path, remote);
 			const n = await this.textOf(file.path, localData);
-			return { oldLabel: remote ? this.hostLabel() : `${this.hostLabel()} (file not there)`, newLabel: "This device", oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
+			return { oldLabel: remote ? this.hostLabel() : t("m.notThere", { host: this.hostLabel() }), newLabel: t("u.thisDevice"), oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
 		}).open();
 	}
 
@@ -805,42 +880,42 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	private browseAt(e: TimelineEntry) {
-		new CommitListModal(this.app, `Files at ${e.sha.slice(0, 7)} (${new Date(e.date).toLocaleString()})`, async () => {
+		new CommitListModal(this.app, t("m.filesAt", { sha: e.sha.slice(0, 7), date: new Date(e.date).toLocaleString() }), async () => {
 			const files = await this.engine.filesAt(e.sha);
 			return [...files]
 				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([p, t]) => ({ label: p, sub: `${t.size} bytes`, run: () => void this.openVersion(p, e) }));
+				.map(([p, f]) => ({ label: p, sub: t("m.bytes", { n: f.size }), run: () => void this.openVersion(p, e) }));
 		}).open();
 	}
 
 	private async restore(e: TimelineEntry, folder: string) {
 		if (this.syncing) return void new Notice(t("notice.busy"));
-		const what = folder ? `folder "${folder}"` : "whole vault";
+		const what = folder ? t("m.whatFolder", { folder }) : t("m.whatVault");
 		this.syncing = true;
-		this.setStatus("syncing", `Restoring ${what}…`);
+		this.setStatus("syncing", t("m.restoring", { what }));
 		try {
 			const plan = await this.engine.restoreTo(e.sha, folder, (p) =>
 				confirmPlan(
 					this.app,
-					`Restore ${what}`,
-					`Bring the ${what} back to how it was on ${new Date(e.date).toLocaleString()} (${e.sha.slice(0, 7)}). This is added as a new commit, so today's version stays in history and you can undo it the same way.`,
+					t("m.restoreTitle", { what }),
+					t("m.restoreBody", { what, date: new Date(e.date).toLocaleString(), sha: e.sha.slice(0, 7) }),
 					[
-						{ title: "Restored to the older version", items: p.changed },
-						{ title: "Brought back (deleted since)", items: p.added },
-						{ title: "Removed (created since)", items: p.removed },
+						{ title: t("m.restoredOlder"), items: p.changed },
+						{ title: t("m.broughtBack"), items: p.added },
+						{ title: t("m.removedSince"), items: p.removed },
 					],
-					"Restore",
+					t("m.restore"),
 					true,
 				),
 			);
 			const n = plan.changed.length + plan.added.length + plan.removed.length;
-			new Notice(n ? `Restored ${what}: ${n} file(s) changed.` : `The ${what} already matches that point in time.`);
+			new Notice(n ? t("m.restored", { what, n }) : t("m.restoreSame", { what }));
 			this.lastError = null;
 		} catch (err) {
 			if (!(err instanceof SyncCancelled)) {
 				this.lastError = errMsg(err);
 				this.lastErrorAt = Date.now();
-				new Notice(`Restore failed: ${errMsg(err)}`, 8000);
+				new Notice(t("m.restoreFailed", { error: errMsg(err) }), 8000);
 			}
 			this.log(errMsg(err));
 		} finally {
@@ -854,28 +929,28 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
 		if (this.syncing) return void new Notice(t("notice.busy"));
 		this.syncing = true;
-		this.setStatus("syncing", "Comparing with GitHub…");
+		this.setStatus("syncing", t("m.comparing"));
 		try {
 			const plan = await this.engine.resetToRemote((p) =>
 				confirmPlan(
 					this.app,
-					"Make this device match the repository",
-					"Discard this device's unsynced changes and make it an exact copy of the repository. Replaced and removed files are moved to the trash first, so you can still recover them.",
+					t("health.reset"),
+					t("m.resetBody"),
 					[
-						{ title: `Replaced with the ${this.hostLabel()} version`, items: p.overwrite },
-						{ title: "Downloaded", items: p.download },
-						{ title: "Removed (not in the repository)", items: p.remove },
+						{ title: t("m.replacedWith", { host: this.hostLabel() }), items: p.overwrite },
+						{ title: t("m.downloaded"), items: p.download },
+						{ title: t("m.removedNotInRepo"), items: p.remove },
 					],
-					"Match repository",
+					t("m.matchRepo"),
 					true,
 				),
 			);
 			const n = plan.overwrite.length + plan.download.length + plan.remove.length;
-			new Notice(n ? `This device now matches the repository (${n} file(s) changed).` : "This device already matches the repository.");
+			new Notice(n ? t("m.matched", { n }) : t("m.alreadyMatches"));
 			this.fullScanNeeded = true;
 			this.dirty.clear();
 		} catch (err) {
-			if (!(err instanceof SyncCancelled)) new Notice(`Reset failed: ${errMsg(err)}`, 8000);
+			if (!(err instanceof SyncCancelled)) new Notice(t("m.resetFailed", { error: errMsg(err) }), 8000);
 			this.log(errMsg(err));
 		} finally {
 			this.syncing = false;
@@ -899,6 +974,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.addCommand({ id: "setup-wizard", name: t("cmd.wizard"), callback: () => this.openWizard() });
 		this.addCommand({ id: "encryption", name: t("cmd.encryption"), callback: () => this.openEncryption() });
 		this.addCommand({ id: "free-up-space", name: t("cmd.freeSpace"), callback: () => this.freeUpSpace() });
+		this.addCommand({ id: "download-on-demand", name: t("cmd.onDemand"), callback: () => this.openRemoteOnly() });
 		this.addCommand({ id: "show-log", name: t("cmd.log"), callback: () => this.openLog() });
 		this.addCommand({
 			id: "file-history",
@@ -927,7 +1003,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			callback: async () => {
 				const repo = await this.gh.getRepo().catch(() => null);
 				if (repo?.html_url) window.open(repo.html_url);
-				else new Notice("Could not find the repository. Check the connection settings.");
+				else new Notice(t("m.repoNotFound"));
 			},
 		});
 
@@ -941,7 +1017,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	private showFileHistory(file: TFile) {
-		new CommitListModal(this.app, `History: ${file.path}`, async () => {
+		new CommitListModal(this.app, t("m.history", { path: file.path }), async () => {
 			const commits = await this.gh.listCommits(this.settings.branch, await this.engine.remotePathOf(file.path), 50);
 			return commits.map((c) => ({
 				label: c.message.split("\n")[0],
@@ -954,7 +1030,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private async openVersion(path: string, commit: { sha: string; message: string; date: string }) {
 		try {
 			const data = await this.engine.readRemoteFile(path, commit.sha);
-			if (!data) return void new Notice("File did not exist in that version.");
+			if (!data) return void new Notice(t("m.notInVersion"));
 			let current: string | null | undefined;
 			if (await this.app.vault.adapter.exists(path)) current = asText(path, await this.io.read(path));
 			new FileVersionModal(this.app, path, commit, asText(path, data), data.byteLength, current, async (asCopy) => {
@@ -963,19 +1039,19 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					// VaultIO recreates missing folders and handles hidden (config) paths.
 					await this.io.write(target, data);
 				} catch (e) {
-					return void new Notice(`Restore failed: ${errMsg(e)}`);
+					return void new Notice(t("m.restoreFailed", { error: errMsg(e) }));
 				}
-				new Notice(`Restored ${target}. It will be uploaded on the next sync.`);
+				new Notice(t("m.restoredFile", { path: target }));
 				const nf = this.app.vault.getAbstractFileByPath(target);
 				if (asCopy && nf instanceof TFile) await this.app.workspace.getLeaf(true).openFile(nf);
 			}).open();
 		} catch (e) {
-			new Notice(`Could not load version: ${errMsg(e)}`);
+			new Notice(t("m.versionFailed", { error: errMsg(e) }));
 		}
 	}
 
 	private showDeletedFiles() {
-		new CommitListModal(this.app, "Recently deleted files", async () => {
+		new CommitListModal(this.app, t("m.recentlyDeleted"), async () => {
 			const commits = await this.gh.listCommits(this.settings.branch, undefined, 25);
 			const rows: { label: string; sub: string; run: () => void }[] = [];
 			const seen = new Set<string>();
@@ -991,7 +1067,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					const parent = detail.parent;
 					rows.push({
 						label: name,
-						sub: `Deleted ${new Date(c.date).toLocaleString()} · ${c.message.split("\n")[0]}`,
+						sub: t("m.deletedOn", { date: new Date(c.date).toLocaleString(), msg: c.message.split("\n")[0] }),
 						run: () => void this.openVersion(name, { sha: parent, message: `before ${c.sha.slice(0, 7)}`, date: c.date }),
 					});
 				}

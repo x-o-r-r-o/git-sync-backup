@@ -6,6 +6,7 @@ import type { HostKind } from "./hosts.ts";
 import type VaultSyncPlugin from "./main.ts";
 import type { SharedFolder } from "./types.ts";
 import { errMsg } from "./util.ts";
+import { t as tr } from "./i18n.ts";
 
 class FolderInputSuggest extends AbstractInputSuggest<TFolder> {
 	constructor(app: App, private input: HTMLInputElement, private onPick: (f: string) => void) {
@@ -36,54 +37,54 @@ export class SharedFolderModal extends Modal {
 	}
 	onOpen() {
 		const { contentEl } = this;
-		this.titleEl.setText("Add a shared folder");
+		this.titleEl.setText(tr("s.sharedAdd"));
 		contentEl.createEl("p", {
 			cls: "vsg-muted",
-			text: "Sync one folder with its own repository, for example a team folder, while the rest of your vault stays in your private repository. The folder maps to the root of that repository.",
+			text: tr("sh.intro"),
 		});
-		new Setting(contentEl).setName("Folder").addText((t) => {
-			t.setPlaceholder("Work").onChange((v) => (this.def.folder = v.trim().replace(/^\/+|\/+$/g, "")));
+		new Setting(contentEl).setName(tr("sh.folder")).addText((t) => {
+			t.setPlaceholder(tr("sh.folderPlaceholder")).onChange((v) => (this.def.folder = v.trim().replace(/^\/+|\/+$/g, "")));
 			new FolderInputSuggest(this.app, t.inputEl, (f) => (this.def.folder = f));
 		});
-		new Setting(contentEl).setName("Host").addDropdown((d) => {
+		new Setting(contentEl).setName(tr("s.host")).addDropdown((d) => {
 			for (const [k, h] of Object.entries(HOSTS)) d.addOption(k, h.label);
 			d.setValue(this.def.provider).onChange((v) => (this.def.provider = v as HostKind));
 		});
-		new Setting(contentEl).setName("Owner").setDesc("User, organisation or group of the shared repository.").addText((t) => t.onChange((v) => (this.def.owner = v.trim())));
-		new Setting(contentEl).setName("Repository").addText((t) => t.onChange((v) => (this.def.repo = v.trim())));
-		new Setting(contentEl).setName("Branch").addText((t) => t.setValue("main").onChange((v) => (this.def.branch = v.trim() || "main")));
+		new Setting(contentEl).setName(tr("s.owner")).setDesc(tr("sh.ownerDesc")).addText((t) => t.onChange((v) => (this.def.owner = v.trim())));
+		new Setting(contentEl).setName(tr("s.repo")).addText((t) => t.onChange((v) => (this.def.repo = v.trim())));
+		new Setting(contentEl).setName(tr("s.branch")).addText((t) => t.setValue("main").onChange((v) => (this.def.branch = v.trim() || "main")));
 		new Setting(contentEl)
-			.setName("Token (optional)")
-			.setDesc("Leave empty to use your main token (same host only). Stored securely on this device.")
+			.setName(tr("sh.token"))
+			.setDesc(tr("sh.tokenDesc"))
 			.addText((t) => {
 				t.inputEl.type = "password";
 				t.onChange((v) => (this.token = v.trim()));
 			});
 		contentEl.createEl("p", {
 			cls: "vsg-muted",
-			text: "Files already in this folder in your main repository stay there (in its history) but are no longer synced to it. Encryption does not apply to shared folders, because collaborators need to read them.",
+			text: tr("sh.note"),
 		});
 		const msg = contentEl.createDiv({ cls: "vsg-muted" });
 		new Setting(contentEl).addButton((b) =>
 			b
-				.setButtonText("Add")
+				.setButtonText(tr("sh.add"))
 				.setCta()
 				.onClick(async () => {
 					const d = this.def;
-					if (!d.folder || !d.owner || !d.repo) return void msg.setText("Folder, owner and repository are required.");
+					if (!d.folder || !d.owner || !d.repo) return void msg.setText(tr("sh.required"));
 					if ((this.plugin.settings.sharedFolders ?? []).some((f) => d.folder === f.folder || d.folder.startsWith(f.folder + "/") || f.folder.startsWith(d.folder + "/")))
-						return void msg.setText("That folder overlaps an existing shared folder.");
+						return void msg.setText(tr("sh.overlap"));
 					if (this.token) this.plugin.setSecret(`token-shared-${d.id}`, this.token);
-					msg.setText("Checking access…");
+					msg.setText(tr("sh.checking"));
 					try {
 						const remote = makeRemote(d.provider, () => ({ token: this.token || this.plugin.getToken(), apiBase: this.plugin.getApiBaseFor(d.provider), owner: d.owner, repo: d.repo }));
 						if (!(await remote.getRepo())) throw new Error("repository not found or not accessible with this token");
 					} catch (e) {
-						return void msg.setText(`Can't access ${d.owner}/${d.repo}: ${errMsg(e)}`);
+						return void msg.setText(tr("sh.noAccess", { repo: `${d.owner}/${d.repo}`, error: errMsg(e) }));
 					}
 					this.plugin.settings.sharedFolders = [...(this.plugin.settings.sharedFolders ?? []), d];
 					await this.plugin.saveSettings();
-					new Notice(`Shared folder added: ${d.folder} ↔ ${d.owner}/${d.repo}`);
+					new Notice(tr("sh.added", { folder: d.folder, repo: `${d.owner}/${d.repo}` }));
 					this.close();
 					this.done();
 				}),

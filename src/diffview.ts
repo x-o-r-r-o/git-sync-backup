@@ -2,6 +2,7 @@
 
 import { Platform } from "obsidian";
 import { assemble, diffLines, diffStats, HunkPick, Segment, segments } from "./diff.ts";
+import { t as tr } from "./i18n.ts";
 
 export interface DiffViewOptions {
 	oldLabel: string;
@@ -34,19 +35,19 @@ export function renderDiff(parent: HTMLElement, oldText: string, newText: string
 	head.createSpan({ cls: "vsg-dv-stats", text: `+${stats.added} −${stats.removed}` });
 	const body = wrap.createDiv({ cls: "vsg-dv-body" });
 	if (!Platform.isMobile) {
-		const btn = head.createEl("button", { cls: "vsg-dv-toggle", text: "Unified" });
+		const btn = head.createEl("button", { cls: "vsg-dv-toggle", text: tr("d.unified") });
 		btn.onClickEvent(() => {
 			mode = mode === "split" ? "unified" : "split";
-			btn.setText(mode === "split" ? "Unified" : "Side by side");
+			btn.setText(mode === "split" ? tr("d.unified") : tr("d.split"));
 			draw();
 		});
-		btn.setText(mode === "split" ? "Unified" : "Side by side");
+		btn.setText(mode === "split" ? tr("d.unified") : tr("d.split"));
 	}
 
 	const draw = () => {
 		body.empty();
 		if (!stats.added && !stats.removed) {
-			body.createDiv({ cls: "vsg-dv-same", text: "No differences." });
+			body.createDiv({ cls: "vsg-dv-same", text: tr("d.same") });
 			return;
 		}
 		body.toggleClass("vsg-dv-split", mode === "split");
@@ -75,7 +76,7 @@ export function renderDiff(parent: HTMLElement, oldText: string, newText: string
 					const startOld = oldNo;
 					const startNew = newNo;
 					const folds = mode === "split" ? [left, right] : [left];
-					const els = folds.map((col) => col.createDiv({ cls: "vsg-dl-fold", text: `⋯ ${hidden} unchanged line${hidden === 1 ? "" : "s"}` }));
+					const els = folds.map((col) => col.createDiv({ cls: "vsg-dl-fold", text: tr("d.unchanged", { n: hidden }) }));
 					const expand = () => {
 						els.forEach((el, k) => {
 							const frag = createDiv();
@@ -129,7 +130,7 @@ export function renderHunkPicker(parent: HTMLElement, localText: string, remoteT
 			const box = wrap.createDiv({ cls: "vsg-hp-same" });
 			const preview = n > 4 && idx !== 0 && idx !== segs.length - 1 ? [...s.lines.slice(0, 2), null, ...s.lines.slice(-2)] : s.lines;
 			for (const l of preview) {
-				if (l === null) box.createDiv({ cls: "vsg-dl-fold", text: `⋯ ${n - 4} unchanged lines` });
+				if (l === null) box.createDiv({ cls: "vsg-dl-fold", text: tr("d.unchanged", { n: n - 4 }) });
 				else lineEl(box, "eq", null, strip(l));
 			}
 			return;
@@ -138,11 +139,11 @@ export function renderHunkPicker(parent: HTMLElement, localText: string, remoteT
 		picks[i] = "both";
 		const block = wrap.createDiv({ cls: "vsg-hp-block" });
 		const bar = block.createDiv({ cls: "vsg-hp-bar" });
-		bar.createSpan({ text: `Change ${i + 1}`, cls: "vsg-hp-title" });
+		bar.createSpan({ text: tr("d.change", { n: i + 1 }), cls: "vsg-hp-title" });
 		const opts: [HunkPick, string][] = [
 			["a", labels.a],
 			["b", labels.b],
-			["both", "Both"],
+			["both", tr("d.both")],
 		];
 		const buttons = opts.map(([p, label]) => {
 			const b = bar.createEl("button", { text: label, cls: "vsg-hp-btn" });
@@ -157,13 +158,13 @@ export function renderHunkPicker(parent: HTMLElement, localText: string, remoteT
 		buttons[2].addClass("is-active");
 		const sideA = block.createDiv({ cls: "vsg-hp-side" });
 		sideA.createDiv({ cls: "vsg-hp-side-label", text: labels.a });
-		if (!s.a.length) sideA.createDiv({ cls: "vsg-hp-empty", text: "(nothing)" });
+		if (!s.a.length) sideA.createDiv({ cls: "vsg-hp-empty", text: tr("d.nothing") });
 		s.a.forEach((l) => lineEl(sideA, "del", null, strip(l)));
 		const sideB = block.createDiv({ cls: "vsg-hp-side" });
 		sideB.createDiv({ cls: "vsg-hp-side-label", text: labels.b });
-		if (!s.b.length) sideB.createDiv({ cls: "vsg-hp-empty", text: "(nothing)" });
+		if (!s.b.length) sideB.createDiv({ cls: "vsg-hp-empty", text: tr("d.nothing") });
 		s.b.forEach((l) => lineEl(sideB, "add", null, strip(l)));
 	});
-	if (!k) wrap.createDiv({ cls: "vsg-dv-same", text: "The two versions are identical." });
+	if (!k) wrap.createDiv({ cls: "vsg-dv-same", text: tr("d.identical") });
 	return () => assemble(segs, picks);
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 (2026-10-12)
+
+- **Bitbucket Cloud** support (beta): API 2.0, multi-file commits pinned to the expected parent, and a hash index computed and cached on the device (Bitbucket exposes no blob hashes) that only re-fetches changed paths.
+- **Attachments on demand:** files above a device's download limit are listed instead of downloaded, with a browse-and-download dialog, a command, a status panel section and a Download button in reading view. Downloaded files stay in sync, and "Free up space" leaves them alone.
+- **Rename + edit detection:** a content-similarity pass pairs renamed-and-edited files. Edits from the other device are merged under the new name, both ways.
+- **Complete translations:** all UI strings moved to `src/locales` (English, Simplified Chinese), with a completeness test.
+- **Settings search** on Obsidian 1.13+ through `getSettingDefinitions()`; the settings tab is now data-driven.
+- Fix: changing a device's scope (folders, limits, on-demand list) now forces a full comparison instead of waiting for a remote change.
+- 103 unit/e2e tests.
+
 ## 1.0.0 (2026-10-12) First public release
 
 **Renamed to Vault Sync for Git** (plugin id `vault-sync-git`). It syncs with GitHub, GitLab or Gitea / Forgejo / Codeberg, and the interface names the host you use.

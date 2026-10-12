@@ -1,6 +1,6 @@
 # Vault Sync for Git
 
-**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab or Gitea.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
+**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Gitea or Bitbucket.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
 
 Your vault lives in a repository you own, on the host you choose:
 
@@ -9,6 +9,7 @@ Your vault lives in a repository you own, on the host you choose:
 | **GitHub** (github.com and GitHub Enterprise) | Stable | Every sync is one atomic commit with fast-forward-only updates. |
 | **GitLab** (gitlab.com and self-managed) | Beta | Atomic multi-file commits with per-file locking. |
 | **Gitea / Forgejo** (including **Codeberg** and self-hosted servers) | Beta | Atomic multi-file commits with per-file locking. Needs Gitea or Forgejo 1.20+. |
+| **Bitbucket Cloud** | Beta | Multi-file commits checked against the expected parent. Bitbucket's API has no file hashes, so the first sync downloads each file once to index it; after that only changed files are fetched. |
 
 Every device syncs through that repository, which also gives you a full history of every change. Switch hosts at any time in the setup wizard or settings.
 
@@ -36,13 +37,14 @@ Every device syncs through that repository, which also gives you a full history 
   - Visual diffs everywhere and a review step with checkboxes.
   - A status panel shows what's pending and how to fix problems.
 - **Fits every device.**
-  - Each device can sync only the folders it needs and skip big downloads.
-  - Renames travel as renames.
+  - Each device can sync only the folders it needs.
+  - Big attachments can stay in the repository and be **downloaded on demand**.
+  - Renames travel as renames, even when the file was also edited.
   - A setup wizard gets a new device running in a minute.
 - **Grows with you.**
   - Share a folder with a team through its own repository, on any of the three hosts.
   - Keep big media in Git LFS.
-  - Use the interface in your language.
+  - Use the interface in English or Simplified Chinese, following Obsidian's language.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for the comparison with existing plugins and the gaps this one closes.
 
@@ -86,6 +88,18 @@ The token is stored only on the device, in Obsidian's secure SecretStorage. It i
 | Backup | One commit per sync, daily or manual snapshot tags, **Version history** in the file menu, **Recover deleted files** |
 | Visibility | Status bar (desktop), spinning ribbon icon, sync log, **Preview sync (dry run)** |
 | Other | GitHub Enterprise (custom API URL), commit message template, device names |
+
+## New in 1.1
+
+- **Bitbucket Cloud** (beta). Use a repository access token, or an Atlassian API token entered as `email:token`. Bitbucket's API doesn't expose file hashes, so the plugin computes and caches them on the device: the first sync downloads each file once, and later syncs only fetch what changed.
+- **Attachments on demand.**
+  - Files above a device's download limit (Settings → *This device only*) stay in the repository and are listed instead of downloaded.
+  - Download them from the status panel, from the command *Download files that aren't on this device*, or from the **Download** button that reading view shows in place of a missing embed.
+  - Once downloaded, a file stays in sync on that device.
+- **Renamed and edited.** A note renamed *and* edited is recognised by content similarity. If the other device edited the old note meanwhile, both edits are merged under the new name instead of producing a duplicate.
+- **Complete translations.** Every screen (settings, setup wizard, dialogs, status panel, notifications) is translated. Simplified Chinese is complete, and adding a language is one file: see [docs/TRANSLATING.md](docs/TRANSLATING.md).
+- **Settings search.** On Obsidian 1.13+ the plugin's settings appear in Obsidian's settings search.
+- Changing what a device syncs (folders, limits, on-demand downloads) now triggers a full comparison right away.
 
 ## New in v0.5
 
@@ -150,7 +164,7 @@ The token is stored only on the device, in Obsidian's secure SecretStorage. It i
 
 ## Commands
 
-Sync now · Review changes and sync · Open sync status panel · Run setup wizard · End-to-end encryption: turn on or unlock · Free up space on this device · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Timeline: restore vault or folder to an earlier point · Make this device match GitHub · Create backup snapshot on GitHub · Show sync log · Show history of current file · Compare current file with GitHub · Recover deleted files · Open repository on GitHub
+Sync now · Review changes and sync · Open sync status panel · Run setup wizard · Download files that aren't on this device · End-to-end encryption: turn on or unlock · Free up space on this device · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Timeline: restore vault or folder to an earlier point · Make this device match GitHub · Create backup snapshot on GitHub · Show sync log · Show history of current file · Compare current file with GitHub · Recover deleted files · Open repository on GitHub
 
 ## Requirements
 
@@ -170,7 +184,7 @@ Sync now · Review changes and sync · Open sync status panel · Run setup wizar
 ```bash
 npm install
 npm run dev      # watch build
-npm test         # unit tests + two-device simulation against an in-memory GitHub (90 tests, including fake GitLab, Gitea and LFS servers)
+npm test         # unit tests + two-device simulation against an in-memory GitHub (103 tests, including fake GitLab, Gitea, Bitbucket and LFS servers)
 VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API (13 tests, including encrypted sync)
 npm run build    # type-check + production bundle
 npm run lint     # Obsidian's official review rules (eslint-plugin-obsidianmd)
@@ -182,9 +196,9 @@ Source layout: `src/sync.ts` (engine), `src/plan.ts` (three-way decisions), `src
 
 This section covers the disclosures Obsidian's developer policies require.
 
-- **Account required.** You need an account with a Git host (GitHub, GitLab, or a Gitea / Forgejo / Codeberg server) and an access token. The plugin itself is free; no payment.
+- **Account required.** You need an account with a Git host (GitHub, GitLab, Bitbucket, or a Gitea / Forgejo / Codeberg server) and an access token. The plugin itself is free; no payment.
 - **Network use.** The plugin only connects to the Git host **you configure**, to read and write your repository:
-  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), or your Gitea / Forgejo / Codeberg server
+  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), your Gitea / Forgejo / Codeberg server, or `api.bitbucket.org`
   - the same host's Git LFS endpoint, if you turn on large file storage
   - for GitHub LFS, the file-storage address GitHub returns for each upload or download
 - **No telemetry, no ads, no third-party services.** Nothing is sent anywhere except your own repository host. The author runs no servers.
@@ -212,6 +226,7 @@ This section covers the disclosures Obsidian's developer policies require.
 - **GitHub:** fully supported. Every sync is one atomic commit with fast-forward-only updates.
 - **Gitea / Forgejo (1.20+), Codeberg:** beta. Atomic multi-file commits with per-file optimistic locking.
 - **GitLab:** beta. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's API doesn't report file sizes, so the size limits can't skip large files there; use LFS for big media.
+- **Bitbucket Cloud:** beta. Commits carry the expected parent, so a concurrent push is detected. The plugin keeps a hash index of the repository on each device (in its plugin folder, never synced).
 - Snapshots are tags on every host. The API budget is shown for GitHub only.
 
 ## Limits
