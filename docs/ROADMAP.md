@@ -66,3 +66,22 @@ We cover 1–3. The plan below targets 4–10 and adds features no git-based plu
 - https://github.com/heeeyman/ObsSync/issues
 - https://github.com/remotely-save/remotely-save/issues
 - https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugin-stats.json
+
+## Status after 1.0.0 (2026-10-12): what's left
+
+Roadmap items 1–15 have shipped, except the parts below. They are kept for later releases, roughly in order of value:
+
+| Item | What's left | Why it isn't done |
+|---|---|---|
+| 9 | **Sign in with GitHub** (GitHub App + device flow) | Planned only, by decision (see [AUTH.md](AUTH.md)). Needs a GitHub App registered and owned by the author. |
+| 15 | **Full translations**: settings and setup wizard text, plus more languages | Commands, the status panel and notices are translated (English and Simplified Chinese); long setting texts are English only. |
+| 6 / 12 | **Attachments on demand**: list big files without downloading them, fetch when opened | LFS and per-device download limits cover storage today; on-demand fetching needs a placeholder design. |
+| 4 | **Rename + edit detection** by content similarity | Exact-content renames are detected (the common Obsidian case); a renamed *and* edited file still syncs as delete + add. |
+| 11 | **Bitbucket** host | GitHub, GitLab and Gitea/Forgejo are done. |
+| new | **Settings search on Obsidian 1.13+** (`getSettingDefinitions`) | The classic settings tab works on all versions; the declarative API would make settings searchable on new versions. |
+
+Verification still to do:
+
+- Real phones (iOS and Android).
+- Real GitLab and Gitea/Codeberg servers. So far they are tested against simulated servers only.
+- A visual pass of the 1.0 screens (host picker, encryption, shared folders).
