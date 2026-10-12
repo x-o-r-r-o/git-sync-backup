@@ -1,0 +1,9 @@
+{
+  "id": "vault-sync-github",
+  "name": "Vault Sync for GitHub",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Sync and back up your vault across desktop and mobile using a GitHub repository. No git install, no .git folder, three-way merge.",
+  "author": "Fadi",
+  "isDesktopOnly": false
+}

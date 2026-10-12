@@ -1,0 +1,80 @@
+.vsg-status {
+	cursor: pointer;
+}
+.vsg-icon svg {
+	width: 14px;
+	height: 14px;
+	vertical-align: middle;
+}
+.vsg-syncing svg,
+.vsg-spinning svg {
+	animation: vsg-spin 1.2s linear infinite;
+}
+.vsg-error {
+	color: var(--text-error);
+}
+.vsg-conflict {
+	color: var(--text-warning);
+}
+.vsg-offline {
+	color: var(--text-muted);
+}
+@keyframes vsg-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.vsg-diff {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: var(--size-4-3);
+}
+@media (max-width: 700px) {
+	.vsg-diff {
+		grid-template-columns: 1fr;
+	}
+}
+.vsg-diff pre,
+.vsg-version,
+.vsg-log {
+	max-height: 50vh;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-size: var(--font-ui-smaller);
+	background: var(--background-secondary);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	user-select: text;
+}
+.vsg-list {
+	max-height: 30vh;
+	overflow: auto;
+	font-size: var(--font-ui-smaller);
+}
+.vsg-commits {
+	list-style: none;
+	padding: 0;
+	max-height: 60vh;
+	overflow: auto;
+}
+.vsg-commits li {
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+.vsg-commits li:hover {
+	background: var(--background-modifier-hover);
+}
+.vsg-commit-title {
+	font-weight: var(--font-semibold);
+}
+.vsg-commit-sub {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+.vsg-textarea {
+	width: 100%;
+	font-family: var(--font-monospace);
+}
