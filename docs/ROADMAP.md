@@ -50,7 +50,7 @@ We cover 1–3. The plan below targets 4–10 and adds features no git-based plu
 
 ## Suggested releases
 
-- **v0.2 "Trust & visibility":** 1, 2, 3, 7, 8, 14
+- **v0.2 "Trust & visibility":** 1, 2, 3, 7, 8, 14 ✅ shipped 2026-10-12
 - **v0.3 "Correctness":** 4, 5, 6, 9
 - **v0.4 "Unique":** 10 (E2E encryption) and 11 (Gitea and GitLab)
 - **Later:** 12, 13, 15

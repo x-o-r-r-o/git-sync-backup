@@ -251,6 +251,16 @@ export class GitHub {
 		await this.json("PUT", `${this.repoPath}/contents/${encPath(path)}`, { message, content: base64, branch });
 	}
 
+	/** Core API budget. This endpoint does not count against the limit. */
+	async rateLimit(): Promise<{ limit: number; remaining: number; reset: number }> {
+		return (await this.json("GET", "/rate_limit")).resources.core;
+	}
+
+	async listTags(): Promise<{ name: string; sha: string }[]> {
+		const list: any[] = await this.json("GET", `${this.repoPath}/tags?per_page=100`);
+		return list.map((t) => ({ name: t.name, sha: t.commit.sha }));
+	}
+
 	// ---- history ----
 
 	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {

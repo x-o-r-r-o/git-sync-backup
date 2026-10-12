@@ -207,6 +207,25 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Review before manual sync")
+			.setDesc("When you press Sync, first show every pending change with diffs and checkboxes. Automatic syncs are not affected.")
+			.addToggle((t) =>
+				t.setValue(s.reviewBeforeManualSync).onChange(async (v) => {
+					s.reviewBeforeManualSync = v;
+					await save();
+				}),
+			);
+		new Setting(containerEl)
+			.setName("Ignore line-ending-only changes")
+			.setDesc("A file whose only change is Windows (CRLF) vs Unix (LF) line endings is treated as unchanged, so editors on other systems don't cause needless uploads or conflicts.")
+			.addToggle((t) =>
+				t.setValue(s.ignoreLineEndingChanges).onChange(async (v) => {
+					s.ignoreLineEndingChanges = v;
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
 			.setName("Delete guard")
 			.setDesc("Ask before a sync deletes many files at once.")
 			.addToggle((t) =>
@@ -251,6 +270,15 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			.addText((t) =>
 				t.setValue(s.commitTemplate).onChange(async (v) => {
 					s.commitTemplate = v || "{{device}}: {{summary}}";
+					await save();
+				}),
+			);
+		new Setting(containerEl)
+			.setName("Full rescan every (minutes)")
+			.setDesc("Between full rescans only files Obsidian reports as edited are re-checked, and the settings folder is read from disk at most every 5 minutes. Keeps phones fast.")
+			.addText((t) =>
+				t.setValue(String(s.fullScanMinutes)).onChange(async (v) => {
+					s.fullScanMinutes = Math.max(1, Number(v) || 30);
 					await save();
 				}),
 			);

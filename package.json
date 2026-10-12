@@ -1,6 +1,6 @@
 {
   "name": "vault-sync-github",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Obsidian plugin: sync and back up a vault with GitHub on desktop and mobile",
   "main": "main.js",
   "type": "module",

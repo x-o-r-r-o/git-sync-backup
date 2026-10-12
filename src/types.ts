@@ -24,6 +24,9 @@ export interface VaultSyncSettings {
 	maxFileSizeMB: number;
 
 	conflictStrategy: ConflictStrategy;
+	reviewBeforeManualSync: boolean;
+	ignoreLineEndingChanges: boolean;
+	fullScanMinutes: number;
 
 	deleteGuardEnabled: boolean;
 	deleteGuardMin: number;
@@ -63,6 +66,9 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	maxFileSizeMB: 50,
 
 	conflictStrategy: "auto",
+	reviewBeforeManualSync: false,
+	ignoreLineEndingChanges: true,
+	fullScanMinutes: 30,
 
 	deleteGuardEnabled: true,
 	deleteGuardMin: 10,
@@ -80,7 +86,12 @@ export interface SyncState {
 	repoKey: string;
 	head: string | null;
 	base: Record<string, string>;
-	cache: Record<string, { m: number; s: number; h: string }>;
+	// h = git blob sha; n = sha of the LF-normalised text (text files with CRLF only).
+	cache: Record<string, { m: number; s: number; h: string; n?: string }>;
+	// Normalised-text hash of each base version, to recognise line-ending-only edits.
+	baseNorm: Record<string, string>;
+	lastFullScan: number;
+	lastConfigScan: number;
 	lastSync: number;
 	lastSnapshot: number;
 	dirty: boolean;
@@ -92,12 +103,15 @@ export const emptyState = (repoKey = ""): SyncState => ({
 	head: null,
 	base: {},
 	cache: {},
+	baseNorm: {},
+	lastFullScan: 0,
+	lastConfigScan: 0,
 	lastSync: 0,
 	lastSnapshot: 0,
 	dirty: false,
 });
 
-export type ConflictChoice = "local" | "remote" | "keep-both" | "markers";
+export type ConflictChoice = "local" | "remote" | "keep-both" | "markers" | { custom: string };
 
 export interface ConflictInfo {
 	path: string;
@@ -108,3 +122,14 @@ export interface ConflictInfo {
 }
 
 export type DeleteGuardChoice = "proceed" | "skip" | "cancel";
+
+/** Paths edited since the last sync, as reported by vault events. */
+export interface LocalChanges {
+	full: boolean;
+	paths: Set<string>;
+}
+
+export interface SyncOptions {
+	/** Paths left out of this sync (unchecked in review). They keep their old baseline. */
+	defer?: Set<string>;
+}

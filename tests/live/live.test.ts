@@ -212,3 +212,36 @@ test("live: bad token gives a clear error", { skip: !live }, async () => {
 	const bad = new GitHub(() => ({ ...cfg(), token: "ghp_invalid" }));
 	await assert.rejects(() => bad.getUser(), /invalid or expired/);
 });
+
+test("live: restore folder to an earlier commit, then reset another device to GitHub", { skip: !live }, async () => {
+	const branch = await freshBranch("restore");
+	const { a, b } = pair(branch);
+	a.fs.put("Projects/p.md", "p1\n");
+	a.fs.put("Daily/d.md", "d1\n");
+	await a.sync();
+	const point = (await gh.getRef(branch))!;
+	a.fs.put("Projects/p.md", "p2\n");
+	a.fs.put("Projects/new.md", "new\n");
+	a.fs.put("Daily/d.md", "d2\n");
+	await a.sync();
+	const plan = await a.engine.restoreTo(point, "Projects", async () => true);
+	assert.deepEqual(plan, { changed: ["Projects/p.md"], added: [], removed: ["Projects/new.md"] });
+	assert.equal(a.fs.text("Projects/p.md"), "p1\n");
+	assert.equal(a.fs.text("Daily/d.md"), "d2\n");
+	const remote = await remoteFiles(branch);
+	assert.ok(!remote.has("Projects/new.md"));
+
+	await b.sync();
+	b.fs.put("Daily/d.md", "unsynced local edit\n");
+	const reset = await b.engine.resetToRemote(async () => true);
+	assert.deepEqual(reset.overwrite, ["Daily/d.md"]);
+	assert.equal(b.fs.text("Daily/d.md"), "d2\n");
+	assert.equal((await b.sync()).upToDate, true);
+});
+
+test("live: tags and rate limit endpoints", { skip: !live }, async () => {
+	const rl = await gh.rateLimit();
+	assert.ok(rl.limit > 0 && rl.remaining >= 0);
+	const tags = await gh.listTags();
+	assert.ok(Array.isArray(tags));
+});

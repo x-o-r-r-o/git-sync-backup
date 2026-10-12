@@ -9,7 +9,15 @@ import { merge3 } from "./merge.ts";
 import { decide } from "./plan.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { emptyState } from "./types.ts";
-import type { ConflictChoice, ConflictInfo, DeleteGuardChoice, SyncState, VaultSyncSettings } from "./types.ts";
+import type {
+	ConflictChoice,
+	ConflictInfo,
+	DeleteGuardChoice,
+	LocalChanges,
+	SyncOptions,
+	SyncState,
+	VaultSyncSettings,
+} from "./types.ts";
 import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath, pool, sleep } from "./util.ts";
 
 export interface SyncHost {
@@ -23,6 +31,22 @@ export interface SyncHost {
 	saveState(): Promise<void>;
 	askConflict(info: ConflictInfo): Promise<ConflictChoice>;
 	confirmDeletes(local: string[], remote: string[]): Promise<DeleteGuardChoice>;
+	/** Live set of paths edited since the last sync (optional: without it every scan is full). */
+	localChanges?(): LocalChanges;
+	/** Called after a successful sync with the snapshot that sync covered. */
+	markLocalChangesSynced?(covered: LocalChanges): void;
+}
+
+export interface ResetPlan {
+	overwrite: string[];
+	download: string[];
+	remove: string[];
+}
+
+export interface RestorePlan {
+	changed: string[];
+	added: string[];
+	removed: string[];
 }
 
 export interface SyncReport {
@@ -42,6 +66,9 @@ export interface SyncReport {
 export interface Preview {
 	decisions: Decision[];
 	skipped: string[];
+	localShas: Map<string, string>;
+	remoteShas: Map<string, string>;
+	base: Record<string, string>;
 }
 
 export class SyncCancelled extends Error {}
@@ -67,6 +94,10 @@ const INLINE_MAX = 400 * 1024;
 const TREE_CHUNK_BYTES = 3 * 1024 * 1024;
 const TREE_CHUNK_ENTRIES = 400;
 const UPLOAD_BATCH = 8;
+// The config dir is walked from disk; between full scans do it at most this often.
+const CONFIG_SCAN_MS = 5 * 60_000;
+// Larger text files skip line-ending normalisation.
+const EOL_MAX = 2 * 1024 * 1024;
 
 /** Reject paths that could escape the vault or that git itself forbids. */
 function safePath(p: string): boolean {
@@ -105,15 +136,41 @@ export class SyncEngine {
 
 	/** Dry run: what would happen, without touching anything. */
 	async preview(mode: SyncMode): Promise<Preview> {
-		const ctx = await this.gather(false);
+		const ctx = await this.gather(false, {}, true);
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		return { decisions: plan.decisions, skipped: ctx.skipped };
+		return { decisions: plan.decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
 	}
 
-	async run(mode: SyncMode): Promise<SyncReport> {
+	/**
+	 * Vault files that look changed since the last sync: new, deleted, or with a different mtime/size
+	 * than when last hashed. In-memory only (no reads, no network), so it is cheap enough for the UI.
+	 */
+	quickLocalPending(): string[] {
+		const state = this.host.state;
+		const scope = this.buildScope();
+		const cfgPrefix = this.host.app.vault.configDir + "/";
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const f of this.io.listVault(scope)) {
+			seen.add(f.path);
+			const c = state.cache[f.path];
+			if (!c || c.m !== f.mtime || c.s !== f.size || state.base[f.path] !== c.h) out.push(f.path);
+		}
+		for (const p of Object.keys(state.base)) {
+			if (!seen.has(p) && !p.startsWith(cfgPrefix) && scope(p)) out.push(p);
+		}
+		return out;
+	}
+
+	/** Content of a local file (for diffs). */
+	readLocal(path: string): Promise<ArrayBuffer> {
+		return this.io.read(path);
+	}
+
+	async run(mode: SyncMode, opts: SyncOptions = {}): Promise<SyncReport> {
 		for (let attempt = 0; ; attempt++) {
 			try {
-				return await this.runOnce(mode);
+				return await this.runOnce(mode, opts);
 			} catch (e) {
 				if (e instanceof NotFastForward && attempt < 3) {
 					this.host.log("Remote moved during sync (another device pushed). Retrying.");
@@ -132,7 +189,15 @@ export class SyncEngine {
 		}
 	}
 
-	private async gather(initIfEmpty: boolean) {
+	private async normHash(path: string, data: ArrayBuffer, sha: string): Promise<string | undefined> {
+		if (data.byteLength > EOL_MAX) return undefined;
+		const text = asText(path, data);
+		if (text === null) return undefined;
+		if (!text.includes("\r\n")) return sha;
+		return gitBlobSha(encodeText(text.replace(/\r\n/g, "\n")));
+	}
+
+	private async gather(initIfEmpty: boolean, opts: SyncOptions = {}, readOnly = false) {
 		const state = this.host.state;
 		if (state.repoKey !== this.repoKey) {
 			this.host.log(`Repository changed to ${this.repoKey}. Starting from a fresh baseline (no deletions).`);
@@ -147,22 +212,55 @@ export class SyncEngine {
 			skipPaths.add(path);
 		};
 		const scope = (p: string) => baseScope(p) && !skipPaths.has(p);
+		for (const p of opts.defer ?? []) skip(p, "deferred in review");
 
 		// ---- local ----
-		const files = await this.io.list(baseScope, this.s.syncConfigDir);
+		// Vault file stats come from Obsidian's in-memory index, so listing is cheap; only files whose
+		// mtime/size changed (or that vault events flagged) are re-hashed. The config dir is walked from
+		// disk only on full scans or every few minutes. We yield to the UI regularly so it never freezes.
+		const now = Date.now();
+		const changes: LocalChanges = this.host.localChanges?.() ?? { full: true, paths: new Set() };
+		const covered: LocalChanges = { full: changes.full, paths: new Set(changes.paths) };
+		const full = covered.full || !state.lastFullScan || now - state.lastFullScan > this.s.fullScanMinutes * 60_000;
+		const configDue = this.s.syncConfigDir && (full || now - state.lastConfigScan > CONFIG_SCAN_MS);
+		const cfgPrefix = this.host.app.vault.configDir + "/";
+
+		const files = this.io.listVault(baseScope);
+		if (configDue) files.push(...(await this.io.listConfig(baseScope)));
 		const localShas = new Map<string, string>();
 		const cacheNext: SyncState["cache"] = {};
+		let hashed = 0;
 		for (const f of files) {
 			if (f.size > maxBytes) {
 				skip(f.path, `local file larger than ${this.s.maxFileSizeMB} MB`);
 				continue;
 			}
 			const c = state.cache[f.path];
-			let sha: string;
-			if (c && c.m === f.mtime && c.s === f.size) sha = c.h;
-			else sha = await gitBlobSha(await this.io.read(f.path));
-			cacheNext[f.path] = { m: f.mtime, s: f.size, h: sha };
-			localShas.set(f.path, sha);
+			if (c && c.m === f.mtime && c.s === f.size && !covered.paths.has(f.path)) {
+				cacheNext[f.path] = c;
+				localShas.set(f.path, c.h);
+				continue;
+			}
+			const data = await this.io.read(f.path);
+			const h = await gitBlobSha(data);
+			const n = await this.normHash(f.path, data, h);
+			cacheNext[f.path] = n ? { m: f.mtime, s: f.size, h, n } : { m: f.mtime, s: f.size, h };
+			localShas.set(f.path, h);
+			if (++hashed % 25 === 0) await sleep(0);
+		}
+		if (this.s.syncConfigDir && !configDue) {
+			for (const [p, c] of Object.entries(state.cache)) {
+				if (!p.startsWith(cfgPrefix) || !baseScope(p) || localShas.has(p)) continue;
+				if (c.s > maxBytes) skip(p, `local file larger than ${this.s.maxFileSizeMB} MB`);
+				else {
+					cacheNext[p] = c;
+					localShas.set(p, c.h);
+				}
+			}
+		}
+		if (!readOnly) {
+			if (full) state.lastFullScan = now;
+			if (configDue) state.lastConfigScan = now;
 		}
 
 		// ---- remote ----
@@ -172,6 +270,18 @@ export class SyncEngine {
 		// Safety: never act on a remote state older than the one we already synced, and never
 		// infer deletions across a rewritten history.
 		let base = state.base;
+		// A file whose only change is CRLF <-> LF counts as unchanged.
+		const eolSame = new Set<string>();
+		if (this.s.ignoreLineEndingChanges) {
+			for (const [p, l] of localShas) {
+				const b = base[p];
+				const n = cacheNext[p]?.n;
+				if (b && l !== b && n && state.baseNorm?.[p] === n) {
+					localShas.set(p, b);
+					eolSame.add(p);
+				}
+			}
+		}
 		if (head && state.head && head !== state.head) {
 			const rel = await this.host.gh.compare(state.head, head);
 			if (rel === "behind") throw new StaleRemote();
@@ -185,7 +295,7 @@ export class SyncEngine {
 		const baseInScope = Object.keys(state.base).filter(scope);
 		const unchangedLocal = localShas.size === baseInScope.length && [...localShas].every(([p, h]) => state.base[p] === h);
 		if (head && head === state.head && unchangedLocal && !state.dirty) {
-			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base };
+			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered };
 		}
 
 		const remote = new Map<string, RemoteEntry>();
@@ -222,7 +332,7 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base };
+		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered };
 	}
 
 	private async initRemote(): Promise<string> {
@@ -242,7 +352,7 @@ export class SyncEngine {
 		return head;
 	}
 
-	private async runOnce(mode: SyncMode): Promise<SyncReport> {
+	private async runOnce(mode: SyncMode, opts: SyncOptions): Promise<SyncReport> {
 		const host = this.host;
 		const state = host.state;
 		const report: SyncReport = {
@@ -259,7 +369,7 @@ export class SyncEngine {
 			commit: null,
 		};
 
-		const ctx = await this.gather(mode !== "pull");
+		const ctx = await this.gather(mode !== "pull", opts);
 		report.skipped = ctx.skipped;
 		const cacheNext = ctx.cacheNext;
 
@@ -268,6 +378,7 @@ export class SyncEngine {
 			state.cache = cacheNext;
 			state.lastSync = Date.now();
 			await host.saveState();
+			host.markLocalChangesSynced?.(ctx.covered);
 			return report;
 		}
 
@@ -300,9 +411,11 @@ export class SyncEngine {
 		const remoteDeletes: string[] = [];
 		const device = host.deviceName();
 
-		const recordWrite = async (path: string, sha: string) => {
+		const recordWrite = async (path: string, sha: string, data?: ArrayBuffer) => {
 			const st = await this.io.stat(path);
-			if (st) cacheNext[path] = { m: st.mtime, s: st.size, h: sha };
+			if (!st) return;
+			const n = data ? await this.normHash(path, data, sha) : undefined;
+			cacheNext[path] = n ? { m: st.mtime, s: st.size, h: sha, n } : { m: st.mtime, s: st.size, h: sha };
 		};
 		const queueUpload = async (path: string, data?: ArrayBuffer, sha?: string) => {
 			const hash = sha ?? (data ? await gitBlobSha(data) : await gitBlobSha(await this.io.read(path)));
@@ -323,7 +436,7 @@ export class SyncEngine {
 					case "download": {
 						const data = await host.gh.getBlob(d.sha);
 						await this.io.write(d.path, data);
-						await recordWrite(d.path, d.sha);
+						await recordWrite(d.path, d.sha, data);
 						next[d.path] = d.sha;
 						report.downloaded.push(d.path);
 						break;
@@ -379,12 +492,21 @@ export class SyncEngine {
 			}
 		}
 
+		const baseNorm: Record<string, string> = {};
+		for (const [p, sha] of Object.entries(next)) {
+			const c = cacheNext[p];
+			if (c?.n && (c.h === sha || ctx.eolSame.has(p))) baseNorm[p] = c.n;
+			else if (state.baseNorm?.[p] && state.base[p] === sha) baseNorm[p] = state.baseNorm[p];
+		}
+
 		state.head = newHead;
 		state.base = next;
+		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
 		state.lastSync = Date.now();
 		state.dirty = report.errors.length > 0;
 		await host.saveState();
+		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
 	}
 
@@ -395,7 +517,7 @@ export class SyncEngine {
 		next: Record<string, string>,
 		report: SyncReport,
 		queueUpload: (path: string, data?: ArrayBuffer, sha?: string) => Promise<void>,
-		recordWrite: (path: string, sha: string) => Promise<void>,
+		recordWrite: (path: string, sha: string, data?: ArrayBuffer) => Promise<void>,
 	): Promise<void> {
 		const host = this.host;
 		const localData = await this.io.read(d.path);
@@ -405,7 +527,7 @@ export class SyncEngine {
 
 		const writeRemote = async () => {
 			await this.io.write(d.path, remoteData);
-			await recordWrite(d.path, d.remote);
+			await recordWrite(d.path, d.remote, remoteData);
 			next[d.path] = d.remote;
 		};
 		const keepBoth = async (uploadCopy: boolean) => {
@@ -421,13 +543,25 @@ export class SyncEngine {
 
 		let strategy: string = this.s.conflictStrategy;
 		if (strategy === "ask") {
-			strategy = await host.askConflict({
+			const choice = await host.askConflict({
 				path: d.path,
 				localText,
 				remoteText,
 				localSize: localData.byteLength,
 				remoteSize: remoteData.byteLength,
 			});
+			if (typeof choice === "object") {
+				// Hand-picked result from the per-change conflict view.
+				const merged = encodeText(choice.custom);
+				const sha = await gitBlobSha(merged);
+				await this.io.write(d.path, merged);
+				await recordWrite(d.path, sha, merged);
+				await queueUpload(d.path, merged, sha);
+				report.merged.push(d.path);
+				host.log(`Conflict on ${d.path}: resolved change by change.`);
+				return;
+			}
+			strategy = choice;
 		}
 
 		switch (strategy) {
@@ -455,7 +589,7 @@ export class SyncEngine {
 				if (!res || (!res.clean && strategy === "auto")) return keepBoth(true);
 				const merged = encodeText(res.text);
 				await this.io.write(d.path, merged);
-				await recordWrite(d.path, await gitBlobSha(merged));
+				await recordWrite(d.path, await gitBlobSha(merged), merged);
 				await queueUpload(d.path, merged);
 				report.merged.push(d.path);
 				host.log(
@@ -512,6 +646,116 @@ export class SyncEngine {
 		return commit;
 	}
 
+	/**
+	 * Make this device match GitHub exactly. Files that would be overwritten or removed are moved
+	 * to the trash first, so local-only work stays recoverable.
+	 */
+	async resetToRemote(confirm: (plan: ResetPlan) => Promise<boolean>): Promise<ResetPlan> {
+		const state = this.host.state;
+		const ctx = await this.gather(false, {}, true);
+		const head = ctx.upToDate ? state.head : ctx.head;
+		if (!head) throw new Error("The branch on GitHub is empty. Nothing to reset to.");
+		const remoteShas = ctx.upToDate ? new Map(ctx.localShas) : ctx.remoteShas;
+		const plan: ResetPlan = { overwrite: [], download: [], remove: [] };
+		for (const p of new Set([...ctx.localShas.keys(), ...remoteShas.keys()])) {
+			const l = ctx.localShas.get(p);
+			const r = remoteShas.get(p);
+			if (r && l && l !== r) plan.overwrite.push(p);
+			else if (r && !l) plan.download.push(p);
+			else if (!r && l) plan.remove.push(p);
+		}
+		if (!plan.overwrite.length && !plan.download.length && !plan.remove.length) return plan;
+		if (!(await confirm(plan))) throw new SyncCancelled("Reset cancelled.");
+
+		const cacheNext = ctx.cacheNext;
+		const write = async (p: string) => {
+			const sha = remoteShas.get(p)!;
+			const data = await this.host.gh.getBlob(sha);
+			await this.io.write(p, data);
+			const st = await this.io.stat(p);
+			const n = await this.normHash(p, data, sha);
+			if (st) cacheNext[p] = n ? { m: st.mtime, s: st.size, h: sha, n } : { m: st.mtime, s: st.size, h: sha };
+		};
+		await pool(plan.overwrite, 4, async (p) => {
+			await this.io.remove(p);
+			await write(p);
+		});
+		await pool(plan.download, 4, write);
+		for (const p of plan.remove) {
+			await this.io.remove(p);
+			delete cacheNext[p];
+		}
+
+		const base: Record<string, string> = {};
+		for (const [p, sha] of remoteShas) base[p] = sha;
+		for (const p of ctx.skipPaths) if (state.base[p]) base[p] = state.base[p];
+		state.head = head;
+		state.base = base;
+		state.baseNorm = {};
+		for (const [p, sha] of Object.entries(base)) if (cacheNext[p]?.h === sha && cacheNext[p].n) state.baseNorm[p] = cacheNext[p].n!;
+		state.cache = cacheNext;
+		state.lastSync = Date.now();
+		state.dirty = false;
+		await this.host.saveState();
+		this.host.log(
+			`Reset to GitHub: ${plan.overwrite.length} replaced, ${plan.download.length} downloaded, ${plan.remove.length} removed (old versions in trash).`,
+		);
+		return plan;
+	}
+
+	/**
+	 * Restore the whole vault, or one folder, to how it was at `commit`. Local changes are synced
+	 * first, then the restore is pushed as a new commit on top (history is never rewritten), then
+	 * pulled down to this device.
+	 */
+	async restoreTo(commit: string, folder: string, confirm: (plan: RestorePlan) => Promise<boolean>): Promise<RestorePlan> {
+		if (this.s.mode === "pull") throw new Error("Restore needs to push to GitHub, which pull-only mode does not allow.");
+		await this.run(this.s.mode);
+		const gh = this.host.gh;
+		const head = await gh.getRef(this.s.branch);
+		if (!head) throw new Error("The branch on GitHub is empty.");
+		const scope = this.buildScope();
+		const prefix = folder.replace(/^\/+|\/+$/g, "");
+		const inScope = (p: string) => scope(p) && safePath(p) && (!prefix || p === prefix || p.startsWith(prefix + "/"));
+		const read = async (tree: string) => {
+			const m = new Map<string, { sha: string; mode: string }>();
+			for (const e of await gh.listTree(tree)) {
+				if (e.type === "blob" && (e.mode === "100644" || e.mode === "100755") && inScope(e.path)) m.set(e.path, { sha: e.sha, mode: e.mode });
+			}
+			return m;
+		};
+		const headTree = await gh.getCommitTree(head);
+		const cur = await read(headTree);
+		const tgt = await read(await gh.getCommitTree(commit));
+
+		const plan: RestorePlan = { changed: [], added: [], removed: [] };
+		const entries: NewTreeEntry[] = [];
+		for (const [p, e] of tgt) {
+			const c = cur.get(p);
+			if (!c) plan.added.push(p);
+			else if (c.sha !== e.sha) plan.changed.push(p);
+			else continue;
+			entries.push({ path: p, mode: e.mode, type: "blob", sha: e.sha });
+		}
+		for (const p of cur.keys()) {
+			if (tgt.has(p)) continue;
+			plan.removed.push(p);
+			entries.push({ path: p, mode: "100644", type: "blob", sha: null });
+		}
+		if (!entries.length) return plan;
+		if (!(await confirm(plan))) throw new SyncCancelled("Restore cancelled.");
+
+		let tree = headTree;
+		for (let i = 0; i < entries.length; i += TREE_CHUNK_ENTRIES) tree = await gh.createTree(tree, entries.slice(i, i + TREE_CHUNK_ENTRIES));
+		const what = prefix ? `"${prefix}"` : "vault";
+		const message = `${this.host.deviceName()}: restore ${what} to ${commit.slice(0, 7)}\n\n${plan.changed.length} restored, ${plan.added.length} brought back, ${plan.removed.length} removed\n\nDevice: ${this.host.deviceName()}`;
+		const newCommit = await gh.createCommit(message, tree, [head]);
+		if (!(await gh.updateRef(this.s.branch, newCommit))) throw new Error("Another device pushed during the restore. Nothing was changed; please try again.");
+		this.host.log(`Restored ${what} to ${commit.slice(0, 7)} as commit ${newCommit.slice(0, 7)}.`);
+		await this.run("sync");
+		return plan;
+	}
+
 	private commitMessage(uploads: Upload[], deletes: string[], device: string): string {
 		const parts: string[] = [];
 		const added = uploads.filter((u) => !this.host.state.base[u.path]).length;
@@ -527,6 +771,7 @@ export class SyncEngine {
 			.split("{{date}}").join(new Date().toISOString())
 			.split("{{count}}").join(String(uploads.length + deletes.length));
 		const more = uploads.length + deletes.length - files.length;
-		return `${subject}\n\n${files.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- …and ${more} more` : ""}`;
+		const list = `${files.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- …and ${more} more` : ""}`;
+		return `${subject}\n\n${list}\n\nDevice: ${device}`;
 	}
 }

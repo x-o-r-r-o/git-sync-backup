@@ -6,6 +6,7 @@ Sync and back up an Obsidian vault across **desktop and mobile** (Windows, macOS
 - **Real merging.** If two devices edit different parts of the same note, the changes are merged line by line. If they edit the same lines, both versions are kept (or you choose).
 - **Safe by default.** Edits always win over deletions, deleted files go to the trash, and a delete guard stops accidental mass deletions.
 - **Backups built in.** Every sync is one commit, so the full history lives on GitHub. Per-file version history and restore, recovery of deleted files, and manual or daily snapshot tags.
+- **See before you sync (v0.2).** Visual diffs everywhere, review-and-pick before syncing, change-by-change conflict resolution, a sync health panel, and point-in-time restore of the whole vault or one folder.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for the comparison with existing plugins and the gaps this one closes.
 
@@ -46,9 +47,27 @@ The token is stored only on the device (local storage). It is never written to `
 | Visibility | Status bar (desktop), spinning ribbon icon, sync log, **Preview sync (dry run)** |
 | Other | GitHub Enterprise (custom API URL), commit message template, device names |
 
+## New in v0.2
+
+- **Visual diff viewer.** Side by side on desktop, single column on mobile, with line numbers and collapsible unchanged lines. Shown in review, version history ("Compare with current"), conflicts, and the new **Compare with GitHub** command and file-menu item.
+- **Change-by-change conflict resolution.** With "Ask me each time", every changed block gets *This device / GitHub / Both* buttons, plus whole-file options.
+- **Sync status panel** (ribbon icon, or click the status bar). It shows:
+  - the current state, and the last error in plain language with a fix button (Open settings / Try again)
+  - files edited since the last sync, and whether GitHub has newer changes
+  - conflict copies, each with Compare / Open / Delete copy
+  - files skipped in the last sync, and why
+  - when each device last synced
+  - the API budget and the next scheduled sync
+- **Review before sync.** Every pending change with a checkbox and a diff. Unticked files are deferred and left alone on both sides. Turn on *Review before manual sync* to make it the default.
+- **Timeline and point-in-time restore.** Browse every sync and snapshot, browse files at any point, and restore the **whole vault or a single folder**. Restores are new commits, so history is never rewritten and you can undo a restore the same way.
+- **Make this device match GitHub.** Discards unsynced local changes; replaced and removed files go to the trash first.
+- **Faster on phones.** Only files whose timestamps changed, or that Obsidian reports as edited, are re-checked. The settings folder is read from disk at most every 5 minutes. A full rescan runs periodically as a safety net. Hashing yields to the UI so Obsidian never freezes.
+- **Line-ending safety.** A change that is only CRLF ↔ LF is ignored (on by default).
+- Commits now carry a `Device:` trailer, which the status panel uses to show per-device activity.
+
 ## Commands
 
-Sync now · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Create backup snapshot on GitHub · Show sync log · Show history of current file · Recover deleted files · Open repository on GitHub
+Sync now · Review changes and sync · Open sync status panel · Pull from GitHub only · Back up to GitHub only (push) · Preview sync (dry run) · Timeline: restore vault or folder to an earlier point · Make this device match GitHub · Create backup snapshot on GitHub · Show sync log · Show history of current file · Compare current file with GitHub · Recover deleted files · Open repository on GitHub
 
 ## Install
 
@@ -61,7 +80,8 @@ Sync now · Pull from GitHub only · Back up to GitHub only (push) · Preview sy
 ```bash
 npm install
 npm run dev      # watch build
-npm test         # unit tests + two-device simulation against an in-memory GitHub
+npm test         # unit tests + two-device simulation against an in-memory GitHub (45 tests)
+VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API (11 tests)
 npm run build    # type-check + production bundle
 ```
 

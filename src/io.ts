@@ -27,32 +27,43 @@ export class VaultIO {
 		return f instanceof TFile ? f : null;
 	}
 
-	/** Every file in scope: indexed vault files, plus the config dir when requested. */
-	async list(inScope: (path: string) => boolean, includeConfigDir: boolean): Promise<LocalFileInfo[]> {
+	/** Indexed vault files in scope. Uses cached stats only, so it is cheap even on mobile. */
+	listVault(inScope: (path: string) => boolean): LocalFileInfo[] {
 		const out: LocalFileInfo[] = [];
 		for (const f of this.app.vault.getFiles()) {
 			if (inScope(f.path)) out.push({ path: f.path, mtime: f.stat.mtime, size: f.stat.size });
 		}
-		if (includeConfigDir) {
-			const walk = async (dir: string) => {
-				let listing;
-				try {
-					listing = await this.adapter.list(dir);
-				} catch {
-					return;
-				}
-				for (const file of listing.files) {
-					if (!inScope(file)) continue;
-					const st = await this.adapter.stat(file);
-					if (st && st.type === "file") out.push({ path: file, mtime: st.mtime, size: st.size });
-				}
-				for (const sub of listing.folders) {
-					// Prune whole excluded folders early (e.g. plugin node_modules).
-					if (inScope(sub)) await walk(sub);
-				}
-			};
-			await walk(this.app.vault.configDir);
-		}
+		return out;
+	}
+
+	/** Files in the config dir that are in scope. Walks the disk, so callers should not run it on every sync. */
+	async listConfig(inScope: (path: string) => boolean): Promise<LocalFileInfo[]> {
+		const out: LocalFileInfo[] = [];
+		const walk = async (dir: string) => {
+			let listing;
+			try {
+				listing = await this.adapter.list(dir);
+			} catch {
+				return;
+			}
+			for (const file of listing.files) {
+				if (!inScope(file)) continue;
+				const st = await this.adapter.stat(file);
+				if (st && st.type === "file") out.push({ path: file, mtime: st.mtime, size: st.size });
+			}
+			for (const sub of listing.folders) {
+				// Prune whole excluded folders early (e.g. plugin node_modules).
+				if (inScope(sub)) await walk(sub);
+			}
+		};
+		await walk(this.app.vault.configDir);
+		return out;
+	}
+
+	/** Every file in scope: indexed vault files, plus the config dir when requested. */
+	async list(inScope: (path: string) => boolean, includeConfigDir: boolean): Promise<LocalFileInfo[]> {
+		const out = this.listVault(inScope);
+		if (includeConfigDir) out.push(...(await this.listConfig(inScope)));
 		return out;
 	}
 

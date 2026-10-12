@@ -61,6 +61,29 @@ export function conflictCopyPath(path: string, device: string, d = new Date()): 
 	return dir ? `${dir}/${out}` : out;
 }
 
+const COPY_RE = /^(.*) \((?:conflict|restored) .+ \d{4}-\d{2}-\d{2} \d{4}\)(\.[^./]*)?$/;
+
+/** If `path` is a conflict copy made by this plugin, the path of the original file; otherwise null. */
+export function conflictCopyOriginal(path: string): string | null {
+	const dir = parentDir(path);
+	const file = dir ? path.slice(dir.length + 1) : path;
+	if (!file.includes("(conflict ")) return null;
+	const m = COPY_RE.exec(file);
+	if (!m) return null;
+	const orig = m[1] + (m[2] ?? "");
+	return dir ? `${dir}/${orig}` : orig;
+}
+
+export function restoredCopyPath(path: string, sha: string, d = new Date()): string {
+	const dir = parentDir(path);
+	const file = dir ? path.slice(dir.length + 1) : path;
+	const dot = file.lastIndexOf(".");
+	const name = dot > 0 ? file.slice(0, dot) : file;
+	const ext = dot > 0 ? file.slice(dot) : "";
+	const out = `${name} (restored ${sha.slice(0, 7)} ${stamp(d)})${ext}`;
+	return dir ? `${dir}/${out}` : out;
+}
+
 export async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
 	let next = 0;
 	const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
