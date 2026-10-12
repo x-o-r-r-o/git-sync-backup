@@ -827,7 +827,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	async compareWithGitHub(file: TFile) {
-		new DiffModal(this.app, `${file.path}: GitHub → this device`, async () => {
+		new DiffModal(this.app, `${file.path}: ${this.hostLabel()} → ${t("u.thisDevice")}`, async () => {
 			const head = await this.gh.getRef(this.settings.branch);
 			const remote = head ? await this.engine.readRemoteFile(file.path, head) : null;
 			const localData = await this.app.vault.readBinary(file);
