@@ -214,7 +214,7 @@ export const de: Partial<Record<keyof typeof en, string>> = {
 	"w.stepVault": "Dieser Tresor",
 	"w.stepSync": "Erste Synchronisation",
 	"w.title": "Tresor-Synchronisation einrichten",
-	"w.sub": "Deine Notizen werden in einem privaten Git-Repository auf GitHub, GitLab, Gitea oder Bitbucket gespeichert, das dir gehört. Funktioniert auf Desktop und Mobilgeräten; keine Installation nötig.",
+	"w.sub": "Deine Notizen werden in einem privaten Git-Repository auf GitHub, GitLab, Codeberg, Gitea, Forgejo oder Bitbucket gespeichert, das dir gehört. Funktioniert auf Desktop und Mobilgeräten; keine Installation nötig.",
 	"w.where": "Wo soll dein Tresor gespeichert werden?",
 	"w.apiUrl": "Server-API-URL",
 	"w.deviceName": "Diesem Gerät einen Namen geben",

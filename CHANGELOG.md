@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+- The README is now a short overview (pitch, screenshots, install, quick start, privacy). The details moved, unchanged, into [Setup](docs/SETUP.md), [Features and commands](docs/FEATURES.md), [Security](docs/SECURITY.md) and [Hosts and limits](docs/LIMITS.md); the project layout moved to [CONTRIBUTING.md](CONTRIBUTING.md).
+- The setup wizard's first screen lists every supported host (GitHub, GitLab, Codeberg, Gitea, Forgejo, Bitbucket), in all eight languages.
+
 ## 1.7.1 (2026-10-14)
 
 **Changed**

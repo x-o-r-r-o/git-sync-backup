@@ -209,7 +209,7 @@ export const zh: Partial<Record<keyof typeof en, string>> = {
 	"w.stepVault": "此库",
 	"w.stepSync": "首次同步",
 	"w.title": "设置库同步",
-	"w.sub": "你的笔记保存在你自己拥有的私有 Git 仓库中（GitHub、GitLab、Gitea 或 Bitbucket）。适用于桌面和移动设备，无需安装任何软件。",
+	"w.sub": "你的笔记保存在你自己拥有的私有 Git 仓库中（GitHub、GitLab、Codeberg、Gitea、Forgejo 或 Bitbucket）。适用于桌面和移动设备，无需安装任何软件。",
 	"w.where": "你的库要存放在哪里？",
 	"w.apiUrl": "服务器 API 地址",
 	"w.deviceName": "为此设备命名",

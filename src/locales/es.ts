@@ -214,7 +214,7 @@ export const es: Partial<Record<keyof typeof en, string>> = {
 	"w.stepVault": "Esta bóveda",
 	"w.stepSync": "Primera sincronización",
 	"w.title": "Configurar la sincronización de la bóveda",
-	"w.sub": "Tus notas se guardan en un repositorio Git privado que te pertenece, en GitHub, GitLab, Gitea o Bitbucket. Funciona en escritorio y móvil; no hay que instalar nada.",
+	"w.sub": "Tus notas se guardan en un repositorio Git privado que te pertenece, en GitHub, GitLab, Codeberg, Gitea, Forgejo o Bitbucket. Funciona en escritorio y móvil; no hay que instalar nada.",
 	"w.where": "¿Dónde quieres guardar tu bóveda?",
 	"w.apiUrl": "URL de la API del servidor",
 	"w.deviceName": "Pon nombre a este dispositivo",

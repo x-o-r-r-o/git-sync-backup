@@ -212,7 +212,7 @@ export const en = {
 	"w.stepVault": "This vault",
 	"w.stepSync": "First sync",
 	"w.title": "Set up vault sync",
-	"w.sub": "Your notes are stored in a private Git repository you own, on GitHub, GitLab, Gitea or Bitbucket. Works on desktop and mobile; nothing to install.",
+	"w.sub": "Your notes are stored in a private Git repository you own, on GitHub, GitLab, Codeberg, Gitea, Forgejo or Bitbucket. Works on desktop and mobile; nothing to install.",
 	"w.where": "Where should your vault live?",
 	"w.apiUrl": "Server API URL",
 	"w.deviceName": "Name this device",

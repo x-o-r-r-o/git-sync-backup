@@ -207,7 +207,7 @@ export const pt: Partial<Record<keyof typeof en, string>> = {
 	"w.stepVault": "Este cofre",
 	"w.stepSync": "Primeira sincronização",
 	"w.title": "Configurar a sincronização do cofre",
-	"w.sub": "Suas notas ficam em um repositório Git privado que pertence a você, no GitHub, GitLab, Gitea ou Bitbucket. Funciona no computador e no celular, sem nada para instalar.",
+	"w.sub": "Suas notas ficam em um repositório Git privado que pertence a você, no GitHub, GitLab, Codeberg, Gitea, Forgejo ou Bitbucket. Funciona no computador e no celular, sem nada para instalar.",
 	"w.where": "Onde seu cofre deve ficar?",
 	"w.apiUrl": "URL da API do servidor",
 	"w.deviceName": "Dê um nome a este dispositivo",

@@ -207,7 +207,7 @@ export const ja: Partial<Record<keyof typeof en, string>> = {
 	"w.stepVault": "この保管庫",
 	"w.stepSync": "最初の同期",
 	"w.title": "保管庫の同期を設定",
-	"w.sub": "ノートは、GitHub、GitLab、Gitea、Bitbucket 上のあなたが所有するプライベート Git リポジトリに保存されます。デスクトップとモバイルで動作し、追加のインストールは不要です。",
+	"w.sub": "ノートは、GitHub、GitLab、Codeberg、Gitea、Forgejo、Bitbucket 上のあなたが所有するプライベート Git リポジトリに保存されます。デスクトップとモバイルで動作し、追加のインストールは不要です。",
 	"w.where": "保管庫の保存先はどこにしますか？",
 	"w.apiUrl": "サーバー API URL",
 	"w.deviceName": "このデバイスの名前",

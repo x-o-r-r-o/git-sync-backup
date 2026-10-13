@@ -214,7 +214,7 @@ export const ko: Partial<Record<keyof typeof en, string>> = {
 	"w.stepVault": "이 보관소",
 	"w.stepSync": "첫 동기화",
 	"w.title": "보관소 동기화 설정",
-	"w.sub": "노트는 GitHub, GitLab, Gitea 또는 Bitbucket에 있는, 내가 소유한 비공개 Git 저장소에 보관됩니다. 데스크톱과 모바일에서 작동하며 따로 설치할 것이 없습니다.",
+	"w.sub": "노트는 GitHub, GitLab, Codeberg, Gitea, Forgejo 또는 Bitbucket에 있는, 내가 소유한 비공개 Git 저장소에 보관됩니다. 데스크톱과 모바일에서 작동하며 따로 설치할 것이 없습니다.",
 	"w.where": "보관소를 어디에 둘까요?",
 	"w.apiUrl": "서버 API URL",
 	"w.deviceName": "이 기기의 이름",
