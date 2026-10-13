@@ -509,7 +509,7 @@ export const ja: Partial<Record<keyof typeof en, string>> = {
 	"app.disabled": "この GitHub App はデバイスでのサインインを許可していません。アクセストークンを使用するか、オーナーにデバイスフローを有効にするよう依頼してください。",
 	"app.failed": "サインインに失敗しました：{error}",
 	"app.signedIn": "GitHub でサインイン済み",
-	"app.signedInDesc": "このデバイスは Vault Sync for Git の GitHub App を使用しています。アクセスは自動的に更新されます。このデバイスにのみ保存されます。",
+	"app.signedInDesc": "このデバイスは Git Sync & Backup の GitHub App を使用しています。アクセスは自動的に更新されます。このデバイスにのみ保存されます。",
 	"app.signOut": "サインアウト",
 	"app.chooseRepos": "リポジトリを選択",
 	"app.chooseReposDesc": "保管庫のリポジトリが見当たりませんか？GitHub で追加するか、先にそこで作成してください。戻ると一覧が自動で更新されます。",

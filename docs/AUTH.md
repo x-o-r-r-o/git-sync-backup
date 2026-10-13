@@ -2,7 +2,7 @@
 
 How the plugin authenticates: Sign in with GitHub (since 1.2), Sign in with GitLab (since 1.4), or a pasted access token on every host. The sections below the GitHub status also keep the original evaluation for reference.
 
-**Sign in with GitHub** (GitHub App + device flow, `src/ghapp.ts`). The plugin's app is [Vault Sync for Git](https://github.com/apps/vault-sync-for-git) (client ID `Iv23lilDQAJBENeFs5Ei`, *Contents: read and write* only). On GitHub Enterprise a device can enter its own app's client ID in settings. Token entry stays available everywhere. Verified against the real API: sign-in, token refresh (both tokens rotate) and the full live sync suite running on the app's token.
+**Sign in with GitHub** (GitHub App + device flow, `src/ghapp.ts`). The plugin's app is [Git Sync & Backup](https://github.com/apps/git-sync-backup) (client ID `Iv23liUZtWNN2F2Zemwj`, *Contents: read and write* only). On GitHub Enterprise a device can enter its own app's client ID in settings. Token entry stays available everywhere. Verified against the real API: sign-in, token refresh (both tokens rotate) and the full live sync suite running on the app's token.
 
 ## Pasted tokens
 
@@ -61,7 +61,7 @@ The app only sees the repositories the user installed it on. In the wizard, **Ch
 One-time step for the plugin author (or a GitHub Enterprise admin for their server):
 
 1. GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**.
-2. Name: *Vault Sync for Git* (the URL name becomes the slug). Homepage: the plugin repository.
+2. Name: *Git Sync & Backup* (the URL name becomes the slug, here `git-sync-backup`). Homepage: the plugin repository.
 3. Callback URL: not needed. Untick *Expire user authorization tokens* only if you want non-expiring tokens (not recommended).
 4. Tick **Enable Device Flow**.
 5. Webhook: untick *Active*.

@@ -726,7 +726,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (this.refreshing) return this.refreshing;
 		const gitlab = this.usingGitLabApp();
 		const before = gitlab ? this.gitlabTokens() : this.appTokens();
-		if (!before) return Promise.resolve(false);
+		if (!before) {
+			// Signed in, but no usable sign-in here (for example one made with an app that no longer exists).
+			if (!this.expiredNoticeShown) {
+				this.expiredNoticeShown = true;
+				new Notice(t("app.expiredSession", { host: gitlab ? "GitLab" : "GitHub" }), 10000);
+			}
+			return Promise.resolve(false);
+		}
 		// Another request already renewed it: just retry with the new token.
 		if (failedToken && before.access !== failedToken) return Promise.resolve(true);
 		if (!force && !(gitlab ? gitlabNeedsRefresh(before) : needsRefresh(before))) return Promise.resolve(true);

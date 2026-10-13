@@ -509,7 +509,7 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
 	"app.disabled": "Cette GitHub App n'autorise pas la connexion par appareil. Utilisez un jeton d'accès ou demandez à son propriétaire d'activer le device flow.",
 	"app.failed": "Échec de la connexion : {error}",
 	"app.signedIn": "Connecté avec GitHub",
-	"app.signedInDesc": "Cet appareil utilise la GitHub App Vault Sync for Git. L'accès se renouvelle automatiquement. Stocké sur cet appareil uniquement.",
+	"app.signedInDesc": "Cet appareil utilise la GitHub App Git Sync & Backup. L'accès se renouvelle automatiquement. Stocké sur cet appareil uniquement.",
 	"app.signOut": "Se déconnecter",
 	"app.chooseRepos": "Choisir les dépôts",
 	"app.chooseReposDesc": "Vous ne voyez pas le dépôt de votre coffre ? Ajoutez-le sur GitHub, ou créez-en d'abord un. La liste se met à jour toute seule à votre retour.",

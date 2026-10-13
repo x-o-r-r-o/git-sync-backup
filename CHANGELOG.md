@@ -3,6 +3,7 @@
 ## Unreleased
 
 **Changed**
+- **Sign in with GitHub uses the new *Git Sync & Backup* GitHub App** (`github.com/apps/git-sync-backup`). The old *Vault Sync for Git* app was removed, so a device signed in with it shows *Your GitHub sign-in has expired* and needs to sign in once more (Settings → Git Sync & Backup → Sign in), then add the vault repository to the new app when asked. Devices that use an access token are not affected.
 - The README is now a short overview (pitch, screenshots, install, quick start, privacy). The details moved, unchanged, into [Setup](docs/SETUP.md), [Features and commands](docs/FEATURES.md), [Security](docs/SECURITY.md) and [Hosts and limits](docs/LIMITS.md); the project layout moved to [CONTRIBUTING.md](CONTRIBUTING.md).
 - The setup wizard's first screen lists every supported host (GitHub, GitLab, Codeberg, Gitea, Forgejo, Bitbucket), in all eight languages.
 

@@ -13,7 +13,7 @@ export interface AppConfig {
 }
 
 /** Vault Sync for Git's GitHub App on github.com. Sign-in is offered only when this is set. */
-export const GITHUB_APP: AppConfig = { clientId: "Iv23lilDQAJBENeFs5Ei", slug: "vault-sync-for-git" };
+export const GITHUB_APP: AppConfig = { clientId: "Iv23liUZtWNN2F2Zemwj", slug: "git-sync-backup" };
 
 export interface AppTokens {
 	access: string;

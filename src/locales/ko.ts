@@ -520,7 +520,7 @@ export const ko: Partial<Record<keyof typeof en, string>> = {
 	"app.disabled": "이 GitHub App은 기기 로그인을 허용하지 않습니다. 액세스 토큰을 사용하거나, 앱 소유자에게 기기 흐름(device flow)을 활성화해 달라고 요청하세요.",
 	"app.failed": "로그인 실패: {error}",
 	"app.signedIn": "GitHub로 로그인됨",
-	"app.signedInDesc": "이 기기는 Vault Sync for Git GitHub App을 사용합니다. 접근 권한은 자동으로 갱신됩니다. 이 기기에만 저장됩니다.",
+	"app.signedInDesc": "이 기기는 Git Sync & Backup GitHub App을 사용합니다. 접근 권한은 자동으로 갱신됩니다. 이 기기에만 저장됩니다.",
 	"app.signOut": "로그아웃",
 	"app.chooseRepos": "저장소 선택",
 	"app.chooseReposDesc": "보관소 저장소가 보이지 않나요? GitHub에서 추가하거나 먼저 그곳에서 만드세요. 돌아오면 목록이 자동으로 업데이트됩니다.",

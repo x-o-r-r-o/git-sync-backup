@@ -509,7 +509,7 @@ export const pt: Partial<Record<keyof typeof en, string>> = {
 	"app.disabled": "Este GitHub App não permite login por dispositivo. Use um token de acesso ou peça ao proprietário para ativar o device flow.",
 	"app.failed": "Falha ao entrar: {error}",
 	"app.signedIn": "Conectado com o GitHub",
-	"app.signedInDesc": "Este dispositivo usa o GitHub App do Vault Sync for Git. O acesso é renovado automaticamente. Armazenado apenas neste dispositivo.",
+	"app.signedInDesc": "Este dispositivo usa o GitHub App do Git Sync & Backup. O acesso é renovado automaticamente. Armazenado apenas neste dispositivo.",
 	"app.signOut": "Sair",
 	"app.chooseRepos": "Escolher repositórios",
 	"app.chooseReposDesc": "Não vê o repositório do seu cofre? Adicione-o no GitHub ou crie um lá primeiro. A lista se atualiza sozinha quando você voltar.",

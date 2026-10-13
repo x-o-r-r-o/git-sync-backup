@@ -515,7 +515,7 @@ export const zh: Partial<Record<keyof typeof en, string>> = {
 	"app.disabled": "此 GitHub 应用不允许设备登录。请使用访问令牌，或请其所有者启用设备流程。",
 	"app.failed": "登录失败：{error}",
 	"app.signedIn": "已使用 GitHub 登录",
-	"app.signedInDesc": "此设备使用 Vault Sync for Git 的 GitHub 应用。访问权限会自动续期。仅保存在此设备上。",
+	"app.signedInDesc": "此设备使用 Git Sync & Backup 的 GitHub 应用。访问权限会自动续期。仅保存在此设备上。",
 	"app.signOut": "退出登录",
 	"app.chooseRepos": "选择仓库",
 	"app.chooseReposDesc": "没有看到你的库仓库？请在 GitHub 上添加，或先在那里创建一个。返回后列表会自动更新。",
