@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 (2026-10-13)
 
 **New**
 - **History follows renames.** *Version history* and *Who last changed this line* continue past a rename (also through several renames and with end-to-end encryption): versions from before it show the file's old name, and open, compare and restore correctly.
