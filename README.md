@@ -150,7 +150,7 @@ When a file changed on both sides, choose what happens: **merge automatically** 
 
 Settings → *End-to-end encryption*, or in the setup wizard.
 
-- Content and file names are encrypted on your device before upload, with AES-256-GCM. The key comes from your passphrase through PBKDF2-SHA256 with 600,000 iterations, and file names become opaque paths.
+- Content and file names are encrypted on your device before upload, with AES-256-GCM. The key comes from your passphrase through PBKDF2-SHA256 with 600,000 iterations, and file names become opaque paths. Commit messages don't name files either: they only say how many were added, updated, renamed or deleted (`{{files}}` stays empty).
 - Change detection, merging, rename detection, history, restore and the timeline all keep working.
 - Other devices unlock with the same passphrase. A device without it, or with a different one, is refused instead of downloading unreadable files.
 - To encrypt an existing repository, *Remove unencrypted copies* deletes the old plain files in one commit. Their history still contains them, so for full privacy start with a new, empty repository.
@@ -298,7 +298,8 @@ This section covers the disclosures Obsidian's developer policies require.
 - Remote paths are validated (no `..`, no absolute paths, no empty segments) before anything is written.
 - **Setup links** contain the host, repository, branch and sync choices, and no secrets unless you include the token, which is encrypted with a one-time code (AES-GCM, key from PBKDF2-SHA256) that is never part of the link. Opening a link only shows what it would change; nothing is applied until you confirm. Only open links you created yourself.
 - **End-to-end encryption limits.**
-  - Encrypted files still reveal approximate file sizes and path lengths, and whether two files are identical.
+  - Encrypted files still reveal approximate file sizes and path lengths, and whether two files are identical. Commit messages show the device name, the time and how many files changed.
+  - Commits made before version 1.6.2 list the changed file names in their messages, and those messages stay in the repository's history.
   - Content isn't bound to its path, so someone with write access to the repository could swap or roll back encrypted files. They still can't read or forge content.
   - Shared folders are never encrypted, because collaborators must read them.
 - **Deleting files.** Deletions that arrive from another device follow Obsidian's *Deleted files* setting (system trash, `.trash` folder, or permanent); they also stay in the repository's history. Local content that was never uploaded and gets replaced (for example "the repository wins", or *Make this device match the repository*) always goes to the system trash or `.trash`, even with permanent deletion on.
@@ -328,7 +329,7 @@ This section covers the disclosures Obsidian's developer policies require.
 - GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0, but stay marked beta until they have more real-world use. Phones haven't been tested on real devices yet. Reports from real servers and phones are welcome.
 - Conflicts as pull requests are available for shared folders. Empty folders aren't kept while end-to-end encryption is on.
 - Closing a desktop window starts a last upload of pending edits, but a closing window can't wait for network requests, so a large or slow upload may not finish; the edits then simply sync next time. Use **Sync and close Obsidian** to be sure.
-- With the vault in a folder of the repository, empty folders aren't kept, and the end-to-end encryption marker (`.vault-sync/encryption.json` at the repository root) applies to the whole repository. The setup wizard's file count covers the whole repository.
+- With the vault in a folder of the repository, empty folders aren't kept, and the vault's end-to-end encryption marker lives in its folder (`<folder>/.vault-sync/encryption.json`). The setup wizard's file count covers the whole repository.
 - `sync: false` is read from Obsidian's metadata cache; a note Obsidian hasn't indexed yet waits for the next sync instead of being uploaded.
 - On Windows, a note renamed elsewhere to a name Windows can't store (such as `a:b.md`) is kept under its old name here, and the status panel lists the name to fix.
 

@@ -669,7 +669,7 @@ export class SyncEngine {
 				const raw = remote.get(c.path)?.raw ?? (await this.codec.encodePath(c.path));
 				upserts.push({ path: raw, mode: remote.get(c.path)?.mode ?? "100644", load: () => this.codec.encode(c.path, c.local) });
 			}
-			const list = items.map((c) => `- ${c.path}`).join("\n");
+			const list = this.hidesNames ? `${items.length} encrypted file(s)` : items.map((c) => `- ${c.path}`).join("\n");
 			await gh.commit({ author: this.author(), branch, parent: head, parentTree: tree, message: `${device}: conflicting edits (${items.length})\n\n${list}\n\n${this.trailer(device)}`, upserts, deletes: [] });
 			prUrl = (await gh.createPullRequest!(branch, this.s.branch, `Conflicting edits from ${device}`, `${device} and another device changed the same lines. This branch holds ${device}'s version; review and merge what you need.\n\n${list}`)).url;
 		} catch (e) {
@@ -1930,7 +1930,7 @@ export class SyncEngine {
 		if (!upserts.length && !deletes.length) return plan;
 		if (!(await confirm(plan))) throw new SyncCancelled("restoreCancelled");
 
-		const what = prefix ? `"${prefix}"` : "vault";
+		const what = !prefix ? "vault" : this.hidesNames ? "a folder" : `"${prefix}"`;
 		const message = `${this.host.deviceName()}: restore ${what} to ${commit.slice(0, 7)}\n\n${plan.changed.length} restored, ${plan.added.length} brought back, ${plan.removed.length} removed\n\n${this.trailer(this.host.deviceName())}`;
 		let newCommit: string;
 		try {
@@ -1942,6 +1942,11 @@ export class SyncEngine {
 		this.host.log(`Restored ${what} to ${commit.slice(0, 7)} as commit ${newCommit.slice(0, 7)}.`);
 		await this.run("sync");
 		return plan;
+	}
+
+	/** With encryption on, commit messages and pull requests must not name files (names would leak). */
+	private get hidesNames(): boolean {
+		return this.codec.has("enc:");
 	}
 
 	private commitMessage(uploads: Upload[], deletes: string[], device: string, renames: string[] = []): string {
@@ -1974,7 +1979,7 @@ export class SyncEngine {
 				device,
 				summary,
 				count: uploads.length + deletes.length,
-				files: changedPaths,
+				files: this.hidesNames ? [] : changedPaths,
 				trigger: ctx.trigger ?? "manual",
 				date: new Date(),
 			}) ||
@@ -1982,6 +1987,7 @@ export class SyncEngine {
 		const total = renames.length + uploads.filter((u) => !targets.has(u.path)).length + deleted;
 		const more = total - files.length;
 		const list = `${files.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- …and ${more} more` : ""}`;
+		if (this.hidesNames) return `${subject}\n\n${this.trailer(device)}`;
 		return `${subject}\n\n${list}\n\n${this.trailer(device)}`;
 	}
 }

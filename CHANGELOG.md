@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.2 (2026-10-13)
+
+**Fixed**
+- **Encrypted vaults leaked file names in commit messages.** With end-to-end encryption on, files and their names were encrypted, but the message of each sync still listed the changed paths (and `{{files}}` in a commit template filled them in). Commit messages of encrypted vaults now only give counts (for example "Phone: 1 updated"), conflict pull requests say how many files they hold instead of naming them, and restoring a folder no longer names the folder. Messages of commits made before this version still contain the names; for full privacy start a new, empty repository.
+
 ## 1.6.1 (2026-10-13)
 
 **Fixed**
