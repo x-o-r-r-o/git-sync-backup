@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.2 (2026-10-14)
 
 **Changed**
 - **Sign in with GitHub uses the new *Git Sync & Backup* GitHub App** (`github.com/apps/git-sync-backup`). The old *Vault Sync for Git* app was removed, so a device signed in with it shows *Your GitHub sign-in has expired* and needs to sign in once more (Settings → Git Sync & Backup → Sign in), then add the vault repository to the new app when asked. Devices that use an access token are not affected.
