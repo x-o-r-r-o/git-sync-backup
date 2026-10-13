@@ -5,7 +5,7 @@ import { HOSTS, makeRemote } from "./hosts.ts";
 import type { HostKind } from "./hosts.ts";
 import type VaultSyncPlugin from "./main.ts";
 import type { SharedFolder } from "./types.ts";
-import { errMsg } from "./util.ts";
+import { localizeError } from "./errors.ts";
 import { t as tr } from "./i18n.ts";
 
 class FolderInputSuggest extends AbstractInputSuggest<TFolder> {
@@ -111,7 +111,7 @@ export class SharedFolderModal extends Modal {
 					} catch (e) {
 						busy = false;
 						b.setDisabled(false);
-						return void msg.setText(tr("sh.noAccess", { repo: `${d.owner}/${d.repo}`, error: errMsg(e) }));
+						return void msg.setText(tr("sh.noAccess", { repo: `${d.owner}/${d.repo}`, error: localizeError(e) }));
 					}
 					// Save the folder's own token only once it is known to work (empty = use the main token).
 					this.plugin.setSharedToken(d, this.token);

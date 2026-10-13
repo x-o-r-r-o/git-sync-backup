@@ -4,6 +4,7 @@ import type { CommitInfo } from "./github.ts";
 import type { Decision } from "./plan.ts";
 import type { ConflictChoice, ConflictInfo, DeleteGuardChoice } from "./types.ts";
 import { t as tr } from "./i18n.ts";
+import { localizeError } from "./errors.ts";
 
 function list(el: HTMLElement, items: string[], max = 200) {
 	const ul = el.createEl("ul", { cls: "vsg-list" });
@@ -11,7 +12,7 @@ function list(el: HTMLElement, items: string[], max = 200) {
 	if (items.length > max) ul.createEl("li", { text: tr("u.andMore", { n: items.length - max }) });
 }
 
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown) => localizeError(e);
 
 /** Destructive (red) button style. */
 export function destructive(b: ButtonComponent): ButtonComponent {
@@ -82,23 +83,23 @@ export class ConflictModal extends Modal {
 
 		if (info.localText !== null && info.remoteText !== null) {
 			const tabs = contentEl.createDiv({ cls: "vsg-tabs", attr: { role: "tablist" } });
-			// The picker is built once and only hidden while the full diff shows, so picks survive switching.
-			const pickPane = contentEl.createDiv();
+			// Both panes are built up front and share one grid cell; the inactive one is only made invisible,
+			// so picks survive switching and the dialog keeps the taller pane's height on either tab.
+			const panes = contentEl.createDiv({ cls: "vsg-cf-panes" });
+			const pickPane = panes.createDiv({ cls: "vsg-cf-pane", attr: { role: "tabpanel" } });
 			pickPane.createEl("p", { cls: "vsg-muted", text: tr("u.pickHint") });
 			const build = renderHunkPicker(pickPane, info.localText, info.remoteText, { a: L, b: R });
-			const diffPane = contentEl.createDiv();
-			let diffBuilt = false;
+			const diffPane = panes.createDiv({ cls: "vsg-cf-pane", attr: { role: "tabpanel" } });
+			renderDiff(diffPane, info.localText, info.remoteText, { oldLabel: L, newLabel: R });
 			let current: "pick" | "diff" = "pick";
 			const pickTab = tabs.createEl("button", { text: tr("u.chooseChanges"), attr: { role: "tab" } });
 			const diffTab = tabs.createEl("button", { text: tr("u.fullDiff"), attr: { role: "tab" } });
 			const show = (which: "pick" | "diff") => {
 				current = which;
-				if (which === "diff" && !diffBuilt) {
-					renderDiff(diffPane, info.localText!, info.remoteText!, { oldLabel: L, newLabel: R });
-					diffBuilt = true;
-				}
-				pickPane.toggle(which === "pick");
-				diffPane.toggle(which === "diff");
+				pickPane.toggleClass("vsg-cf-hidden", which !== "pick");
+				diffPane.toggleClass("vsg-cf-hidden", which !== "diff");
+				pickPane.setAttr("aria-hidden", String(which !== "pick"));
+				diffPane.setAttr("aria-hidden", String(which !== "diff"));
 				for (const [tab, k] of [[pickTab, "pick"], [diffTab, "diff"]] as const) {
 					tab.toggleClass("is-active", k === which);
 					tab.setAttr("aria-selected", String(k === which));

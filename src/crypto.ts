@@ -12,6 +12,7 @@
 
 import type { Layer } from "./codec.ts";
 import { t as tr } from "./i18n.ts";
+import { SyncError } from "./errors.ts";
 
 export const MARKER_PATH = ".vault-sync/encryption.json";
 const MAGIC = new Uint8Array([0x56, 0x53, 0x47, 0x31]); // "VSG1"
@@ -93,11 +94,11 @@ export class EncryptionLayer implements Layer {
 
 	async decode(path: string, blob: ArrayBuffer): Promise<ArrayBuffer> {
 		const u = new Uint8Array(blob);
-		if (u.length < 16 + 16 || !MAGIC.every((b, i) => u[i] === b)) throw new Error(tr("e.notEncrypted", { path }));
+		if (u.length < 16 + 16 || !MAGIC.every((b, i) => u[i] === b)) throw new SyncError("notEncrypted", { path });
 		try {
 			return await crypto.subtle.decrypt({ name: "AES-GCM", iv: ab(u.slice(4, 16)) }, this.kContent, ab(u.slice(16)));
 		} catch {
-			throw new Error(tr("e.decryptFailed", { path }));
+			throw new SyncError("decryptFailed", { path });
 		}
 	}
 
@@ -149,10 +150,10 @@ export async function createEncryption(passphrase: string): Promise<{ meta: Encr
 
 /** Unlock an existing encrypted repository. Throws on a wrong passphrase. */
 export async function unlockEncryption(passphrase: string, meta: EncryptionMeta): Promise<{ master: Uint8Array; layer: EncryptionLayer }> {
-	if (meta.v !== 1 || meta.kdf !== "PBKDF2-SHA256") throw new Error(tr("e.newerFormat"));
+	if (meta.v !== 1 || meta.kdf !== "PBKDF2-SHA256") throw new SyncError("newerFormat");
 	const master = await deriveMaster(passphrase, unb64(meta.salt), meta.iterations);
 	const layer = await EncryptionLayer.fromMaster(master);
-	if (!(await layer.verify(meta))) throw new Error(tr("e.wrongPass"));
+	if (!(await layer.verify(meta))) throw new SyncError("wrongPass");
 	return { master, layer };
 }
 

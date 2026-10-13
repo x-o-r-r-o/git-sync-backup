@@ -8,7 +8,9 @@ export type SyncMode = "sync" | "push" | "pull";
 export type Decision =
 	| { kind: "download"; path: string; sha: string }
 	| { kind: "delete-local"; path: string }
-	| { kind: "upload"; path: string; sha: string; renamedFrom?: string }
+	// `keepRemote` (push mode, both sides changed): first save the repository's version (this blob sha)
+	// as a conflict copy here, so its edit isn't only left in history.
+	| { kind: "upload"; path: string; sha: string; renamedFrom?: string; keepRemote?: string }
 	| { kind: "delete-remote"; path: string; renamedTo?: string }
 	| { kind: "conflict"; path: string; base: string | null; local: string; remote: string }
 	// Renamed on GitHub: rename the local file instead of delete + re-download. `upload` is set when the
@@ -33,6 +35,7 @@ export function decide(
 	remote: Map<string, string>,
 	mode: SyncMode,
 	inScope: (path: string) => boolean = () => true,
+	opts: { pushKeepsRemote?: boolean } = {},
 ): Plan {
 	const decisions: Decision[] = [];
 	const settled: Record<string, string> = {};
@@ -70,7 +73,9 @@ export function decide(
 
 		// Both sides changed differently. An edit always beats a deletion.
 		if (mode === "push") {
-			if (l) decisions.push({ kind: "upload", path, sha: l });
+			// This device's version wins in the repository; with `pushKeepsRemote` the repository's edit is
+			// also kept here as a conflict copy. The local file itself is never touched in push mode.
+			if (l) decisions.push(r && opts.pushKeepsRemote ? { kind: "upload", path, sha: l, keepRemote: r } : { kind: "upload", path, sha: l });
 			else keep(path, b);
 		} else if (!l && r) {
 			decisions.push({ kind: "download", path, sha: r });
@@ -171,6 +176,12 @@ export interface SimilarityInput {
 	 */
 	strictThreshold?: number;
 	maxCandidates?: number;
+	/**
+	 * Texts of a few other files next to `path` (same folder and extension), none of them in `exclude`.
+	 * Lines that also appear in those are template lines (shared by notes made from the same template):
+	 * they say nothing about whether two files are one renamed note.
+	 */
+	siblings?: (path: string, exclude: Set<string>) => Promise<string[]>;
 }
 
 const ext = (p: string) => (p.includes(".") ? p.slice(p.lastIndexOf(".")).toLowerCase() : "");
@@ -205,6 +216,36 @@ export function lineSimilarity(a: string, b: string): number {
 }
 
 /**
+ * Template lines among `texts` (other notes in the same folder): content lines found in at least two
+ * of them and a third of them (with a single note: all its lines). Real notes rarely repeat each
+ * other's lines; templates always do.
+ */
+export function templateLines(texts: string[]): Set<string> {
+	const counts = new Map<string, number>();
+	for (const t of texts) for (const l of contentLines(t)) counts.set(l, (counts.get(l) ?? 0) + 1);
+	const need = texts.length < 2 ? 1 : Math.max(2, Math.ceil(texts.length / 3));
+	const out = new Set<string>();
+	for (const [l, n] of counts) if (n >= need) out.add(l);
+	return out;
+}
+
+/** Like lineSimilarity, over the lines that are not template lines (no minimum shared count). */
+export function coreSimilarity(a: string, b: string, template: Set<string>): { shared: number; score: number } {
+	const A = [...contentLines(a)].filter((l) => !template.has(l));
+	const B = new Set([...contentLines(b)].filter((l) => !template.has(l)));
+	let shared = 0;
+	for (const l of A) if (B.has(l)) shared++;
+	const union = A.length + B.size - shared;
+	return { shared, score: union ? shared / union : 0 };
+}
+
+const dirOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const stemOf = (p: string) => {
+	const name = p.slice(p.lastIndexOf("/") + 1);
+	return (name.includes(".") ? name.slice(0, name.lastIndexOf(".")) : name).toLowerCase();
+};
+
+/**
  * Second pass after detectRenames: pairs the remaining delete + add decisions whose contents are
  * similar (renamed AND edited). Only same-extension text files are compared.
  */
@@ -227,6 +268,20 @@ export async function detectSimilarRenames(
 	const localNew = decisions.filter((d) => d.kind === "upload" && !base[d.path] && !remote.has(d.path) && !d.renamedFrom);
 
 	const replace = new Map<string, Decision | null>(); // path -> replacement (null = drop)
+	// Template lines near each candidate, per folder (read once).
+	const candidates = new Set([...remoteOld, ...remoteNew, ...localOld, ...localNew].map((d) => d.path));
+	const nearby = new Map<string, Promise<string[]>>();
+	const siblingTexts = (path: string): Promise<string[]> => {
+		const key = `${dirOf(path)}|${ext(path)}`;
+		let p = nearby.get(key);
+		if (!p) nearby.set(key, (p = io.siblings ? io.siblings(path, candidates).catch(() => []) : Promise.resolve([])));
+		return p;
+	};
+	const templateFor = async (a: string, b: string): Promise<Set<string>> => {
+		const texts = [...(await siblingTexts(a))];
+		if (dirOf(a) !== dirOf(b)) texts.push(...(await siblingTexts(b)));
+		return templateLines(texts);
+	};
 	const pair = async (olds: Decision[], news: Decision[], newSide: "local" | "remote") => {
 		if (!olds.length || !news.length || olds.length > max || news.length > max) return;
 		const used = new Set<string>();
@@ -235,22 +290,35 @@ export async function detectSimilarRenames(
 			if (!news.some((n) => !used.has(n.path) && ext(n.path) === ext(o.path))) continue;
 			const baseText = await io.text("base", o.path, base[o.path]);
 			if (baseText === null) continue;
-			let best: { d: Decision; score: number } | null = null;
+			let best: { d: Decision; score: number; core: number | null; rank: number } | null = null;
 			for (const n of news) {
 				if (used.has(n.path) || ext(n.path) !== ext(o.path)) continue;
 				const sha = newSide === "remote" ? remote.get(n.path)! : local.get(n.path)!;
 				const t = await io.text(newSide, n.path, sha);
 				if (t === null) continue;
 				const score = similarity(baseText, t);
-				if (score >= threshold && (!best || score > best.score)) best = { d: n, score };
+				if (score < threshold) continue;
+				// Notes made from a rich template share most of their lines without being the same note:
+				// lines that other notes nearby also have are no evidence. The pair must share some others.
+				const template = await templateFor(o.path, n.path);
+				let core: number | null = null;
+				if (template.size) {
+					const c = coreSimilarity(baseText, t, template);
+					if (!c.shared) continue;
+					core = c.score;
+				}
+				// Same folder or same name: the likelier rename when two candidates are about as similar.
+				const rank = score + (dirOf(n.path) === dirOf(o.path) ? 0.02 : 0) + (stemOf(n.path) === stemOf(o.path) ? 0.02 : 0);
+				if (!best || rank > best.rank) best = { d: n, score, core, rank };
 			}
 			if (!best) continue;
 			const from = o.path;
 			// The side that did NOT rename still has the old path: did it edit it?
 			const otherEdited = newSide === "remote" ? local.get(from) !== base[from] : remote.get(from) !== base[from];
 			// Pairing would merge those edits into another file and remove the old one: only on strong
-			// evidence. Otherwise leave both alone (the edited old file is kept, the new one synced as new).
-			if (otherEdited && best.score < strict) continue;
+			// evidence, on the lines that aren't template lines too. Otherwise leave both alone (the edited
+			// old file is kept, the new one synced as new).
+			if (otherEdited && (best.score < strict || (best.core !== null && best.core < strict))) continue;
 			used.add(best.d.path);
 			const to = best.d.path;
 			if (newSide === "remote") {

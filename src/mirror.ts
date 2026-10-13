@@ -22,6 +22,8 @@ export class MirrorHost implements SyncHost {
 	lastError: string | null = null;
 	lastSync = 0;
 	readonly engine: SyncEngine;
+	/** Push only, and edits made in the mirror repository are never copied into the vault. */
+	readonly backupMirror = true;
 	private plugin: VaultSyncPlugin;
 	private remote: Remote;
 

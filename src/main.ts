@@ -3,7 +3,7 @@ import { HOSTS, makeRemote } from "./hosts.ts";
 import type { Remote } from "./remote.ts";
 import type { BlobCache, BlobCacheStore } from "./bitbucket.ts";
 import { HEALTH_VIEW, HealthView } from "./health.ts";
-import { VaultIO } from "./io.ts";
+import { nestedHiddenIndex, VaultIO } from "./io.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { VaultSyncSettingTab } from "./settings-tab.ts";
 import { SyncCancelled, SyncEngine } from "./sync.ts";
@@ -74,6 +74,7 @@ import { conflictResolver } from "./conflict-editor.ts";
 import { MirrorHost } from "./mirror.ts";
 import { dropRemovedHosts, isKnownProvider, mainSyncBlocked, removedHostNotice, syncableMirror, syncableSharedFolders } from "./removed-hosts.ts";
 import { fetchRegistry, findPluginNeeds, installPlugin, obsidianFetch } from "./pluginsync.ts";
+import { localizeError, skippedLines } from "./errors.ts";
 import { asText, conflictCopyOriginal, errMsg, portableNameProblem, redactSecrets, restoredCopyPath, sleep, stamp, tokenLooksLike, urlHost } from "./util.ts";
 
 type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background" | "open";
@@ -94,7 +95,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private shared: { sig: string; hosts: SharedFolderHost[] } | null = null;
 	/** Set by the setup wizard to show live progress. */
 	onProgress: ((text: string) => void) | null = null;
+	/** English message of the last failure (log and diagnostics); see lastErrorCause for display. */
 	lastError: string | null = null;
+	/** The error behind lastError, for translated display (status panel). */
+	lastErrorCause: unknown = null;
 	lastErrorAt = 0;
 	private engine!: SyncEngine;
 	private io!: VaultIO;
@@ -202,6 +206,12 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.registerEvent(this.app.vault.on("create", (f) => onVaultChange(f)));
 			this.registerEvent(this.app.vault.on("delete", (f) => onVaultChange(f)));
 			this.registerEvent(this.app.vault.on("rename", (f, old) => onVaultChange(f, old)));
+			// New or moved folders may hold hidden files (.gitignore): the next sync looks for them again.
+			const onFolder = (f: TAbstractFile) => {
+				if (f instanceof TFolder) nestedHiddenIndex(this.app).foldersChanged();
+			};
+			this.registerEvent(this.app.vault.on("create", onFolder));
+			this.registerEvent(this.app.vault.on("rename", onFolder));
 			this.rescheduleTriggers();
 			if (!this.isConfigured() && !this.settings.wizardShown) {
 				this.settings.wizardShown = true;
@@ -347,13 +357,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (!this.settings.useGitignore) return void (this.gitignoreLines = []);
 		const a = this.app.vault.adapter;
 		try {
-			// Finding .gitignore files in subfolders lists every folder on disk, so new ones are looked for
-			// at most every 5 minutes; the ones already known are re-read on every sync.
-			if (Date.now() - this.nestedGitignoreAt > 5 * 60_000) {
-				const found = await this.io.listNestedHidden(() => true, new Set([".gitignore"]));
-				this.nestedGitignorePaths = found.map((f) => f.path).sort((x, y) => x.localeCompare(y));
-				this.nestedGitignoreAt = Date.now();
-			}
+			// Finding .gitignore files in subfolders lists every folder on disk, so that walk is cached and
+			// shared with the sync's own scan: it only runs again after folders were created or renamed, on a
+			// full scan, or every 30 minutes. The .gitignore files already known are re-read on every sync.
+			const st = this.state;
+			const full = this.fullScanNeeded || !st.lastFullScan || Date.now() - st.lastFullScan > this.settings.fullScanMinutes * 60_000;
+			const found = await this.io.listNestedHidden(() => true, new Set([".gitignore"]), { full });
+			this.nestedGitignorePaths = found.map((f) => f.path).sort((x, y) => x.localeCompare(y));
 			const root = (await a.exists(".gitignore")) ? (await a.read(".gitignore")).split(/\r?\n/) : [];
 			const nested: string[] = [];
 			for (const path of this.nestedGitignorePaths) {
@@ -367,7 +377,6 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		}
 	}
 	private nestedGitignorePaths: string[] = [];
-	private nestedGitignoreAt = 0;
 
 	// Called by Obsidian when data.json changes on disk (e.g. synced from another device).
 	async onExternalSettingsChange() {
@@ -718,6 +727,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			save: async (c) => adapter.write(path, JSON.stringify(c)),
 		};
 	}
+	/** An error as shown to the user: translated, with this repository's host as the default host name. */
+	errorText(e: unknown): string {
+		return localizeError(e, this.hostLabel());
+	}
+
 	hostLabel(): string {
 		return HOSTS[this.settings.provider ?? "github"].label;
 	}
@@ -875,7 +889,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			);
 			new Notice(removed.length ? t("m.plainRemoved", { n: removed.length }) : t("m.plainNone"));
 		} catch (e) {
-			if (!(e instanceof SyncCancelled)) new Notice(t("m.removeFailed", { error: errMsg(e) }));
+			if (!(e instanceof SyncCancelled)) new Notice(t("m.removeFailed", { error: this.errorText(e) }));
 		} finally {
 			this.endExclusive();
 		}
@@ -956,7 +970,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				done.push(n.name);
 			} catch (e) {
 				this.log(`Installing ${n.id} ${n.version} failed: ${errMsg(e)}`);
-				new Notice(t("pi.failed", { name: n.name, error: errMsg(e) }), 8000);
+				new Notice(t("pi.failed", { name: n.name, error: this.errorText(e) }), 8000);
 			}
 		}
 		if (done.length) new Notice(t("pi.done", { list: done.join(", ") }), 12000);
@@ -1005,9 +1019,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			return null;
 		} catch (e) {
 			if (e instanceof SyncCancelled) return null;
-			h.lastError = errMsg(e);
+			h.lastError = localizeError(e);
 			h.log(`Mirror failed: ${errMsg(e)}`);
-			return errMsg(e);
+			return localizeError(e);
 		}
 	}
 
@@ -1023,9 +1037,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				for (const url of r.pullRequests ?? []) this.notify(t("m.prOpened", { folder: h.def.folder, url }), true);
 			} catch (e) {
 				if (e instanceof SyncCancelled) continue;
-				h.lastError = errMsg(e);
+				h.lastError = localizeError(e);
 				h.log(`Sync failed: ${errMsg(e)}`);
-				errors.push(`${h.def.folder}: ${errMsg(e)}`);
+				errors.push(`${h.def.folder}: ${localizeError(e)}`);
 			}
 		}
 		return errors;
@@ -1086,10 +1100,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		// result, with the side chosen in the wizard, is the one reported.
 		for (let i = 0; this.syncing && i < 600; i++) await sleep(500);
 		this.lastError = null;
+		this.lastErrorCause = null;
 		this.lastReport = null;
 		await this.sync("manual", this.settings.mode, prefer ? { firstSyncPrefer: prefer } : { firstSyncPrefer: undefined });
 		const err = this.lastError as string | null;
-		if (err) return t("m.firstFailed", { error: err });
+		if (err) return t("m.firstFailed", { error: this.errorText(this.lastErrorCause ?? err) });
 		const r = this.lastReport as SyncReport | null;
 		if (!r) return t("m.syncFinished");
 		if (r.upToDate) return t("m.alreadyInSync");
@@ -1126,7 +1141,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (!plan.files.length) new Notice(t("m.freeNothing"));
 			else new Notice(t("m.freed", { mb: (plan.bytes / 1048576).toFixed(1) }));
 		} catch (e) {
-			if (!(e instanceof SyncCancelled)) new Notice(t("m.freeFailed", { error: errMsg(e) }));
+			if (!(e instanceof SyncCancelled)) new Notice(t("m.freeFailed", { error: this.errorText(e) }));
 		}
 		this.refreshHealth();
 	}
@@ -1457,21 +1472,23 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			for (const p of written) this.writtenBySync.set(p, now);
 			this.lastReport = r;
 			this.lastError = null;
+			this.lastErrorCause = null;
 			this.afterSync(r, trigger, Date.now() - started);
 			this.lastFailed = false;
 			await this.maybeDailySnapshot();
 		} catch (e) {
 			if (e instanceof SyncCancelled) {
 				this.log(e.message);
-				this.setStatus("idle", e.message);
+				this.setStatus("idle", this.errorText(e));
 			} else {
 				this.lastError = errMsg(e);
+				this.lastErrorCause = e;
 				this.lastErrorAt = Date.now();
 				this.log(`Sync failed: ${errMsg(e)}`);
-				this.setStatus("error", t("notice.failed", { error: errMsg(e) }));
+				this.setStatus("error", t("notice.failed", { error: this.errorText(e) }));
 				// Automatic syncs only warn on the first failure in a row, not every interval.
-				if (trigger === "manual") new Notice(t("notice.failed", { error: errMsg(e) }), 8000);
-				else if (!this.lastFailed) this.notify(t("notice.failed", { error: errMsg(e) }), true);
+				if (trigger === "manual") new Notice(t("notice.failed", { error: this.errorText(e) }), 8000);
+				else if (!this.lastFailed) this.notify(t("notice.failed", { error: this.errorText(e) }), true);
 				this.lastFailed = true;
 			}
 		} finally {
@@ -1542,7 +1559,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (manual) new Notice(t("m.snapshotOk", { tag }));
 		} catch (e) {
 			this.log(`Snapshot failed: ${errMsg(e)}`);
-			if (manual) new Notice(t("m.snapshotFailed", { error: errMsg(e) }));
+			if (manual) new Notice(t("m.snapshotFailed", { error: this.errorText(e) }));
 		}
 	}
 
@@ -1592,9 +1609,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				const n = await this.textOf(d.path, newData);
 				return { oldLabel, newLabel, oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
 			};
-			new ReviewModal(this.app, pv.decisions, pv.skipped, loadDiff, previewOnly ? null : (deferred) => void this.sync("manual", this.settings.mode, { defer: deferred })).open();
+			new ReviewModal(this.app, pv.decisions, skippedLines(pv.skipped, pv.skipNotes), loadDiff, previewOnly ? null : (deferred) => void this.sync("manual", this.settings.mode, { defer: deferred })).open();
 		} catch (e) {
-			new Notice(t("m.reviewFailed", { error: errMsg(e) }));
+			new Notice(t("m.reviewFailed", { error: this.errorText(e) }));
 		}
 	}
 
@@ -1716,11 +1733,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const n = plan.changed.length + plan.added.length + plan.removed.length;
 			new Notice(n ? t("m.restored", { what, n }) : t("m.restoreSame", { what }));
 			this.lastError = null;
+			this.lastErrorCause = null;
 		} catch (err) {
 			if (!(err instanceof SyncCancelled)) {
 				this.lastError = errMsg(err);
+				this.lastErrorCause = err;
 				this.lastErrorAt = Date.now();
-				new Notice(t("m.restoreFailed", { error: errMsg(err) }), 8000);
+				new Notice(t("m.restoreFailed", { error: this.errorText(err) }), 8000);
 			}
 			this.log(errMsg(err));
 		} finally {
@@ -1760,10 +1779,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.endExclusive();
 			if (err instanceof SyncCancelled) this.setStatus("idle");
 			else {
-				new Notice(t("ow.failed", { error: errMsg(err) }), 8000);
+				new Notice(t("ow.failed", { error: this.errorText(err) }), 8000);
 				this.lastError = errMsg(err);
+				this.lastErrorCause = err;
 				this.lastErrorAt = Date.now();
-				this.setStatus("error", errMsg(err));
+				this.setStatus("error", this.errorText(err));
 			}
 		} finally {
 			this.refreshHealth(true);
@@ -1800,10 +1820,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.endExclusive();
 			if (err instanceof SyncCancelled) this.setStatus("idle");
 			else {
-				new Notice(t("m.resetFailed", { error: errMsg(err) }), 8000);
+				new Notice(t("m.resetFailed", { error: this.errorText(err) }), 8000);
 				this.lastError = errMsg(err);
+				this.lastErrorCause = err;
 				this.lastErrorAt = Date.now();
-				this.setStatus("error", errMsg(err));
+				this.setStatus("error", this.errorText(err));
 			}
 			this.log(errMsg(err));
 		} finally {
@@ -1890,17 +1911,20 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
+				// "Git: …" keeps our items apart from core ones such as Obsidian Sync's "Open version history"
+				// (the public API has no submenus to group them under the plugin's name).
+				const ours = (item: string) => t("menu.prefixed", { item });
 				if (file instanceof TFolder && file.path && file.path !== "/") {
-					menu.addItem((i) => i.setTitle(t("menu.shareFolder")).setIcon("folder-sync").onClick(() => new SharedFolderModal(this.app, this, () => this.refreshHealth(), file.path).open()));
-					menu.addItem((i) => i.setTitle(t("menu.excludeFolder")).setIcon("eye-off").onClick(() => void this.excludeFolder(file.path)));
+					menu.addItem((i) => i.setTitle(ours(t("menu.shareFolder"))).setIcon("folder-sync").onClick(() => new SharedFolderModal(this.app, this, () => this.refreshHealth(), file.path).open()));
+					menu.addItem((i) => i.setTitle(ours(t("menu.excludeFolder"))).setIcon("eye-off").onClick(() => void this.excludeFolder(file.path)));
 					return;
 				}
 				if (!(file instanceof TFile)) return;
-				menu.addItem((i) => i.setTitle(t("menu.history")).setIcon("history").onClick(() => void this.showFileHistory(file)));
-				menu.addItem((i) => i.setTitle(t("menu.compare")).setIcon("file-diff").onClick(() => this.compareWithGitHub(file)));
+				menu.addItem((i) => i.setTitle(ours(t("menu.history"))).setIcon("history").onClick(() => void this.showFileHistory(file)));
+				menu.addItem((i) => i.setTitle(ours(t("menu.compare"))).setIcon("file-diff").onClick(() => this.compareWithGitHub(file)));
 				if (this.isConfigured()) {
-					menu.addItem((i) => i.setTitle(t("menu.openOnHost", { host: this.hostLabel() })).setIcon("external-link").onClick(() => void this.openOnHost(file, "file")));
-					menu.addItem((i) => i.setTitle(t("menu.copyHostLink")).setIcon("link").onClick(() => void this.openOnHost(file, "copy")));
+					menu.addItem((i) => i.setTitle(ours(t("menu.openOnHost", { host: this.hostLabel() }))).setIcon("external-link").onClick(() => void this.openOnHost(file, "file")));
+					menu.addItem((i) => i.setTitle(ours(t("menu.copyHostLink", { host: this.hostLabel() }))).setIcon("link").onClick(() => void this.openOnHost(file, "copy")));
 				}
 			}),
 		);
@@ -1923,7 +1947,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				await navigator.clipboard.writeText(url);
 				new Notice(t("link.copied"));
 			} catch (e) {
-				new Notice(t("m.clipboardFailed", { error: errMsg(e) }));
+				new Notice(t("m.clipboardFailed", { error: this.errorText(e) }));
 			}
 		} else window.open(url);
 	}
@@ -1957,7 +1981,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			await navigator.clipboard.writeText(redactSecrets(lines.join("\n")));
 			new Notice(t("m.diagnosticsCopied"));
 		} catch (e) {
-			new Notice(t("m.clipboardFailed", { error: errMsg(e) }));
+			new Notice(t("m.clipboardFailed", { error: this.errorText(e) }));
 		}
 	}
 
@@ -1993,14 +2017,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					// VaultIO recreates missing folders and handles hidden (config) paths.
 					await this.io.write(target, data);
 				} catch (e) {
-					return void new Notice(t("m.restoreFailed", { error: errMsg(e) }));
+					return void new Notice(t("m.restoreFailed", { error: this.errorText(e) }));
 				}
 				new Notice(t("m.restoredFile", { path: target }));
 				const nf = this.app.vault.getAbstractFileByPath(target);
 				if (asCopy && nf instanceof TFile) await this.app.workspace.getLeaf(true).openFile(nf);
 			}).open();
 		} catch (e) {
-			new Notice(t("m.versionFailed", { error: errMsg(e) }));
+			new Notice(t("m.versionFailed", { error: this.errorText(e) }));
 		}
 	}
 

@@ -4,7 +4,7 @@
 
 import { TFile, TFolder } from "obsidian";
 import type { App, TAbstractFile } from "obsidian";
-import { isHiddenPath, parentDir } from "./util.ts";
+import { isHiddenPath, parentDir, pool } from "./util.ts";
 
 export interface LocalFileInfo {
 	path: string;
@@ -80,10 +80,14 @@ export class VaultIO {
 
 	/**
 	 * Hidden entries inside normal vault folders (e.g. Notes/.assets/, Project/.gitignore), which Obsidian
-	 * doesn't index: lists every indexed folder on disk, then walks the hidden folders found. With
-	 * `onlyNames`, only files with those names are returned (no hidden folders are walked).
+	 * doesn't index. Finding them means listing every folder on disk, so that walk is shared and cached
+	 * (see NestedHiddenIndex): it only runs again after folders were created or renamed, on a full scan
+	 * (`full`), or every 30 minutes. In between, the known hidden files are re-read (stat) and the known
+	 * hidden folders re-walked, which is cheap. With `onlyNames`, only files with those names are returned
+	 * (no hidden folders are walked).
 	 */
-	async listNestedHidden(inScope: (path: string) => boolean, onlyNames?: Set<string>): Promise<LocalFileInfo[]> {
+	async listNestedHidden(inScope: (path: string) => boolean, onlyNames?: Set<string>, opts: { full?: boolean } = {}): Promise<LocalFileInfo[]> {
+		const found = await nestedHiddenIndex(this.app).get(this, opts.full ?? false);
 		const out: LocalFileInfo[] = [];
 		const strip = (p: string) => p.replace(/^\/+/, "");
 		const name = (p: string) => p.split("/").pop() ?? p;
@@ -97,20 +101,38 @@ export class VaultIO {
 			for (const f of listing.files) await addFile(strip(f));
 			for (const sub of listing.folders) if (inScope(strip(sub))) await walk(strip(sub));
 		};
-		const all = (this.app.vault as { getAllLoadedFiles?: () => TAbstractFile[] }).getAllLoadedFiles?.() ?? [];
-		for (const folder of all) {
-			if (!(folder instanceof TFolder) || !folder.path || folder.path === "/" || isHiddenPath(folder.path)) continue;
-			// Listing errors propagate (a partial list would make the missing files look deleted).
-			const listing = await this.adapter.list(folder.path);
-			for (const f of listing.files.map(strip)) {
-				if (!name(f).startsWith(".")) continue;
-				if (onlyNames && !onlyNames.has(name(f))) continue;
-				await addFile(f);
-			}
-			if (onlyNames) continue;
-			for (const d of listing.folders.map(strip)) if (name(d).startsWith(".") && inScope(d)) await walk(d);
+		for (const f of found.files) {
+			if (onlyNames && !onlyNames.has(name(f))) continue;
+			await addFile(f);
+		}
+		if (onlyNames) return out;
+		for (const d of found.dirs) {
+			if (!inScope(d)) continue;
+			// A known hidden folder removed since the last walk simply has nothing in it any more.
+			const st = await this.adapter.stat(d);
+			if (st?.type === "folder") await walk(d);
 		}
 		return out;
+	}
+
+	/**
+	 * One walk of every indexed folder on disk: the hidden files directly inside each, and the hidden
+	 * folders found there. Scope-free (callers filter), with up to 4 listings at a time.
+	 */
+	async walkNestedHidden(): Promise<NestedHidden> {
+		const strip = (p: string) => p.replace(/^\/+/, "");
+		const name = (p: string) => p.split("/").pop() ?? p;
+		const files: string[] = [];
+		const dirs: string[] = [];
+		const all = (this.app.vault as { getAllLoadedFiles?: () => TAbstractFile[] }).getAllLoadedFiles?.() ?? [];
+		const folders = all.filter((f): f is TFolder => f instanceof TFolder && !!f.path && f.path !== "/" && !isHiddenPath(f.path)).map((f) => f.path);
+		// Listing errors propagate (a partial list would make the missing files look deleted).
+		await pool(folders, 4, async (folder) => {
+			const listing = await this.adapter.list(folder);
+			for (const f of listing.files.map(strip)) if (name(f).startsWith(".")) files.push(f);
+			for (const d of listing.folders.map(strip)) if (name(d).startsWith(".")) dirs.push(d);
+		});
+		return { files: files.sort(), dirs: dirs.sort() };
 	}
 
 	/** Empty folders in the vault (indexed by Obsidian), in scope. */
@@ -297,4 +319,70 @@ export class VaultIO {
 			dir = parentDir(dir);
 		}
 	}
+}
+
+/** Hidden files directly inside normal folders, and hidden folders there (vault paths, sorted). */
+export interface NestedHidden {
+	files: string[];
+	dirs: string[];
+}
+
+/** Without folder changes or full scans, the folder walk still runs this often (new files from outside Obsidian). */
+export const NESTED_WALK_MS = 30 * 60_000;
+/** A walk this recent counts as fresh for a full scan: the .gitignore check and the scan of one sync share it. */
+const FRESH_MS = 60_000;
+
+/**
+ * Cache of the folder walk that finds hidden entries inside normal folders. Shared by everything that
+ * reads the same vault (the .gitignore loader and every sync engine), so one sync walks at most once.
+ */
+export class NestedHiddenIndex {
+	private found: NestedHidden | null = null;
+	private walkedAt = 0;
+	private stale = true;
+	private running: Promise<NestedHidden> | null = null;
+	/** Number of folder walks done (for tests and the debug log). */
+	walks = 0;
+
+	/** Folders were created, renamed or moved: the next request walks again. */
+	foldersChanged() {
+		this.stale = true;
+	}
+
+	/** True if the next request would walk the folders (`full`: a full scan asks). */
+	due(full = false, now = Date.now()): boolean {
+		if (!this.found || this.stale) return true;
+		if (now - this.walkedAt > NESTED_WALK_MS) return true;
+		return full && now - this.walkedAt > FRESH_MS;
+	}
+
+	async get(io: VaultIO, full = false): Promise<NestedHidden> {
+		if (this.running) return this.running;
+		if (!this.due(full) && this.found) return this.found;
+		// Cleared before the walk: a folder created while it runs makes the next request walk again.
+		this.stale = false;
+		this.running = io.walkNestedHidden();
+		try {
+			const found = await this.running;
+			this.found = found;
+			this.walkedAt = Date.now();
+			this.walks++;
+			return found;
+		} catch (e) {
+			this.stale = true;
+			throw e;
+		} finally {
+			this.running = null;
+		}
+	}
+}
+
+const indexes = new WeakMap<object, NestedHiddenIndex>();
+
+/** The shared walk cache of the vault `app` shows. */
+export function nestedHiddenIndex(app: App): NestedHiddenIndex {
+	const key = app.vault;
+	let idx = indexes.get(key);
+	if (!idx) indexes.set(key, (idx = new NestedHiddenIndex()));
+	return idx;
 }

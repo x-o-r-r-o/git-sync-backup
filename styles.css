@@ -108,6 +108,18 @@
 	gap: var(--size-4-1);
 	margin-bottom: var(--size-4-2);
 }
+/* Conflict dialog: both tab panes sit in one grid cell, so the dialog keeps the taller pane's height. */
+.vsg-cf-panes {
+	display: grid;
+}
+.vsg-cf-pane {
+	grid-area: 1 / 1;
+	min-width: 0;
+}
+.vsg-cf-hidden {
+	visibility: hidden;
+	pointer-events: none;
+}
 .vsg-tabs button.is-active,
 .vsg-hp-btn.is-active {
 	background: var(--interactive-accent);

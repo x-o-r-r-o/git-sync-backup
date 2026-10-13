@@ -5,6 +5,7 @@ import { b64encode, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
+import { SyncError } from "./errors.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { gitBlobSha, pool } from "./util.ts";
 
@@ -89,7 +90,7 @@ export class GitLab implements Remote {
 				{ okStatuses: opts.okStatuses, hostLabel: this.label },
 			);
 		const c = this.cfg();
-		if (!c.token) throw new Error("No token set. Add one in the plugin settings.");
+		if (!c.token) throw new SyncError("noToken", { host: this.label });
 		try {
 			return await send(c);
 		} catch (e) {
@@ -177,13 +178,13 @@ export class GitLab implements Remote {
 		const out: TreeEntry[] = [];
 		let url = `${this.project}/repository/tree?ref=${encodeURIComponent(ref)}&recursive=true&per_page=100&pagination=keyset`;
 		for (let page = 0; url; page++) {
-			if (page >= 5000) throw new Error("Repository is too large to list (more than 500,000 entries).");
+			if (page >= 5000) throw new SyncError("repoTooLarge", { host: this.label });
 			// A 404 is only "empty repository" on the first page; later it would silently truncate the
 			// listing, and missing entries would look like remote deletions.
 			const res = await this.request("GET", url, undefined, { okStatuses: page === 0 ? [404] : [] });
 			if (res.status === 404) {
 				if (await this.isEmptyTree(ref, res)) break;
-				throw new RemoteError(`GitLab could not list the files of ${ref} (HTTP 404)`, 404);
+				throw new RemoteError(`GitLab could not list the files of ${ref} (HTTP 404)`, 404, { host: this.label, code: "listFailed", params: { ref } });
 			}
 			for (const e of (res.json as GlTreeItem[] | null) ?? []) out.push({ path: e.path, mode: e.mode, type: e.type, sha: e.id });
 			const next = /<([^>]+)>;\s*rel="next"/.exec(header(res, "link") ?? "")?.[1];
@@ -215,7 +216,7 @@ export class GitLab implements Remote {
 			u = new URL(next, this.base + "/");
 			b = new URL(this.base + "/");
 		} catch {
-			throw new Error("GitLab returned an invalid pagination link");
+			throw new SyncError("badPagination", { host: this.label });
 		}
 		const basePath = b.pathname.replace(/\/+$/, "");
 		const lower = u.pathname.toLowerCase();
@@ -225,7 +226,7 @@ export class GitLab implements Remote {
 			const i = lower.indexOf("/api/v4/");
 			if (i >= 0) rest = u.pathname.slice(i + "/api/v4".length);
 		}
-		if (rest === null || !rest.startsWith("/projects/")) throw new Error("GitLab returned an unexpected pagination link");
+		if (rest === null || !rest.startsWith("/projects/")) throw new SyncError("badPagination", { host: this.label });
 		return rest + u.search;
 	}
 	async getBlob(sha: string): Promise<ArrayBuffer> {
@@ -261,7 +262,7 @@ export class GitLab implements Remote {
 			if (res.status === 400) {
 				const m = String((res.json as { message?: string } | null)?.message ?? "");
 				if (/changed since|already exists|doesn't exist|does not exist|conflict/i.test(m)) throw new NotFastForward();
-				throw new Error(`GitLab refused the commit: ${m || "HTTP 400"}`);
+				throw new SyncError("commitRefused", { host: this.label, detail: m || "HTTP 400" });
 			}
 			const created = res.json as GlCommit;
 			const parents = created.parent_ids ?? [];

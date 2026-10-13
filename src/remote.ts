@@ -1,6 +1,8 @@
 // What the sync engine needs from a git host. Implemented for GitHub (Git Data API), Gitea/Forgejo
 // (ChangeFiles API) and GitLab (Commits API). Paths here are repository paths (after any codec).
 
+import { RemoteError, SyncError } from "./errors.ts";
+
 export interface TreeEntry {
 	path: string;
 	mode: string;
@@ -60,19 +62,13 @@ export interface CommitResult {
 
 export type Relation = "ahead" | "behind" | "identical" | "diverged" | "missing";
 
-export class NotFastForward extends Error {
+export class NotFastForward extends SyncError {
 	constructor() {
-		super("The branch moved while syncing (another device pushed).");
+		super("branchMoved");
 	}
 }
 
-export class RemoteError extends Error {
-	status: number;
-	constructor(message: string, status: number) {
-		super(message);
-		this.status = status;
-	}
-}
+export { RemoteError };
 
 export interface Remote {
 	readonly kind: "github" | "gitea" | "gitlab" | "bitbucket";

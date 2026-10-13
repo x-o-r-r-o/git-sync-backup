@@ -11,6 +11,7 @@ import { httpRequest, obsidianTransport } from "./http.ts";
 import type { Transport } from "./http.ts";
 import type { Remote } from "./remote.ts";
 import { encodeText } from "./util.ts";
+import { SyncError } from "./errors.ts";
 
 const SPEC = "version https://git-lfs.github.com/spec/v1";
 
@@ -103,7 +104,7 @@ export class LfsLayer implements Layer {
 		const ptr = parsePointer(blob);
 		if (!ptr) return blob;
 		const data = await this.download(path, ptr.oid, ptr.size);
-		if (hex(await crypto.subtle.digest("SHA-256", data)) !== ptr.oid) throw new Error(`${path}: large-file download was corrupted`);
+		if (hex(await crypto.subtle.digest("SHA-256", data)) !== ptr.oid) throw new SyncError("lfsCorrupt", { path });
 		return data;
 	}
 
@@ -120,7 +121,7 @@ export class LfsLayer implements Layer {
 			{ hostLabel: `${this.remote.label} LFS` },
 		);
 		const obj = (res.json as LfsBatch | null)?.objects?.[0];
-		if (obj?.error) throw new Error(`Large-file storage: ${obj.error.message ?? String(obj.error.code)}`);
+		if (obj?.error) throw new SyncError("lfsError", { detail: obj.error.message ?? String(obj.error.code) });
 		return obj;
 	}
 
@@ -128,13 +129,13 @@ export class LfsLayer implements Layer {
 		const obj = await this.batch("upload", oid, data.byteLength);
 		const up = obj?.actions?.upload;
 		if (!up) return; // the host already has this object
-		await httpRequest(this.transport, { url: up.href, method: "PUT", headers: { ...(up.header ?? {}), "Content-Type": "application/octet-stream" }, body: data }, { hostLabel: "LFS upload" });
+		await httpRequest(this.transport, { url: up.href, method: "PUT", headers: { ...(up.header ?? {}), "Content-Type": "application/octet-stream" }, body: data }, { hostLabel: `${this.remote.label} LFS` });
 		const verify = obj?.actions?.verify;
 		if (verify) {
 			await httpRequest(
 				this.transport,
 				{ url: verify.href, method: "POST", headers: { ...(verify.header ?? {}), Accept: "application/vnd.git-lfs+json" }, contentType: "application/vnd.git-lfs+json", body: JSON.stringify({ oid, size: data.byteLength }) },
-				{ hostLabel: "LFS verify" },
+				{ hostLabel: `${this.remote.label} LFS` },
 			);
 		}
 		void path;
@@ -143,8 +144,8 @@ export class LfsLayer implements Layer {
 	private async download(path: string, oid: string, size: number): Promise<ArrayBuffer> {
 		const obj = await this.batch("download", oid, size);
 		const down = obj?.actions?.download;
-		if (!down) throw new Error(`${path}: large file is missing from the host's LFS storage`);
-		return (await httpRequest(this.transport, { url: down.href, method: "GET", headers: down.header ?? {} }, { hostLabel: "LFS download" })).arrayBuffer;
+		if (!down) throw new SyncError("lfsMissing", { path });
+		return (await httpRequest(this.transport, { url: down.href, method: "GET", headers: down.header ?? {} }, { hostLabel: `${this.remote.label} LFS` })).arrayBuffer;
 	}
 }
 

@@ -12,6 +12,7 @@ import { buildMultipart, compareByWalking, header, httpRequest, obsidianTranspor
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
+import { SyncError } from "./errors.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { gitBlobSha, pool } from "./util.ts";
 
@@ -19,8 +20,19 @@ export interface BlobCache {
 	commit: string;
 	/** `mode` is missing in caches written before file attributes were read (= 100644). */
 	files: Record<string, { sha: string; size: number; mode?: string }>;
-	/** blob sha → a path and commit where that content can be fetched. */
-	blobs: Record<string, { path: string; commit: string }>;
+	/** blob sha → a path and commit where that content can be fetched (`size` missing in older caches). */
+	blobs: Record<string, { path: string; commit: string; size?: number }>;
+}
+
+/**
+ * A download from Bitbucket came back shorter (or longer) than the file. Bitbucket exposes no content
+ * hashes, so the plugin hashes what it downloads; a cut-off body would otherwise hash as a valid version.
+ */
+export class IncompleteDownload extends SyncError {
+	constructor(path: string, got: number, expected: number) {
+		super("partialDownload", { path, host: "Bitbucket", got, expected });
+		this.name = "IncompleteDownload";
+	}
 }
 
 export interface BlobCacheStore {
@@ -148,10 +160,10 @@ export class Bitbucket implements Remote {
 	}
 
 	async request(method: string, path: string, body?: unknown, opts: { accept?: string; okStatuses?: number[] } = {}): Promise<HttpResponse> {
-		if (!this.cfg().token) throw new Error("No token set. Add one in the plugin settings.");
+		if (!this.cfg().token) throw new SyncError("noToken", { host: this.label });
 		// Absolute URLs come from the server (pagination `next`): the token only goes to the API's own origin.
 		const absolute = /^[a-z][a-z0-9+.-]*:/i.test(path);
-		if (absolute && !sameOrigin(path, this.base)) throw new Error(`Bitbucket returned a link to another server (${safeOrigin(path)}); refusing to send the token there.`);
+		if (absolute && !sameOrigin(path, this.base)) throw new SyncError("foreignLink", { host: this.label, origin: safeOrigin(path) });
 		const url = absolute ? path : this.base + path;
 		return httpRequest(
 			this.transport,
@@ -237,9 +249,21 @@ export class Bitbucket implements Remote {
 		await this.store?.save(c);
 	}
 
-	private async raw(commit: string, path: string): Promise<ArrayBuffer | null> {
+	/**
+	 * Raw file content at a commit. Checks the body's length against `expected` (the size from the folder
+	 * listing, when known) and against Content-Length (when the body wasn't re-encoded), so a cut-off
+	 * download throws IncompleteDownload instead of being hashed and stored as a valid version.
+	 */
+	private async raw(commit: string, path: string, expected?: number): Promise<ArrayBuffer | null> {
 		const res = await this.request("GET", `${this.repoPath}/src/${commit}/${encPath(path)}`, undefined, { accept: "*/*", okStatuses: [404] });
-		return res.status === 404 ? null : res.arrayBuffer;
+		if (res.status === 404) return null;
+		const data = res.arrayBuffer;
+		const got = data.byteLength;
+		if (typeof expected === "number" && expected >= 0 && got !== expected) throw new IncompleteDownload(path, got, expected);
+		const encoding = header(res, "content-encoding");
+		const length = Number(header(res, "content-length") ?? NaN);
+		if ((!encoding || encoding === "identity") && Number.isFinite(length) && length >= 0 && got !== length) throw new IncompleteDownload(path, got, length);
+		return data;
 	}
 
 	private listDir(commit: string, dir: string): Promise<BbSrcEntry[]> {
@@ -247,19 +271,23 @@ export class Bitbucket implements Remote {
 	}
 
 	/** Hashes one file into `files`/`blobs`. Submodules have no content to fetch: their commit is the sha. */
-	private async hashInto(commit: string, p: string, mode: string, hash: string | undefined, files: BlobCache["files"], blobs: BlobCache["blobs"]) {
+	/**
+	 * Hashes one file into `files`/`blobs`. Submodules have no content to fetch: their commit is the sha.
+	 * `size` is the listing's size for the file; a download of another length throws (nothing is recorded).
+	 */
+	private async hashInto(commit: string, p: string, mode: string, hash: string | undefined, size: number | undefined, files: BlobCache["files"], blobs: BlobCache["blobs"]) {
 		if (mode === "160000") {
 			files[p] = { sha: hash ?? "", size: 0, mode };
 			return;
 		}
-		const data = await this.raw(commit, p);
+		const data = await this.raw(commit, p, size);
 		if (!data) {
 			delete files[p];
 			return;
 		}
 		const sha = await gitBlobSha(data);
 		files[p] = mode === "100644" ? { sha, size: data.byteLength } : { sha, size: data.byteLength, mode };
-		blobs[sha] = { path: p, commit };
+		blobs[sha] = { path: p, commit, size: data.byteLength };
 	}
 
 	private async fullListing(commit: string, blobs: BlobCache["blobs"]): Promise<BlobCache["files"]> {
@@ -272,7 +300,7 @@ export class Bitbucket implements Remote {
 		};
 		await walk("");
 		const files: BlobCache["files"] = {};
-		await pool(entries, 4, (e) => this.hashInto(commit, e.path, modeOf(e), e.commit?.hash, files, blobs));
+		await pool(entries, 4, (e) => this.hashInto(commit, e.path, modeOf(e), e.commit?.hash, e.size, files, blobs));
 		return files;
 	}
 
@@ -318,10 +346,13 @@ export class Bitbucket implements Remote {
 						delete next[p];
 						return;
 					}
-					await this.hashInto(commit, p, modeOf(e), e.commit?.hash, next, blobs);
+					await this.hashInto(commit, p, modeOf(e), e.commit?.hash, e.size, next, blobs);
 				});
 				files = next;
-			} catch {
+			} catch (e) {
+				// A cut-off download would fail again in a full listing (and re-download everything): stop here,
+				// leaving the cache untouched so the next sync retries.
+				if (e instanceof IncompleteDownload) throw e;
 				files = await this.fullListing(commit, blobs);
 			}
 		} else files = await this.fullListing(commit, blobs);
@@ -330,9 +361,14 @@ export class Bitbucket implements Remote {
 	}
 
 	async getBlob(sha: string): Promise<ArrayBuffer> {
-		const where = (await this.loadCache())?.blobs[sha];
-		const data = where ? await this.raw(where.commit, where.path) : null;
-		if (!data) throw new Error("Bitbucket: this file version is not available");
+		const cache = await this.loadCache();
+		const where = cache?.blobs[sha];
+		// Expected size: recorded with the blob, or (older caches) from the file entry that has this sha.
+		const known = where?.size ?? (where && cache?.files[where.path]?.sha === sha ? cache.files[where.path].size : undefined);
+		const data = where ? await this.raw(where.commit, where.path, known) : null;
+		if (!data || !where) throw new SyncError("versionUnavailable", { host: this.label });
+		// The sha came from hashing an earlier download of the same path and commit, so it must match.
+		if ((await gitBlobSha(data)) !== sha) throw new SyncError("contentMismatch", { path: where.path, host: this.label });
 		return data;
 	}
 
@@ -379,12 +415,12 @@ export class Bitbucket implements Remote {
 			if (res.status === 400) {
 				const m = String((res.json as { error?: { message?: string } } | null)?.error?.message ?? "");
 				if (/parent|tip|head|conflict|outdated/i.test(m)) throw new NotFastForward();
-				throw new Error(`Bitbucket refused the commit: ${m || "HTTP 400"}`);
+				throw new SyncError("commitRefused", { host: this.label, detail: m || "HTTP 400" });
 			}
 			// The new commit is named in the Location header. Re-reading the branch head instead could pick up
 			// another device's commit made right after ours and adopt it as our own, hiding its changes.
 			const created = commitFromLocation(header(res, "location")) ?? (await this.getRef(req.branch));
-			if (!created || created === parent) throw new Error("Bitbucket did not create the commit");
+			if (!created || created === parent) throw new SyncError("commitNotCreated", { host: this.label });
 			const info = await this.json<BbCommit>("GET", `${this.repoPath}/commit/${created}`);
 			if (info.parents?.[0]?.hash !== parent) throw new NotFastForward();
 			parent = created;
@@ -414,7 +450,7 @@ export class Bitbucket implements Remote {
 			for (const p of req.deletes) delete files[p];
 			for (const [p, f] of stored) {
 				files[p] = f;
-				blobs[f.sha] = { path: p, commit: parent };
+				blobs[f.sha] = { path: p, commit: parent, size: f.size };
 			}
 			await this.saveCache({ commit: parent, files, blobs });
 		}

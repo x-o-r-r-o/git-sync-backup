@@ -273,7 +273,11 @@ function parseMultipart(body: ArrayBuffer, contentType: string): { name: string;
 }
 
 /** Fake Bitbucket Cloud at https://bb.test/2.0, repo me/vault. No blob hashes exposed, like the real API. */
-export function bitbucketTransport(repo: FakeRepo, opts: { noLocation?: boolean } = {}) {
+/**
+ * `truncate(path)` → true cuts that file's raw download in half (a body cut off in transit);
+ * `contentLength` adds the full size as a Content-Length header to raw downloads.
+ */
+export function bitbucketTransport(repo: FakeRepo, opts: { noLocation?: boolean; truncate?: (path: string) => boolean; contentLength?: boolean } = {}) {
 	const calls = { raw: 0 };
 	const transport = async (req: HttpRequest): Promise<HttpResponse> => {
 		const u = new URL(req.url);
@@ -333,7 +337,9 @@ export function bitbucketTransport(repo: FakeRepo, opts: { noLocation?: boolean 
 			const sha = c.files.get(sub);
 			if (sha) {
 				calls.raw++;
-				return raw(repo.blobs.get(sha)!);
+				const data = repo.blobs.get(sha)!;
+				const res = raw(opts.truncate?.(sub) ? data.slice(0, Math.floor(data.length / 2)) : data);
+				return opts.contentLength ? { ...res, headers: { "Content-Length": String(data.length) } } : res;
 			}
 			const dir = sub.replace(/\/$/, "");
 			const prefix = dir ? dir + "/" : "";

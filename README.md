@@ -120,7 +120,7 @@ When a file changed on both sides, choose what happens: **merge automatically** 
 ### Backups and history
 
 - One commit per sync. Commits carry a `Device:` line, so you can see which device made each change.
-- **Version history** of any file from the file menu, with **Compare with current**.
+- **Version history** of any file from the file menu (**Git: Version history**, next to Obsidian Sync's own *Open version history*), with **Compare with current**.
 - **Timeline:** browse every sync and snapshot, and restore the whole vault or a single folder to an earlier point. Restores are new commits, so history is never rewritten and a restore can be undone the same way.
 - **Recover deleted files**, plus daily or manual snapshot tags.
 - **Make this device match the repository** discards unsynced local changes. Replaced and removed files go to the trash first.
@@ -166,7 +166,7 @@ Settings → *Shared folders*. Sync one folder with its own repository, for exam
 - The folder maps to the root of the shared repository, so collaborators can use it as a normal vault or repository, or to a folder inside it (for example `docs/`), leaving the rest of the repository alone.
 - **Conflicts as pull requests** (optional, per shared folder): when two people change the same lines, this device's version goes to a new branch with a pull request (merge request on GitLab) for the team to review, instead of a conflict copy. If the pull request can't be opened, it falls back to a conflict copy.
 - **GitHub-friendly Markdown** (optional, per shared folder): notes are stored so they read well on GitHub (wikilinks become normal links, callouts become GitHub alerts, `==highlights==` become `<mark>`), while your vault keeps the exact Obsidian text. A small hidden comment after each converted spot lets the original come back exactly; if a collaborator edits that spot on GitHub, their edit wins.
-- Right-click a folder → **Share this folder with a repository…** to start.
+- Right-click a folder → **Git: Share this folder with a repository…** to start.
 - Each shared folder has its own state, can use its own host and token, and syncs after the main vault. Its status appears in the status panel.
 - The main repository never touches shared folders.
 
@@ -198,10 +198,10 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 - **Battery saver** (this device): no timer, no sync after each edit, when opening a note or when leaving the app; syncs on startup, when you come back to Obsidian, and manually.
 - **Changes on the host**: a dot on the ribbon icon and status bar when another device pushed and this device hasn't synced yet (checked every 5 minutes while Obsidian is open).
 - **Repository and branch pickers** (Settings → *Repository* / *Branch* → *Choose*): pick from the repositories your token or the signed-in app can use, and switch branches or create one, for example a drafts branch. Switching starts a fresh comparison; nothing is deleted.
-- **Open or copy a note's link on the host**: file menu or commands; links point at the last synced commit. History pages too.
+- **Open or copy a note's link on the host**: file menu (**Git: Open on …** / **Git: Copy link on …**) or commands; links point at the last synced commit. History pages too.
 - **Make the repository match this device**: one forward commit that uploads this device's versions and deletes what isn't here (it stays in history). The opposite of *Make this device match the repository*.
 - **Keep empty folders** across devices (off with encryption).
-- **Exclude a folder** from the file menu.
+- **Exclude a folder** from the file menu (**Git: Exclude this folder from sync**).
 - **Names Windows can't store** (such as `a:b.md`) are listed in the status panel; a Windows device skips them instead of failing.
 - **Plugin versions**: commits record the plugin version, and the status panel warns when devices run different versions.
 - **Copy diagnostics** for a bug report, with tokens hidden.
@@ -215,7 +215,7 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 | Review changes and sync | Pick which changes to sync, with diffs |
 | Preview sync (dry run) | Show what a sync would do |
 | Pull only (download changes) | Download without uploading |
-| Back up only (upload changes) | Upload without changing local files |
+| Back up only (upload changes) | Upload without changing local files (a file the repository also changed keeps its repository version as a conflict copy next to it) |
 | Open sync status panel | State, pending changes, conflicts and devices |
 | Run setup wizard | Connect a host and repository |
 | End-to-end encryption: turn on or unlock | Set or enter the passphrase |
@@ -292,7 +292,7 @@ This section covers the disclosures Obsidian's developer policies require.
 
 - The maximum file size defaults to 50 MB. On GitHub without large file storage it can go up to 100 MB (GitHub's own limit); with large file storage, and on the other hosts, up to 2000 MB. Use Git LFS or exclude patterns for large media.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
-- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. Hidden files inside normal folders are only synced with *Hidden files inside folders* on.
+- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. A new hidden file or `.gitignore` inside a normal folder is found after a folder is created or moved in Obsidian, on the next full scan, or within 30 minutes; changes to ones already known are picked up as above. Hidden files inside normal folders are only synced with *Hidden files inside folders* on.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
 - Sign in works on github.com and gitlab.com, and on GitHub Enterprise or self-managed GitLab with your own app. The other hosts use access tokens.
 - GitHub-friendly Markdown doesn't rewrite links relative to the note's folder, and doesn't convert callouts nested inside other quotes.

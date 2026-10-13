@@ -3,7 +3,7 @@ import type { SettingDefinitionItem } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
 import type { ConflictStrategy, NoticeLevel } from "./types.ts";
 import type { SyncMode } from "./plan.ts";
-import { errMsg } from "./util.ts";
+import { localizeError } from "./errors.ts";
 import { HOSTS } from "./hosts.ts";
 import type { HostKind } from "./hosts.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
@@ -106,7 +106,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 									const cur = s.mirror ?? m;
 									new Notice(repo ? t("s.mirrorOk", { repo: `${cur.owner}/${cur.repo}` }) : t("s.testNotFound", { user: cur.owner, repo: `${cur.owner}/${cur.repo}` }));
 								} catch (e) {
-									new Notice(t("s.testFailed", { error: errMsg(e) }));
+									new Notice(t("s.testFailed", { error: localizeError(e) }));
 								}
 							}),
 						),
@@ -350,7 +350,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 												})(),
 											).open();
 										} catch (e) {
-											new Notice(t("w.listFailed", { error: errMsg(e) }), 10000);
+											new Notice(t("w.listFailed", { error: localizeError(e) }), 10000);
 										} finally {
 											b.setDisabled(false);
 										}
@@ -399,7 +399,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 											else if (!repo) new Notice(t("s.testNotFound", { user: user.login, repo: `${s.owner}/${s.repo}` }));
 											else new Notice(t(repo.private ? "s.testOkPrivate" : "s.testOkPublic", { repo: `${s.owner}/${s.repo}` }));
 										} catch (e) {
-											new Notice(t("s.testFailed", { error: errMsg(e) }));
+											new Notice(t("s.testFailed", { error: localizeError(e) }));
 										}
 									}),
 								)
@@ -414,7 +414,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 											new Notice(t("s.created", { url: repo.html_url }));
 											this.refresh();
 										} catch (e) {
-											new Notice(t("s.createFailed", { error: errMsg(e) }));
+											new Notice(t("s.createFailed", { error: localizeError(e) }));
 										}
 									}),
 								),
@@ -993,7 +993,7 @@ class BranchModal extends Modal {
 						await this.onPick(newName);
 						this.close();
 					} catch (e) {
-						new Notice(t("w.createFailed", { error: errMsg(e) }), 8000);
+						new Notice(t("w.createFailed", { error: localizeError(e) }), 8000);
 					}
 				}),
 			);
@@ -1016,7 +1016,7 @@ class BranchModal extends Modal {
 					);
 			}
 		} catch (e) {
-			status.setText(t("w.listFailed", { error: errMsg(e) }));
+			status.setText(t("w.listFailed", { error: localizeError(e) }));
 		}
 	}
 

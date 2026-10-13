@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.5.0 (2026-10-13)
+
+**New**
+- **Error messages in your language.** Sync, connection and download errors in notices and the status panel are now translated into all eight languages, with host-specific hints (sign-in expired, repository not found, rate limit, server or network trouble). The sync log and *Copy diagnostics* stay in English for bug reports.
+- **Back up only keeps both.** In *Back up only* mode, when the repository also changed a file, its version is saved next to yours as a conflict copy before your version is uploaded, instead of surviving only in history. The backup mirror is unchanged.
+
+**Improved**
+- **Smarter rename detection.** Lines a note shares with the other notes in its folder (a template) no longer count when deciding whether a deleted note and a new note are the same note renamed, so notes from rich templates aren't paired by mistake.
+- **Lighter scanning for big vaults.** Hidden files and `.gitignore` files inside folders are found through folder changes, full scans and a 30-minute check instead of listing every folder every few minutes; folders are listed four at a time.
+- **Bitbucket download checks.** Each download is checked against the size in the repository listing (and the server's length header), so a cut-off download is retried instead of saved.
+- **Steadier conflict dialog:** it keeps its height when switching between *Choose changes* and *Full diff*.
+- **Clearer file menu:** the plugin's items are prefixed *Git:* (for example *Git: Version history*), so they don't mix with Obsidian Sync's *Open version history*.
+
 ## 1.4.0 (2026-10-13)
 
 **New**

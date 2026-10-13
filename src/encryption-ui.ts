@@ -4,7 +4,7 @@ import { App, Modal, Notice, Setting } from "obsidian";
 import { createEncryption, MARKER_PATH, passphraseStrength, unlockEncryption } from "./crypto.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import type VaultSyncPlugin from "./main.ts";
-import { errMsg } from "./util.ts";
+import { localizeError } from "./errors.ts";
 import { t as tr } from "./i18n.ts";
 
 export async function readRemoteMarker(plugin: VaultSyncPlugin): Promise<EncryptionMeta | null> {
@@ -27,7 +27,7 @@ export class EncryptionModal extends Modal {
 		try {
 			meta = await readRemoteMarker(this.plugin);
 		} catch (e) {
-			status.setText(tr("w.readFailed", { error: errMsg(e) }));
+			status.setText(tr("w.readFailed", { error: localizeError(e) }));
 			return;
 		}
 		status.remove();
@@ -57,7 +57,7 @@ export class EncryptionModal extends Modal {
 				this.close();
 				this.done?.();
 			} catch (e) {
-				msg.setText(errMsg(e));
+				msg.setText(localizeError(e));
 			}
 		};
 		new Setting(contentEl).addButton((b) => b.setButtonText(tr("e.unlock")).setCta().onClick(unlock));
@@ -104,7 +104,7 @@ export class EncryptionModal extends Modal {
 						this.close();
 						this.done?.();
 					} catch (e) {
-						msg.setText(errMsg(e));
+						msg.setText(localizeError(e));
 					}
 				}),
 		);

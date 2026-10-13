@@ -4,34 +4,12 @@ import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
 import { confirmPlan } from "./ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { t } from "./i18n.ts";
+import { friendlyError, localizeError, skippedLines } from "./errors.ts";
 
 export const HEALTH_VIEW = "vault-sync-health";
 
-export interface FriendlyError {
-	title: string;
-	hint: string;
-	action: "settings" | "retry" | "none" | "encryption";
-}
-
-/** Turns raw error messages into plain language with a suggested fix. */
-export function friendlyError(msg: string, host = "the repository host"): FriendlyError {
-	const m = msg.toLowerCase();
-	if (/no (github )?token/.test(m)) return { title: t("h.notConnected"), hint: t("h.notConnectedHint", { host }), action: "settings" };
-	if (m.includes("invalid or expired") || m.includes("401"))
-		return { title: t("h.badToken", { host }), hint: t("h.badTokenHint"), action: "settings" };
-	if (m.includes("not found or the token cannot access") || (m.includes("not found") && m.includes("repos")))
-		return { title: t("h.repoMissing"), hint: t("h.repoMissingHint"), action: "settings" };
-	if (m.includes("rate limit")) return { title: t("h.rateLimit", { host }), hint: t("h.rateLimitHint", { host }), action: "none" };
-	if (m.includes("outdated branch state") || m.includes("another device pushed"))
-		return { title: t("h.busy", { host }), hint: t("h.busyHint"), action: "retry" };
-	if (m.includes("network") || m.includes("failed to fetch") || m.includes("err_") || m.includes("offline") || m.includes("timed out"))
-		return { title: t("h.offline", { host }), hint: t("h.offlineHint"), action: "retry" };
-	if (m.includes("end-to-end encrypted")) return { title: t("h.encrypted"), hint: t("h.encryptedHint"), action: "encryption" };
-	if (m.includes("different passphrase")) return { title: t("h.otherKey"), hint: t("h.otherKeyHint"), action: "encryption" };
-	if (m.includes("pull-only")) return { title: t("h.pullOnly"), hint: t("h.pullOnlyHint"), action: "settings" };
-	if (m.includes("was not found in")) return { title: t("h.branchMissing"), hint: msg, action: "settings" };
-	return { title: t("h.failed"), hint: msg, action: "retry" };
-}
+export { friendlyError } from "./errors.ts";
+export type { FriendlyError } from "./errors.ts";
 
 function ago(ts: number): string {
 	if (!ts) return t("time.never");
@@ -105,7 +83,7 @@ export class HealthView extends ItemView {
 				versions,
 			};
 		} catch (e) {
-			this.remoteInfo = { ahead: null, budget: t("h.unknown"), devices: [], versions: new Map(), error: e instanceof Error ? e.message : String(e) };
+			this.remoteInfo = { ahead: null, budget: t("h.unknown"), devices: [], versions: new Map(), error: localizeError(e, p.hostLabel()) };
 		} finally {
 			this.loadingRemote = false;
 			this.render();
@@ -164,7 +142,7 @@ export class HealthView extends ItemView {
 			try {
 				await fn();
 			} catch (e) {
-				new Notice(e instanceof Error ? e.message : String(e), 8000);
+				new Notice(localizeError(e, this.plugin.hostLabel()), 8000);
 			} finally {
 				busy = false;
 				b.disabled = false;
@@ -223,11 +201,13 @@ export class HealthView extends ItemView {
 		}
 
 		if (p.lastError) {
-			const f = friendlyError(p.lastError, p.hostLabel());
+			const cause = p.lastErrorCause ?? p.lastError;
+			const f = friendlyError(cause, p.hostLabel());
 			const s = this.section(f.title, "alert-octagon");
 			s.addClass("vsg-h-error");
 			s.createDiv({ text: f.hint });
-			s.createDiv({ cls: "vsg-muted", text: `${ago(p.lastErrorAt)} · ${p.lastError}` });
+			const detail = localizeError(cause, p.hostLabel());
+			s.createDiv({ cls: "vsg-muted", text: detail === f.hint ? ago(p.lastErrorAt) : `${ago(p.lastErrorAt)} · ${detail}` });
 			if (f.action === "settings") this.button(s, t("health.openSettings"), () => p.openSettings(), true);
 			if (f.action === "retry") this.button(s, t("health.tryAgain"), () => p.sync("manual"), true);
 			if (f.action === "encryption") this.button(s, t("health.enterPassphrase"), () => p.openEncryption(() => void p.sync("manual")), true);
@@ -295,7 +275,7 @@ export class HealthView extends ItemView {
 		}
 
 		// ---- skipped ----
-		const skipped = p.lastReport?.skipped ?? [];
+		const skipped = p.lastReport ? skippedLines(p.lastReport.skipped, p.lastReport.skipNotes) : [];
 		if (skipped.length) {
 			const s = this.section(t("health.skipped", { n: skipped.length }), "eye-off");
 			const ul = s.createEl("ul", { cls: "vsg-list" });

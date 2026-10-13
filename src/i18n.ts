@@ -27,12 +27,20 @@ function language(): string {
 	}
 }
 
+function fill(s: string, vars: Record<string, string | number>): string {
+	return s.replace(/\{(\w+)\}/g, (_: string, k: string) => String(vars[k] ?? `{${k}}`));
+}
+
 /** Translate `key`, replacing {placeholders}. */
 export function t(key: Key, vars: Record<string, string | number> = {}): string {
 	const lang = language();
 	const cat = catalogs[lang] ?? catalogs[lang.split("-")[0]];
-	const s = cat?.[key] ?? en[key];
-	return s.replace(/\{(\w+)\}/g, (_: string, k: string) => String(vars[k] ?? `{${k}}`));
+	return fill(cat?.[key] ?? en[key], vars);
+}
+
+/** The English text of `key`, whatever the interface language (for logs and bug reports). */
+export function tEn(key: Key, vars: Record<string, string | number> = {}): string {
+	return fill(en[key], vars);
 }
 
 export const LANGUAGES = ["en", ...Object.keys(catalogs)];

@@ -29,6 +29,8 @@ import { asText, conflictCopyPath, encodeText, errMsg, gitBlobSha, isHiddenPath,
 import { parsePointer } from "./lfs.ts";
 import { configPatterns } from "./scope-config.ts";
 import { t } from "./i18n.ts";
+import { addSkip, localizeError, SyncError } from "./errors.ts";
+import type { ErrCode, ErrParams, SkipCode, SkipNote, SkipSink } from "./errors.ts";
 
 export interface SyncHost {
 	app: App;
@@ -59,6 +61,11 @@ export interface SyncHost {
 	conflictsAsPullRequest?(): boolean;
 	/** This plugin's version, written into commit trailers. */
 	pluginVersion?: string;
+	/**
+	 * True for a backup mirror: in push mode its copy simply follows this device, and edits made in the
+	 * mirror repository are never brought into the vault as conflict copies.
+	 */
+	backupMirror?: boolean;
 	/** Lines of the vault's .gitignore (read by the host before each sync). */
 	gitignorePatterns?(): string[];
 	/** Path/content transforms (encryption, folder mapping, LFS). Defaults to none. */
@@ -115,7 +122,10 @@ export interface SyncReport {
 	merged: string[];
 	renamed: string[];
 	conflictCopies: string[];
+	/** Skipped paths with the reason, in English (log form). */
 	skipped: string[];
+	/** The same entries, translatable (see skippedLines). */
+	skipNotes?: SkipNote[];
 	errors: string[];
 	commit: string | null;
 	/** Pull/merge requests opened for conflicts (shared folders set to "pull request"). */
@@ -127,12 +137,18 @@ export interface SyncReport {
 export interface Preview {
 	decisions: Decision[];
 	skipped: string[];
+	skipNotes?: SkipNote[];
 	localShas: Map<string, string>;
 	remoteShas: Map<string, string>;
 	base: Record<string, string>;
 }
 
-export class SyncCancelled extends Error {}
+/** The sync stopped on purpose (cancelled, or the plugin unloaded). Not shown as a failure. */
+export class SyncCancelled extends SyncError {
+	constructor(code: ErrCode = "cancelled", params: ErrParams = {}) {
+		super(code, params);
+	}
+}
 
 /**
  * A hidden path that may sync: it must start at the top of the vault (only those are listed from disk;
@@ -146,9 +162,9 @@ function hiddenSyncable(p: string, cfg: string, nested = false): boolean {
 	return !p.split("/").some((seg) => seg === ".git" || seg === ".trash" || seg === ".vault-sync" || seg === cfg || /^\.obsidian/i.test(seg));
 }
 class StaleRemote extends Error {}
-class EditedDuringSync extends Error {
+class EditedDuringSync extends SyncError {
 	constructor(path: string) {
-		super(`${path} was edited during sync`);
+		super("editedDuringSync", { path });
 	}
 }
 
@@ -276,7 +292,7 @@ export class SyncEngine {
 	private async verifiedBlob(sha: string, path: string): Promise<ArrayBuffer> {
 		const data = await this.gh.getBlob(sha, this.blobHints.get(sha));
 		if (/^[0-9a-f]{40}$/i.test(sha) && (await gitBlobSha(data)) !== sha.toLowerCase()) {
-			throw new Error(`${path} couldn't be downloaded completely from ${this.gh.label} (got ${data.byteLength} bytes). The server may limit the size of files it sends through its API.`);
+			throw new SyncError("incompleteDownload", { path, host: this.gh.label, bytes: data.byteLength });
 		}
 		return data;
 	}
@@ -326,10 +342,10 @@ export class SyncEngine {
 		this.loadCodec();
 		const ctx = await this.gather(false, {}, true, { mode });
 		for (const [from, to] of ctx.caseRenames) this.rekey(ctx, from, to);
-		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
+		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope, { pushKeepsRemote: !this.host.backupMirror });
 		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas, { cache: ctx.cacheNext, remote: ctx.remote });
-		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, ctx.skipped, () => {});
-		return { decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
+		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, ctx, () => {});
+		return { decisions, skipped: ctx.skipped, skipNotes: ctx.skipNotes, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
 	}
 
 	/** A local file now known under another name (case-only rename): move its baseline and local hash along. */
@@ -353,7 +369,7 @@ export class SyncEngine {
 	 * still exists: keep it in the repository instead of deleting it for every device. Only runs when
 	 * there are deletions to check; candidates are found by size first, then confirmed by content.
 	 */
-	private async keepMovedOutOfScope(decisions: Decision[], base: Record<string, string>, skipped: string[], keep: (path: string) => void): Promise<Decision[]> {
+	private async keepMovedOutOfScope(decisions: Decision[], base: Record<string, string>, skipped: SkipSink, keep: (path: string) => void): Promise<Decision[]> {
 		const cands = decisions.filter((d) => d.kind === "delete-remote" && !d.renamedTo && base[d.path]);
 		const ds = this.host.deviceScope?.();
 		const narrowed = !!ds && (ds.include.some((x) => x.trim() && !x.trim().startsWith("#")) || ds.exclude.length > 0);
@@ -386,7 +402,7 @@ export class SyncEngine {
 				if (!same) continue;
 				kept.add(d.path);
 				keep(d.path);
-				skipped.push(`${d.path} (moved to ${p}, outside this device's sync scope; kept in the repository)`);
+				addSkip(skipped, d.path, "movedOutOfScope", { to: p });
 				break;
 			}
 		}
@@ -455,6 +471,29 @@ export class SyncEngine {
 			return all.length ? Math.max(...all) : undefined;
 		};
 		return detectSimilarRenames(decisions, base, local, remote, {
+			// A few other notes in the same folder on this device (small text files only), to tell template
+			// lines from real content. Only read when a delete + add pair already looks similar.
+			siblings: async (path, exclude) => {
+				const slash = path.lastIndexOf("/");
+				const dir = slash < 0 ? "" : path.slice(0, slash + 1);
+				const dot = path.lastIndexOf(".");
+				const ext = dot > slash ? path.slice(dot).toLowerCase() : "";
+				const near = [...local.keys()]
+					.filter((p) => p.startsWith(dir) && !p.slice(dir.length).includes("/") && !exclude.has(p) && (p.lastIndexOf(".") > p.lastIndexOf("/") ? p.slice(p.lastIndexOf(".")).toLowerCase() : "") === ext)
+					.filter((p) => (known(p) ?? Infinity) <= 256 * 1024)
+					.sort()
+					.slice(-6);
+				const out: string[] = [];
+				for (const p of near) {
+					try {
+						const t = asText(p, await this.io.read(p));
+						if (t !== null) out.push(t);
+					} catch {
+						/* unreadable: just one sibling fewer */
+					}
+				}
+				return out;
+			},
 			text: async (side, path, sha) => {
 				const key = `${side}:${path}:${sha}`;
 				if (texts.has(key)) return texts.get(key)!;
@@ -627,7 +666,7 @@ export class SyncEngine {
 				await recordWrite(c.path, c.remoteSha, c.remote);
 				next[c.path] = c.remoteSha;
 			} catch (e) {
-				report.skipped.push(`${c.path} (conflict kept for the next sync: ${errMsg(e)})`);
+				addSkip(report, c.path, "conflictKept", { error: localizeError(e, this.gh.label) }, { error: errMsg(e) });
 			}
 		}
 		if (prUrl) {
@@ -653,7 +692,7 @@ export class SyncEngine {
 
 	/** Stop at a safe point when the plugin was unloaded, so a reloaded copy never syncs alongside this one. */
 	private checkAlive() {
-		if (this.host.isUnloaded?.()) throw new SyncCancelled("The plugin was unloaded; sync stopped. It continues next time.");
+		if (this.host.isUnloaded?.()) throw new SyncCancelled("unloaded");
 	}
 
 	private async runWithRetries(mode: SyncMode, opts: SyncOptions): Promise<SyncReport> {
@@ -702,13 +741,15 @@ export class SyncEngine {
 		const baseScope = this.buildScope();
 		const maxBytes = this.s.maxFileSizeMB * 1024 * 1024;
 		const skipped: string[] = [];
+		const skipNotes: SkipNote[] = [];
+		const sink: SkipSink = { skipped, skipNotes };
 		const skipPaths = new Set<string>();
-		const skip = (path: string, why: string) => {
-			skipped.push(`${path} (${why})`);
+		const skip = (path: string, why: SkipCode, params: ErrParams = {}) => {
+			addSkip(sink, path, why, params);
 			skipPaths.add(path);
 		};
 		const scope = (p: string) => baseScope(p) && !skipPaths.has(p);
-		for (const p of opts.defer ?? []) skip(p, "deferred in review");
+		for (const p of opts.defer ?? []) skip(p, "deferred");
 
 		// ---- local ----
 		// Vault file stats come from Obsidian's in-memory index, so listing is cheap; only files whose
@@ -732,9 +773,11 @@ export class SyncEngine {
 		if (walkConfig) {
 			if (this.s.syncConfigDir) files.push(...(await this.io.listConfig(baseScope)));
 			if (this.s.syncHidden || this.s.useGitignore) files.push(...(await this.io.listHidden(baseScope)));
-			// Inside normal folders: everything hidden (opt-in), or just .gitignore files.
-			if (this.s.syncHidden && this.s.syncHiddenNested) files.push(...(await this.io.listNestedHidden(baseScope)));
-			else if (this.s.useGitignore) files.push(...(await this.io.listNestedHidden(baseScope, new Set([".gitignore"]))));
+			// Inside normal folders: everything hidden (opt-in), or just .gitignore files. The folder walk
+			// behind it is shared with the .gitignore loader and only repeated when folders changed, on a
+			// full scan, or every 30 minutes.
+			if (this.s.syncHidden && this.s.syncHiddenNested) files.push(...(await this.io.listNestedHidden(baseScope, undefined, { full })));
+			else if (this.s.useGitignore) files.push(...(await this.io.listNestedHidden(baseScope, new Set([".gitignore"]), { full })));
 		}
 		const localShas = new Map<string, string>();
 		const cacheNext: SyncState["cache"] = {};
@@ -742,7 +785,7 @@ export class SyncEngine {
 		let hashed = 0;
 		for (const f of files) {
 			if (f.size > maxBytes) {
-				skip(f.path, `local file larger than ${this.s.maxFileSizeMB} MB`);
+				skip(f.path, "localTooLarge", { mb: this.s.maxFileSizeMB });
 				continue;
 			}
 			const c = cacheValid ? state.cache[f.path] : undefined;
@@ -761,7 +804,7 @@ export class SyncEngine {
 		if (walksDisk && !walkConfig) {
 			for (const [p, c] of Object.entries(state.cache)) {
 				if (!onDisk(p) || !baseScope(p) || localShas.has(p)) continue;
-				if (c.s > maxBytes) skip(p, `local file larger than ${this.s.maxFileSizeMB} MB`);
+				if (c.s > maxBytes) skip(p, "localTooLarge", { mb: this.s.maxFileSizeMB });
 				else {
 					cacheNext[p] = c;
 					localShas.set(p, c.h);
@@ -787,7 +830,7 @@ export class SyncEngine {
 		// A branch we synced before has vanished (deleted, renamed, or the token lost access). Never treat
 		// that as "the remote is empty": it would delete everything locally.
 		if (!head && (state.head || Object.keys(state.base).length)) {
-			throw new Error(`The branch "${this.s.branch}" was not found in ${this.s.owner}/${this.s.repo}. It may have been deleted or renamed, or the token lost access. Nothing was changed.`);
+			throw new SyncError("branchMissing", { branch: this.s.branch, repo: `${this.s.owner}/${this.s.repo}` });
 		}
 		if (!head && initIfEmpty) head = await this.initRemote();
 
@@ -826,7 +869,7 @@ export class SyncEngine {
 			!this.s.keepEmptyFolders || this.codec.transformsPaths || how.mode === "pull" || this.s.mode === "pull" ||
 			JSON.stringify(this.io.listEmptyFolders(scope).sort()) === JSON.stringify([...(state.baseFolders ?? [])].filter(scope).sort());
 		if (!how.noFastPath && head && head === state.head && unchangedLocal && foldersSame && !state.dirty && state.scopeSig === scopeSig) {
-			return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered, remoteOnly: state.remoteOnly ?? {}, scopeSig, unknownLocal, caseRenames: [] as [string, string][] };
+			return { scope, skipPaths, skipped, skipNotes, localShas, cacheNext, head, treeSha: null, remote: null, remoteShas: localShas, upToDate: true, base, eolSame, covered, remoteOnly: state.remoteOnly ?? {}, scopeSig, unknownLocal, caseRenames: [] as [string, string][] };
 		}
 
 		const remote = new Map<string, RemoteEntry>();
@@ -867,19 +910,19 @@ export class SyncEngine {
 				const e = { ...raw, path: vp };
 				if (!baseScope(e.path)) continue;
 				if (!safePath(e.path)) {
-					skipped.push(`${e.path} (unsafe path)`);
+					addSkip(sink, e.path, "unsafePath");
 					continue;
 				}
 				if (this.host.windows && portableNameProblem(e.path)) {
 					// Windows can't create this name; writing it would fail on every sync.
-					skip(e.path, "name not allowed on Windows; rename it on another device");
+					skip(e.path, "windowsName");
 					winSkipped.add(e.sha);
 					winSkippedSpots.add(spot(e.path));
 					winBad.push(e.path);
 					continue;
 				}
 				if ((e.size ?? 0) > maxBytes) {
-					skip(e.path, `remote file larger than ${this.s.maxFileSizeMB} MB`);
+					skip(e.path, "remoteTooLarge", { mb: this.s.maxFileSizeMB });
 					continue;
 				}
 				const lower = fold(e.path);
@@ -893,7 +936,7 @@ export class SyncEngine {
 				// last sync (then it was deleted or renamed here, and that must reach the repository).
 				const wasHere = !!state.base[e.path] && !state.remoteOnly?.[e.path];
 				if (deviceMax && (e.size ?? 0) > deviceMax && !localShas.has(e.path) && !pinned.has(e.path) && !wasHere) {
-					skip(e.path, "larger than this device's download limit; available on demand");
+					skip(e.path, "onDemand");
 					remoteOnly[e.path] = { sha: e.sha, size: e.size ?? 0 };
 					continue;
 				}
@@ -903,13 +946,13 @@ export class SyncEngine {
 					// The local file is gone from the repository and a new path differing only by letter case
 					// appeared: renamed by case on another device. Rename here too instead of deleting it.
 					if (how.mode === "push") {
-						skip(e.path, `renamed from ${other} by letter case elsewhere; applied on the next two-way sync`);
-						skip(other, `renamed to ${e.path} by letter case elsewhere; applied on the next two-way sync`);
+						skip(e.path, "caseRenamedFrom", { other });
+						skip(other, "caseRenamedTo", { other: e.path });
 						continue;
 					}
 					caseRenames.push([other, e.path]);
 				} else if (other && (seenLower.has(lower) || !state.base[e.path])) {
-					skip(e.path, other.normalize("NFC") === e.path.normalize("NFC") ? `same name as ${other} in another Unicode form` : `differs only by letter case from ${other}`);
+					skip(e.path, other.normalize("NFC") === e.path.normalize("NFC") ? "unicodeClash" : "caseClash", { other });
 					continue;
 				}
 				seenLower.set(lower, e.path);
@@ -932,9 +975,9 @@ export class SyncEngine {
 		if (winSkipped.size) {
 			for (const [p, sha] of Object.entries(base)) {
 				if (remoteShas.has(p) || skipPaths.has(p)) continue;
-				if (winSkipped.has(sha)) skip(p, "renamed elsewhere to a name Windows can't store; kept here");
+				if (winSkipped.has(sha)) skip(p, "winRenamed");
 				else if (newSpots.has(spot(p)) || (state.winKept?.[p] && winSkippedSpots.has(spot(p)))) {
-					skip(p, "may have been renamed elsewhere to a name Windows can't store; kept here");
+					skip(p, "winMaybeRenamed");
 					winKept[p] = spot(p);
 				}
 			}
@@ -949,12 +992,12 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames, foldersSha, win };
+		return { scope, skipPaths, skipped, skipNotes, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames, foldersSha, win };
 	}
 
 	private async initRemote(): Promise<string> {
 		const repo = await this.gh.getRepo();
-		if (!repo) throw new Error(`Repository ${this.s.owner}/${this.s.repo} not found or the token cannot access it.`);
+		if (!repo) throw new SyncError("repoNotFound", { repo: `${this.s.owner}/${this.s.repo}` });
 		const otherHead = repo.default_branch !== this.s.branch ? await this.gh.getRef(repo.default_branch) : null;
 		if (otherHead) {
 			await this.gh.createRef(`refs/heads/${this.s.branch}`, otherHead);
@@ -965,7 +1008,7 @@ export class SyncEngine {
 			this.host.log("Initialised empty repository.");
 		}
 		const head = await this.gh.getRef(this.s.branch);
-		if (!head) throw new Error("Could not initialise the repository branch.");
+		if (!head) throw new SyncError("initFailed");
 		return head;
 	}
 
@@ -994,6 +1037,7 @@ export class SyncEngine {
 		const ctx = await this.gather(mode !== "pull", opts, false, { mode });
 		this.checkAlive();
 		report.skipped = ctx.skipped;
+		report.skipNotes = ctx.skipNotes;
 		const cacheNext = ctx.cacheNext;
 		const maxBytes = this.s.maxFileSizeMB * 1024 * 1024;
 
@@ -1035,12 +1079,12 @@ export class SyncEngine {
 					ctx.remoteShas.delete(p);
 					remote.delete(p);
 				}
-				report.skipped.push(`${to} (renamed from ${from} by letter case elsewhere; not renamed here yet: ${errMsg(e)})`);
+				addSkip(report, to, "caseRenameFailed", { from, error: localizeError(e, this.gh.label) }, { from, error: errMsg(e) });
 				behind = true;
 			}
 		}
 
-		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
+		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope, { pushKeepsRemote: !this.host.backupMirror });
 		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas, { cache: cacheNext, remote });
 
 		// Paths skipped for size/case keep their old base so they are not seen as deleted later. The base
@@ -1052,7 +1096,7 @@ export class SyncEngine {
 			else delete next[p];
 		};
 		for (const p of ctx.skipPaths) if (ctx.base[p]) next[p] = ctx.base[p];
-		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, report.skipped, (p) => {
+		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, report, (p) => {
 			next[p] = ctx.base[p];
 			(state.keptMoved ??= {})[p] = ctx.base[p];
 		});
@@ -1074,7 +1118,7 @@ export class SyncEngine {
 		const limit = Math.max(this.s.deleteGuardMin, Math.ceil((baseCount * this.s.deleteGuardPercent) / 100));
 		if (this.s.deleteGuardEnabled && total > limit) {
 			const choice = await host.confirmDeletes(delLocal, delRemote);
-			if (choice === "cancel") throw new SyncCancelled("Sync cancelled by delete guard.");
+			if (choice === "cancel") throw new SyncCancelled("guardCancelled");
 			if (choice === "skip") {
 				report.guardKept = [...delLocal, ...delRemote];
 				for (const d of decisions) {
@@ -1115,7 +1159,7 @@ export class SyncEngine {
 		const fail = (path: string, e: unknown) => {
 			if (e instanceof EditedDuringSync) {
 				editedDuringSync = true;
-				report.skipped.push(`${path} (edited during sync, will sync next time)`);
+				addSkip(report, path, "editedDuringSync");
 				keepBase(path);
 				return;
 			}
@@ -1180,14 +1224,14 @@ export class SyncEngine {
 						const ptr = parsePointer(raw);
 						if (ptr && maxBytes > 0 && ptr.size > maxBytes) {
 							// Same as a too-large file in the listing: skipped, its baseline left as it was.
-							report.skipped.push(`${d.path} (remote file larger than ${this.s.maxFileSizeMB} MB)`);
+							addSkip(report, d.path, "remoteTooLarge", { mb: this.s.maxFileSizeMB });
 							ctx.skipPaths.add(d.path);
 							keepBase(d.path);
 							break;
 						}
 						const limit = this.downloadLimit(d.path);
 						if (ptr && limit && ptr.size > limit) {
-							report.skipped.push(`${d.path} (larger than this device's download limit; available on demand)`);
+							addSkip(report, d.path, "onDemand");
 							if (!(await this.io.stat(d.path))) ctx.remoteOnly[d.path] = { sha: d.sha, size: ptr.size };
 							keepBase(d.path);
 							break;
@@ -1209,6 +1253,9 @@ export class SyncEngine {
 						report.deletedLocal.push(d.path);
 						break;
 					case "upload":
+						// Push mode, changed on both sides: the repository's version is saved as a copy first.
+						// If that fails, nothing is uploaded either (the repository keeps its version for now).
+						if (d.keepRemote) await this.keepRemoteCopy(d.path, d.keepRemote, device, remote, report, queueUpload, recordWrite);
 						await queueUpload(d.path, undefined, d.sha);
 						if (d.renamedFrom) {
 							renames.push(`${d.renamedFrom} → ${d.path}`);
@@ -1307,6 +1354,43 @@ export class SyncEngine {
 		await host.saveState();
 		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
+	}
+
+	/**
+	 * Push mode, both sides changed `path`: saves the repository's version as a conflict copy next to it
+	 * (uploaded too, so every device sees both), before this device's version replaces it in the
+	 * repository. The local file itself is left alone. A version too large for this device stays in the
+	 * repository's history instead.
+	 */
+	private async keepRemoteCopy(
+		path: string,
+		sha: string,
+		device: string,
+		remote: Map<string, RemoteEntry>,
+		report: SyncReport,
+		queueUpload: (path: string, data?: ArrayBuffer, sha?: string) => Promise<void>,
+		recordWrite: (path: string, sha: string, data?: ArrayBuffer) => Promise<void>,
+	): Promise<void> {
+		const maxBytes = this.s.maxFileSizeMB * 1024 * 1024;
+		const limit = this.downloadLimit(path);
+		const listed = remote.get(path)?.size ?? 0;
+		const raw = limit && listed > limit ? null : await this.verifiedBlob(sha, path);
+		const ptr = raw ? parsePointer(raw) : null;
+		const size = ptr ? ptr.size : listed;
+		if (!raw || (maxBytes > 0 && size > maxBytes) || (limit && size > limit)) {
+			addSkip(report, path, "pushCopyTooLarge", { host: this.gh.label });
+			this.host.log(`Push only: ${path} changed in ${this.gh.label} too; its version is too large to copy here and stays in the repository's history.`);
+			return;
+		}
+		const data = await this.codec.decode(path, raw);
+		const copy = await this.freeCopyPath(path, this.gh.label);
+		await this.io.write(copy, data);
+		// Recorded like any scanned file (see renameMerge), so the copy never reads as deleted later.
+		const copySha = await this.codec.storedSha(copy, data);
+		await recordWrite(copy, copySha, data);
+		await queueUpload(copy, data, copySha);
+		report.conflictCopies.push(copy);
+		this.host.log(`Push only: ${path} changed here and in ${this.gh.label}; uploaded this device's version (${device}) and kept the ${this.gh.label} version as "${copy}".`);
 	}
 
 	/** One side renamed (and edited) a file that the other side edited: merge both under the new name. */
@@ -1570,7 +1654,7 @@ export class SyncEngine {
 	 */
 	async removeUnencryptedFiles(confirm: (files: string[]) => Promise<boolean>): Promise<string[]> {
 		this.loadCodec();
-		if (!this.codec.has("enc:")) throw new Error("Encryption is not enabled on this device.");
+		if (!this.codec.has("enc:")) throw new SyncError("encryptionOff");
 		const gh = this.gh;
 		const head = await gh.getRef(this.s.branch);
 		if (!head) return [];
@@ -1581,7 +1665,7 @@ export class SyncEngine {
 			if ((await this.codec.decodePath(e.path)) === null) foreign.push(e.path);
 		}
 		if (!foreign.length) return [];
-		if (!(await confirm(foreign))) throw new SyncCancelled("Cancelled.");
+		if (!(await confirm(foreign))) throw new SyncCancelled();
 		const device = this.host.deviceName();
 		await gh.commit({
 			author: this.author(),
@@ -1608,7 +1692,7 @@ export class SyncEngine {
 		const pinned = new Set(this.host.deviceScope?.().pinned ?? []);
 		this.loadCodec();
 		const head = await this.gh.getRef(this.s.branch);
-		if (!head) throw new Error("The branch in the repository is empty.");
+		if (!head) throw new SyncError("branchEmpty");
 		const remote = new Map<string, string>();
 		for (const [p, e] of await this.filesAt(head, shared)) remote.set(p, e.sha);
 
@@ -1624,7 +1708,7 @@ export class SyncEngine {
 			plan.bytes += f.size;
 		}
 		if (!plan.files.length) return plan;
-		if (!(await confirm(plan))) throw new SyncCancelled("Cancelled.");
+		if (!(await confirm(plan))) throw new SyncCancelled();
 		for (const p of plan.files) {
 			await this.io.remove(p);
 			delete state.cache[p];
@@ -1647,7 +1731,7 @@ export class SyncEngine {
 		// Always the real remote listing: the "nothing changed" shortcut would compare against local hashes.
 		const ctx = await this.gather(false, {}, true, { noFastPath: true });
 		const head = ctx.head;
-		if (!head) throw new Error("The branch in the repository is empty. Nothing to reset to.");
+		if (!head) throw new SyncError("resetEmpty");
 		for (const [from, to] of ctx.caseRenames) {
 			this.rekey(ctx, from, to);
 			if (ctx.cacheNext[from]) ctx.cacheNext[to] = ctx.cacheNext[from];
@@ -1663,7 +1747,7 @@ export class SyncEngine {
 			else if (!r && l) plan.remove.push(p);
 		}
 		if (!plan.overwrite.length && !plan.download.length && !plan.remove.length) return plan;
-		if (!(await confirm(plan))) throw new SyncCancelled("Reset cancelled.");
+		if (!(await confirm(plan))) throw new SyncCancelled("resetCancelled");
 
 		const cacheNext = ctx.cacheNext;
 		// Renamed by letter case only in the repository: take the new name first (content is handled below).
@@ -1719,7 +1803,7 @@ export class SyncEngine {
 	async overwriteRemote(confirm: (plan: OverwritePlan) => Promise<boolean>): Promise<OverwritePlan> {
 		const state = this.host.state;
 		this.loadCodec();
-		if (this.s.mode === "pull") throw new Error(t("ow.pullOnly"));
+		if (this.s.mode === "pull") throw new SyncError("overwritePullOnly");
 		// Not read-only: like a normal sync, this run must publish the encryption marker if it is the first
 		// encrypted push (checkEncryption sets markerToAdd).
 		this.markerToAdd = null;
@@ -1729,14 +1813,14 @@ export class SyncEngine {
 		for (const [p, l] of ctx.localShas) if (ctx.remoteShas.get(p) !== (ctx.cacheNext[p]?.h ?? l)) plan.upload.push(p);
 		for (const p of ctx.remoteShas.keys()) if (!ctx.localShas.has(p) && !state.keptMoved?.[p]) plan.remove.push(p);
 		if (!plan.upload.length && !plan.remove.length) return plan;
-		if (!(await confirm(plan))) throw new SyncCancelled("Cancelled.");
+		if (!(await confirm(plan))) throw new SyncCancelled();
 		const uploads: Upload[] = [];
 		for (const p of plan.upload) uploads.push({ path: p, sha: ctx.cacheNext[p]?.h ?? ctx.localShas.get(p)!, mode: remote.get(p)?.mode ?? "100644" });
 		const device = this.host.deviceName();
 		const head = ctx.head;
 		let newHead = head;
 		if (head && ctx.treeSha) newHead = (await this.push(head, ctx.treeSha, uploads, plan.remove, remote, device)).sha;
-		else throw new Error(t("ow.emptyBranch"));
+		else throw new SyncError("overwriteEmpty");
 		// The repository now equals this device: that is the new baseline.
 		const base: Record<string, string> = {};
 		const removed = new Set(plan.remove);
@@ -1760,11 +1844,11 @@ export class SyncEngine {
 	 */
 	async restoreTo(commit: string, folder: string, confirm: (plan: RestorePlan) => Promise<boolean>): Promise<RestorePlan> {
 		this.loadCodec();
-		if (this.s.mode === "pull") throw new Error("Restore needs to push to the repository, which pull-only mode does not allow.");
+		if (this.s.mode === "pull") throw new SyncError("restorePullOnly");
 		await this.run(this.s.mode);
 		const gh = this.gh;
 		const head = await gh.getRef(this.s.branch);
-		if (!head) throw new Error("The branch in the repository is empty.");
+		if (!head) throw new SyncError("branchEmpty");
 		// Restores act on GitHub for every device, so they use the shared scope, not this device's.
 		const scope = this.buildScope(false);
 		const prefix = folder.replace(/^\/+|\/+$/g, "");
@@ -1790,7 +1874,7 @@ export class SyncEngine {
 			deletes.push(c.raw);
 		}
 		if (!upserts.length && !deletes.length) return plan;
-		if (!(await confirm(plan))) throw new SyncCancelled("Restore cancelled.");
+		if (!(await confirm(plan))) throw new SyncCancelled("restoreCancelled");
 
 		const what = prefix ? `"${prefix}"` : "vault";
 		const message = `${this.host.deviceName()}: restore ${what} to ${commit.slice(0, 7)}\n\n${plan.changed.length} restored, ${plan.added.length} brought back, ${plan.removed.length} removed\n\n${this.trailer(this.host.deviceName())}`;
@@ -1798,7 +1882,7 @@ export class SyncEngine {
 		try {
 			newCommit = (await gh.commit({ author: this.author(), branch: this.s.branch, parent: head, parentTree: headTree, message, upserts, deletes })).sha;
 		} catch (e) {
-			if (e instanceof NotFastForward) throw new Error("Another device pushed during the restore. Nothing was changed; please try again.");
+			if (e instanceof NotFastForward) throw new SyncError("restoreRaced");
 			throw e;
 		}
 		this.host.log(`Restored ${what} to ${commit.slice(0, 7)} as commit ${newCommit.slice(0, 7)}.`);

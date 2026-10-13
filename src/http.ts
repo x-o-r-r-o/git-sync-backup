@@ -3,6 +3,7 @@
 
 import { requestUrl } from "obsidian";
 import { RemoteError } from "./remote.ts";
+import { codedRemoteError } from "./errors.ts";
 import { sleep } from "./util.ts";
 
 export interface HttpResponse {
@@ -78,17 +79,20 @@ export async function httpRequest(
 				await wait(ms);
 				continue;
 			}
-			throw new RemoteError(`${opts.hostLabel} rate limit hit. Try again in a minute.`, res.status);
+			throw codedRemoteError((m, st, i) => new RemoteError(m, st, i), "rateLimit", res.status, opts.hostLabel);
 		}
 		if (res.status >= 500 && attempt < 3) {
-			lastErr = new RemoteError(String(msg), res.status);
+			lastErr = new RemoteError(String(msg), res.status, { host: opts.hostLabel });
 			await wait(1000 * 2 ** attempt);
 			continue;
 		}
-		if (res.status === 401) throw new RemoteError(`${opts.hostLabel} token is invalid or expired.`, 401);
-		throw new RemoteError(`${typeof msg === "string" ? msg : JSON.stringify(msg)} (${req.method} ${req.url.replace(/\?.*$/, "")})`, res.status);
+		if (res.status === 401) throw codedRemoteError((m, st, i) => new RemoteError(m, st, i), "badToken", 401, opts.hostLabel);
+		throw new RemoteError(`${typeof msg === "string" ? msg : JSON.stringify(msg)} (${req.method} ${req.url.replace(/\?.*$/, "")})`, res.status, { host: opts.hostLabel });
 	}
-	throw lastErr instanceof Error ? lastErr : new RemoteError(`Network error talking to ${opts.hostLabel}`, 0);
+	if (lastErr instanceof RemoteError) throw lastErr;
+	// A transport failure (offline, DNS, TLS): keep its text for the log, but show it as a network error.
+	if (lastErr instanceof Error) throw new RemoteError(lastErr.message, 0, { host: opts.hostLabel });
+	throw codedRemoteError((m, st, i) => new RemoteError(m, st, i), "network", 0, opts.hostLabel);
 }
 
 export function b64encode(buf: ArrayBuffer): string {

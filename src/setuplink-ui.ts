@@ -8,7 +8,7 @@ import { HOSTS } from "./hosts.ts";
 import { DEFAULT_SETTINGS } from "./types.ts";
 import { buildSetupLink, decryptToken, encryptToken, newSetupCode } from "./setuplink.ts";
 import type { SetupPayload } from "./setuplink.ts";
-import { errMsg } from "./util.ts";
+import { localizeError } from "./errors.ts";
 import { t } from "./i18n.ts";
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -104,7 +104,7 @@ export class CreateSetupLinkModal extends Modal {
 			contentEl.createEl("p", { cls: "vsg-muted", text: t("link.signInNote", { host: p.hostLabel() }) });
 		}
 		const out = contentEl.createDiv({ cls: "vsg-link-out", text: this.includeToken ? t("link.encrypting") : "" });
-		this.build(out).catch((e) => out.setText(errMsg(e)));
+		this.build(out).catch((e) => out.setText(localizeError(e)));
 	}
 
 	private async build(out: HTMLElement) {
@@ -212,7 +212,7 @@ export class ApplySetupLinkModal extends Modal {
 							this.close();
 							await p.applySetupPayload(s, token);
 						} catch (e) {
-							new Notice(errMsg(e), 8000);
+							new Notice(localizeError(e), 8000);
 						}
 					}),
 			);

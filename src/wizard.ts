@@ -8,7 +8,7 @@ import type { HostKind } from "./hosts.ts";
 import { createEncryption, passphraseStrength } from "./crypto.ts";
 import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import type VaultSyncPlugin from "./main.ts";
-import { errMsg } from "./util.ts";
+import { localizeError } from "./errors.ts";
 import { t as tr } from "./i18n.ts";
 import { DeviceSignInModal } from "./ghapp-ui.ts";
 import { installUrl } from "./ghapp.ts";
@@ -128,7 +128,7 @@ export class SetupWizard extends Modal {
 				new Notice(tr("w.signedIn", { user: this.login }));
 				this.go("repo");
 			} catch (e) {
-				status.setText(tr("w.tokenFailed", { error: errMsg(e) }));
+				status.setText(tr("w.tokenFailed", { error: localizeError(e) }));
 			}
 		};
 
@@ -239,7 +239,7 @@ export class SetupWizard extends Modal {
 								await pick(this.login, newName, "main");
 							} catch (e) {
 								p.settings.owner = previousOwner;
-								new Notice(tr("w.createFailed", { error: errMsg(e) }), 10000);
+								new Notice(tr("w.createFailed", { error: localizeError(e) }), 10000);
 							}
 						}),
 				);
@@ -322,7 +322,7 @@ export class SetupWizard extends Modal {
 					watchNote?.setText(tr("app.newArrived"));
 				}
 			} catch (e) {
-				if (gen === this.generation && !repos.length) listEl.setText(tr("w.listFailed", { error: errMsg(e) }));
+				if (gen === this.generation && !repos.length) listEl.setText(tr("w.listFailed", { error: localizeError(e) }));
 			} finally {
 				loading = false;
 			}
@@ -342,7 +342,7 @@ export class SetupWizard extends Modal {
 			remoteCount = await p.gh.countFiles(p.settings.branch);
 		} catch (e) {
 			if (gen !== this.generation) return;
-			info.setText(tr("w.readFailed", { error: errMsg(e) }));
+			info.setText(tr("w.readFailed", { error: localizeError(e) }));
 			new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("repo")));
 			return;
 		}

@@ -101,14 +101,12 @@ Also in 1.4:
 
 Removed in 1.4: the Gitee and Azure DevOps hosts added in 1.3. They could not be verified against real servers; settings that use them pause sync with a notice until another host is chosen, and files are left untouched.
 
+## Status after 1.5.0 (2026-10-13)
+
+Shipped in 1.5 from the 1.4 list: translated sync errors (4), lighter `.gitignore` and hidden-file scanning (5), push-only mode keeps both (6), smarter rename detection for template notes (7), Bitbucket download checks (8), and the small polish items (9).
+
 ## Next
 
 1. **Real phones.** Test on iOS and Android through BRAT: first sync, attachments on demand, background sync, battery saver, sign-in, conflict buttons with touch.
 2. **Drop "beta"** for GitLab, Gitea / Forgejo and Bitbucket once real-world reports confirm the live-suite results.
-3. **Native-speaker review** of the seven translations.
-4. **Translated sync errors.** Engine and host error messages are English only; give them error codes so notices and the status panel can show them in the user's language.
-5. **Lighter `.gitignore` and hidden-file scanning.** Finding nested `.gitignore` files lists every folder every few minutes; track them with file events instead, for big vaults on phones.
-6. **Push-only mode keeps both.** When the repository changed a file that this device also changed, push mode keeps only this device's version (the other stays in history); offer a conflict copy instead.
-7. **Smarter rename detection** for notes from rich templates (today a deleted note and a new note sharing most template lines can still pair when they are at least 80% alike; nothing is lost, but the edit may land in the new note).
-8. **Bitbucket download checks.** Bitbucket's API has no content hashes, so a truncated download can't be detected the way it is on the other hosts.
-9. Small polish: steady conflict-dialog height when switching tabs, and clearer naming next to Obsidian Sync's own *Open version history* in the file menu.
+3. **Native-speaker review** of the seven translations (including the new error messages).

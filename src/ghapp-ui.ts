@@ -3,7 +3,7 @@
 
 import { App, Modal, Notice, Setting } from "obsidian";
 import type VaultSyncPlugin from "./main.ts";
-import { errMsg } from "./util.ts";
+import { localizeError } from "./errors.ts";
 import { t } from "./i18n.ts";
 
 export interface SignInCode {
@@ -30,7 +30,7 @@ function message(e: unknown, host: string): string {
 	if (code === "expired_token") return t("app.expired");
 	if (code === "access_denied") return t("app.denied", { host });
 	if (code === "device_flow_disabled") return t("app.disabled");
-	return t("app.failed", { error: errMsg(e) });
+	return t("app.failed", { error: localizeError(e) });
 }
 
 export class DeviceSignInModal extends Modal {

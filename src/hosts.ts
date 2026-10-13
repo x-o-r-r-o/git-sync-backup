@@ -2,6 +2,7 @@
 
 import { classicTokenUrl, fineGrainedTokenUrl, webBase } from "./auth.ts";
 import { t } from "./i18n.ts";
+import { SyncError } from "./errors.ts";
 import { GitHub } from "./github.ts";
 import { Gitea } from "./gitea.ts";
 import type { HostConfig } from "./gitea.ts";
@@ -85,7 +86,7 @@ export function makeRemote(kind: HostKind, cfg: () => HostConfig, cacheStore: Bl
 	if (kind === "gitea") return new Gitea(cfg);
 	if (kind === "github") return new GitHub(cfg);
 	// Never fall back to another host: settings from an older version may name a removed one (Gitee, Azure).
-	throw new Error(`Unsupported Git host: ${String(kind)}`);
+	throw new SyncError("unsupportedHost", { host: String(kind) });
 }
 
 export { webBase };

@@ -4,6 +4,7 @@
 import { b64decode, b64encode, compareByWalking, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import { NotFastForward } from "./remote.ts";
+import { SyncError } from "./errors.ts";
 import type { BlobHint, CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { gitBlobSha } from "./util.ts";
 
@@ -70,7 +71,7 @@ export class Gitea implements Remote {
 
 	async request(method: string, path: string, body?: unknown, opts: { accept?: string; okStatuses?: number[] } = {}): Promise<HttpResponse> {
 		const c = this.cfg();
-		if (!c.token) throw new Error("No token set. Add one in the plugin settings.");
+		if (!c.token) throw new SyncError("noToken", { host: this.label });
 		return httpRequest(
 			this.transport,
 			{
@@ -122,7 +123,7 @@ export class Gitea implements Remote {
 	async getCommitTree(sha: string): Promise<string> {
 		const c = await this.json<GtCommit>("GET", `${this.repoPath}/git/commits/${sha}?stat=false&files=false`);
 		const tree = c.commit?.tree?.sha ?? c.tree?.sha;
-		if (!tree) throw new Error(`Commit ${sha} has no tree`);
+		if (!tree) throw new SyncError("commitNoTree", { sha });
 		return tree;
 	}
 	async listTree(treeSha: string): Promise<TreeEntry[]> {
@@ -133,7 +134,7 @@ export class Gitea implements Remote {
 			if (!t.truncated || !(t.tree ?? []).length) return out;
 		}
 		// Stopping here would return a partial listing, and the missing files would look deleted.
-		throw new Error("Repository is too large to list (more than 999 pages of files).");
+		throw new SyncError("repoTooLarge", { host: this.label });
 	}
 	/**
 	 * Blob content. Above the server's blob size limit (DEFAULT_MAX_BLOB_SIZE, 10 MiB by default)
@@ -147,9 +148,9 @@ export class Gitea implements Remote {
 			const data = b64decode(b.content);
 			if (size === null || data.byteLength === size) return data;
 		}
-		if (!hint) throw new Error("Gitea: file too large for this server's API (over its blob size limit)");
+		if (!hint) throw new SyncError("blobTooLarge", { host: this.label });
 		const data = await this.getFileAt(hint.path, hint.ref);
-		if (!data || (await gitBlobSha(data)) !== sha) throw new Error("Gitea: file too large for this server's API (over its blob size limit), and the raw file did not match");
+		if (!data || (await gitBlobSha(data)) !== sha) throw new SyncError("blobTooLargeMismatch", { host: this.label });
 		return data;
 	}
 	async putFile(path: string, message: string, base64: string, branch: string): Promise<void> {
@@ -181,13 +182,13 @@ export class Gitea implements Remote {
 				const m = String((res.json as { message?: string } | null)?.message ?? "");
 				// sha mismatch = someone changed the file meanwhile; other 422s are real errors.
 				if (/sha|does not match|already exists|not exist/i.test(m)) throw new NotFastForward();
-				throw new Error(`Gitea refused the commit: ${m || "HTTP 422"}`);
+				throw new SyncError("commitRefused", { host: this.label, detail: m || "HTTP 422" });
 			}
 			const body = res.json as GtChangeFiles;
 			const c = body.commit ?? { sha: body.sha ?? "", parents: body.parents };
 			const parents = (c.parents ?? []).map((x) => x.sha);
 			if (parents.length && parents[0] !== parent) fastForward = false;
-			if (!c.sha) throw new Error("Gitea did not return the new commit");
+			if (!c.sha) throw new SyncError("commitNotCreated", { host: this.label });
 			parent = c.sha;
 		};
 

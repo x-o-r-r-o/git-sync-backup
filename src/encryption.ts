@@ -1,6 +1,7 @@
 // Device-side encryption state and the safety check run on every sync.
 
 import type { EncryptionMeta } from "./crypto.ts";
+import { SyncError } from "./errors.ts";
 
 /** What a device stores (in secret storage) once encryption is unlocked. */
 export interface EncryptionRecord {
@@ -11,15 +12,15 @@ export interface EncryptionRecord {
 	markerSha?: string;
 }
 
-export class EncryptionLocked extends Error {
+export class EncryptionLocked extends SyncError {
 	constructor() {
-		super("This repository is end-to-end encrypted. Enter the passphrase in Settings → Encryption to sync on this device.");
+		super("encLocked");
 	}
 }
 
-export class EncryptionMismatch extends Error {
+export class EncryptionMismatch extends SyncError {
 	constructor() {
-		super("This repository was encrypted with a different passphrase than the one unlocked on this device. Unlock it again in Settings → Encryption.");
+		super("encMismatch");
 	}
 }
 

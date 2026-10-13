@@ -5,6 +5,7 @@ import { arrayBufferToBase64, requestUrl } from "obsidian";
 import type { RequestUrlResponse } from "obsidian";
 import { webBase } from "./auth.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
+import { codedRemoteError } from "./errors.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { pool, sleep } from "./util.ts";
 
@@ -166,7 +167,7 @@ export class GitHub implements Remote {
 		opts: { accept?: string; okStatuses?: number[] } = {},
 	): Promise<RequestUrlResponse> {
 		let c = this.cfg();
-		if (!c.token) throw new GitHubError("No GitHub token set. Add one in the plugin settings.", 401);
+		if (!c.token) throw codedRemoteError((m, st, i) => new GitHubError(m, st, i), "noToken", 401, "GitHub");
 		const url = (c.apiBase || "https://api.github.com").replace(/\/+$/, "") + path;
 		let lastErr: unknown;
 		let reauthed = false;
@@ -223,7 +224,7 @@ export class GitHub implements Remote {
 					continue;
 				}
 				if (waitMs > 0) {
-					throw new GitHubError(`GitHub rate limit hit. Try again in ${Math.ceil(waitMs / 60000)} min.`, res.status);
+					throw codedRemoteError((m, st, i) => new GitHubError(m, st, i), "rateLimitMin", res.status, "GitHub", { min: Math.ceil(waitMs / 60000) });
 				}
 				// Secondary rate limits often come without Retry-After; GitHub asks clients to wait at
 				// least a minute. Do that once, then give up with a readable message.
@@ -233,11 +234,11 @@ export class GitHub implements Remote {
 						await this.delay(60_000);
 						continue;
 					}
-					throw new GitHubError("GitHub secondary rate limit hit. Try again in a minute.", res.status);
+					throw codedRemoteError((m, st, i) => new GitHubError(m, st, i), "secondaryRateLimit", res.status, "GitHub");
 				}
 			}
 			if (res.status >= 500 && attempt < 3) {
-				lastErr = new GitHubError(msg, res.status);
+				lastErr = new GitHubError(msg, res.status, { host: "GitHub" });
 				await this.delay(1000 * 2 ** attempt);
 				continue;
 			}
@@ -248,11 +249,13 @@ export class GitHub implements Remote {
 					attempt--;
 					continue;
 				}
-				throw new GitHubError("GitHub token is invalid or expired.", 401);
+				throw codedRemoteError((m, st, i) => new GitHubError(m, st, i), "badToken", 401, "GitHub");
 			}
-			throw new GitHubError(`${msg} (${method} ${path.split("?")[0]})`, res.status);
+			throw new GitHubError(`${msg} (${method} ${path.split("?")[0]})`, res.status, { host: "GitHub" });
 		}
-		throw lastErr instanceof Error ? lastErr : new GitHubError("Network error talking to GitHub", 0);
+		if (lastErr instanceof RemoteError) throw lastErr;
+		if (lastErr instanceof Error) throw new GitHubError(lastErr.message, 0, { host: "GitHub" });
+		throw codedRemoteError((m, st, i) => new GitHubError(m, st, i), "network", 0, "GitHub");
 	}
 
 	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -340,7 +343,7 @@ export class GitHub implements Remote {
 		// branch) is a real error the user must see, not something to retry.
 		const msg = String(safeJson(res)?.message ?? "");
 		if (/fast[- ]forward/i.test(msg) || res.status === 409) return false;
-		throw new GitHubError(`Could not update branch ${branch}: ${msg || `HTTP ${res.status}`}`, res.status);
+		throw new GitHubError(`Could not update branch ${branch}: ${msg || `HTTP ${res.status}`}`, res.status, { host: "GitHub" });
 	}
 
 	/**
