@@ -22,7 +22,7 @@ The directory re-scans every new release. If a release fails review, it is hidde
 1. Make the repository **public**. The directory doesn't accept closed-source or private plugins.
 2. Re-run the latest release (delete and re-push the tag) so it carries a provenance attestation for the "verified" badge.
 3. Go to community.obsidian.md, sign in with your Obsidian account, and connect GitHub.
-4. Choose **Plugins → New plugin**, enter `https://github.com/x-o-r-r-o/git-sync-backup`, pick the owner, accept the developer policies, and submit.
+4. Choose **Plugins → New plugin**, enter `https://github.com/x-o-r-r-o/vault-sync-git`, pick the owner, accept the developer policies, and submit.
 5. Review results appear on the dashboard within minutes. Listed plugins show up in Obsidian within about 24 hours.
 
 ## Checklist the plugin already meets

@@ -31,7 +31,7 @@ export const GITLAB_APP_REGISTRATION = `Register a GitLab OAuth application for 
 2. Select "Add new application".
 3. Name: Vault Sync for Git
 4. Redirect URI: the form requires one, but the device flow never uses it. Enter the plugin homepage,
-   e.g. https://github.com/x-o-r-r-o/git-sync-backup (any valid https URL works).
+   e.g. https://github.com/x-o-r-r-o/vault-sync-git (any valid https URL works).
 5. Confidential: UNCHECK it. The plugin runs on your devices and cannot keep a secret; it signs in with the
    Application ID only.
 6. Tick "Device authorization grant" (without it GitLab answers access_denied).
