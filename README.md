@@ -7,9 +7,11 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 | Host | Status | Notes |
 |---|---|---|
 | **GitHub** (github.com and GitHub Enterprise) | Stable | Every sync is one atomic commit with fast-forward-only updates. |
-| **GitLab** (gitlab.com and self-managed) | Beta | Atomic multi-file commits with per-file locking. |
-| **Gitea / Forgejo** (including **Codeberg** and self-hosted servers) | Beta | Atomic multi-file commits with per-file locking. Needs Gitea or Forgejo 1.20+. |
-| **Bitbucket Cloud** | Beta | Multi-file commits checked against the expected parent. The first sync downloads each file once to index it. |
+| **GitLab** (gitlab.com and self-managed) | Beta, live-tested | Atomic multi-file commits with per-file locking. |
+| **Gitea / Forgejo** (including **Codeberg** and self-hosted servers) | Beta, live-tested | Atomic multi-file commits with per-file locking. Needs Gitea or Forgejo 1.20+. |
+| **Bitbucket Cloud** | Beta, live-tested | Multi-file commits checked against the expected parent. The first sync downloads each file once to index it. |
+
+*Live-tested* means the full sync test suite passed against the real gitlab.com, codeberg.org and bitbucket.org for this release. Gitee and Azure DevOps were removed in 1.4.0.
 
 ## Highlights
 
@@ -42,7 +44,7 @@ On github.com you don't need a token:
 
 1. In the wizard (or Settings → Vault Sync for Git), select **Sign in**.
 2. Select **Copy and open GitHub**, paste the code on the page that opens, and approve.
-3. Select **Choose repositories** and give the *Vault Sync for Git* app access to your vault repository. It can only see the repositories you pick, and only their contents.
+3. Pick your vault repository from **Repositories the app can use**. If it isn't listed yet, select **Add repositories on GitHub**, choose it there and come back: the list updates by itself, and newly added repositories are marked **New**. The app can only see the repositories you pick, and only their contents.
 
 Access renews automatically. Signing in is per device and can be undone with **Sign out**. On GitHub Enterprise, an administrator can register their own GitHub App and enter its client ID in settings (see [docs/AUTH.md](docs/AUTH.md)).
 
@@ -64,7 +66,7 @@ For Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on GitHub or
    | Gitea / Forgejo / Codeberg | Settings → Applications: a token with **repository: Read and Write** and **user: Read** (**user: Read and Write** if you want the plugin to create the repository). |
    | Bitbucket | Repository access token with **Repositories: Read and Write**. To pick or create repositories in the wizard, use an Atlassian API token with Bitbucket scopes, entered as `email:token`. |
 
-3. In Obsidian, open Settings → Vault Sync for Git, choose the host, paste the token, set owner and repository, then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
+3. In Obsidian, open Settings → Vault Sync for Git, choose the host, paste the token, set owner and repository (or select **Choose** next to *Repository* to pick from your repositories), then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
 4. Run **Sync now** (ribbon icon, status bar or command palette).
 
 Repeat on each device with the same repository. An existing vault on a second device is safe: the first sync never deletes anything, and any file that differs is kept in both versions.
@@ -106,13 +108,13 @@ The token is stored only on the device, in Obsidian's secure storage. It is neve
 
 ### Merging and conflicts
 
-When a file changed on both sides, choose what happens: **merge automatically** (default, keeps both versions if the same lines changed), merge with `<<<<<<<` markers, keep both, **ask me each time**, this device wins, or the repository wins.
+When a file changed on both sides, choose what happens: **merge automatically** (default: changes to different lines are combined, and both versions are kept when the same lines changed), merge with `<<<<<<<` markers, keep both, **ask me each time**, this device wins, or the repository wins.
 
 - Markdown merges line by line. Frontmatter merges key by key, and lists such as `tags` and `aliases` merge as sets: adding tag A on your phone and tag B on your laptop gives you both.
 - `.canvas` and JSON files merge card by card and setting by setting.
-- **Conflict markers in the editor:** when a note contains `<<<<<<<` / `=======` / `>>>>>>>` blocks (from *merge with markers*, or anywhere else), each block gets **Keep this device**, **Keep repository** and **Keep both** buttons right in the note.
+- **Conflict markers in the editor:** when a note contains `<<<<<<<` / `=======` / `>>>>>>>` blocks (from *merge with markers*, or anywhere else), each block gets **Keep this device**, **Keep repository** and **Keep both** buttons right in the note. The two sides are tinted and the marker lines show as small labels. If a side itself contains a marker-like line, the plugin keeps both versions as files instead of writing markers.
 - With **Ask me each time**, a side-by-side dialog lets you keep this device's version, the repository's version, or both, for each changed block.
-- A conflict copy can be **resolved** later from the status panel: pick change by change, the result goes into the note, and the copy goes to the trash.
+- A conflict copy can be **resolved** later from the status panel: pick change by change (images and other binary files: pick a whole version), the result goes into the note, and the copy goes to the trash. Conflict copies are listed even before sync is set up.
 - Two conflicts on the same note never overwrite each other's copies.
 
 ### Backups and history
@@ -192,10 +194,10 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 
 ### Control and convenience
 
-- **Pause automatic sync** (command, status panel, or Settings → *This device only*): for an hour or until you resume. Manual sync keeps working.
-- **Battery saver** (this device): no timer and no sync after each edit; syncs on startup, when you come back to Obsidian, and manually.
+- **Pause automatic sync** (command, status panel, or Settings → *This device only*): for an hour or until you resume; the settings show until when. Manual sync keeps working.
+- **Battery saver** (this device): no timer, no sync after each edit, when opening a note or when leaving the app; syncs on startup, when you come back to Obsidian, and manually.
 - **Changes on the host**: a dot on the ribbon icon and status bar when another device pushed and this device hasn't synced yet (checked every 5 minutes while Obsidian is open).
-- **Branch picker** (Settings → Branch → *Choose*): switch branches or create one, for example a drafts branch. Switching starts a fresh comparison; nothing is deleted.
+- **Repository and branch pickers** (Settings → *Repository* / *Branch* → *Choose*): pick from the repositories your token or the signed-in app can use, and switch branches or create one, for example a drafts branch. Switching starts a fresh comparison; nothing is deleted.
 - **Open or copy a note's link on the host**: file menu or commands; links point at the last synced commit. History pages too.
 - **Make the repository match this device**: one forward commit that uploads this device's versions and deletes what isn't here (it stays in history). The opposite of *Make this device match the repository*.
 - **Keep empty folders** across devices (off with encryption).
@@ -270,29 +272,31 @@ This section covers the disclosures Obsidian's developer policies require.
   - Encrypted files still reveal approximate file sizes and path lengths, and whether two files are identical.
   - Content isn't bound to its path, so someone with write access to the repository could swap or roll back encrypted files. They still can't read or forge content.
   - Shared folders are never encrypted, because collaborators must read them.
-- **Deleting files.** Local deletions follow Obsidian's *Deleted files* setting (system trash, `.trash` folder, or permanent). Keep a trash option on if you want local deletions recoverable; everything also stays in the repository's history.
+- **Deleting files.** Deletions that arrive from another device follow Obsidian's *Deleted files* setting (system trash, `.trash` folder, or permanent); they also stay in the repository's history. Local content that was never uploaded and gets replaced (for example "the repository wins", or *Make this device match the repository*) always goes to the system trash or `.trash`, even with permanent deletion on.
 - **Data-safety guarantees.**
   - A file you are editing while a sync runs is never overwritten; it waits for the next sync.
-  - A missing or renamed branch never reads as "everything was deleted".
+  - A missing or renamed branch never reads as "everything was deleted", and a force-pushed (rewritten) history never makes files look deleted.
+  - A deleted note and a new note made from the same template are not mistaken for a rename.
   - Sync state copied in from another device (for example by iCloud) is ignored.
 
 ## Host notes
 
 - **GitHub:** stable. Every sync is one atomic commit with fast-forward-only updates.
-- **GitLab:** beta. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's file listing has no sizes, so the plugin looks each new file's size up once and remembers it on the device.
-- **Gitea / Forgejo (1.20+), Codeberg:** beta. Atomic multi-file commits with per-file locking. Very large uploads are split into several commits. The server's API refuses files above its blob limit (10 MB by default); such files are reported instead of synced, so use Git LFS for them.
-- **Bitbucket Cloud:** beta. Commits carry the expected parent, so a concurrent push is detected. Bitbucket's API has no file hashes, so the plugin keeps a hash index of the repository on each device (in its plugin folder, never synced); after the first sync only changed files are fetched.
+- **GitLab:** beta, live-tested on gitlab.com. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's file listing has no sizes, so the plugin looks each new file's size up once and remembers it on the device.
+- **Gitea / Forgejo (1.20+), Codeberg:** beta, live-tested on Codeberg. Atomic multi-file commits with per-file locking. Very large uploads are split into several commits. Files above the server's blob API limit (10 MB by default) are downloaded through its file API instead; Git LFS is still the better home for big media. Creating a repository from the plugin needs a token with **user: Read and Write**.
+- **Bitbucket Cloud:** beta, live-tested. Commits carry the expected parent, so a concurrent push is detected. Bitbucket's API has no file hashes, so the plugin keeps a hash index of the repository on each device (in its plugin folder, never synced); after the first sync only changed files are fetched.
 - Snapshots are tags on every host. The API budget is shown for GitHub only.
+- **Removed in 1.4.0:** Gitee and Azure DevOps. A vault set up with either pauses sync with a notice (nothing is uploaded elsewhere and no files change) until you choose another host.
 
 ## Limits
 
-- GitHub rejects files over 100 MB (the default limit here is 50 MB). Use Git LFS or exclude patterns for large media.
+- The maximum file size defaults to 50 MB. On GitHub without large file storage it can go up to 100 MB (GitHub's own limit); with large file storage, and on the other hosts, up to 2000 MB. Use Git LFS or exclude patterns for large media.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
 - Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. Hidden files inside normal folders are only synced with *Hidden files inside folders* on.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
 - Sign in works on github.com and gitlab.com, and on GitHub Enterprise or self-managed GitLab with your own app. The other hosts use access tokens.
 - GitHub-friendly Markdown doesn't rewrite links relative to the note's folder, and doesn't convert callouts nested inside other quotes.
-- GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0. Hosts other than GitHub are still marked beta until they have more real-world use. Reports from real servers and phones are welcome.
+- GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0, but stay marked beta until they have more real-world use. Phones haven't been tested on real devices yet. Reports from real servers and phones are welcome.
 - Conflicts as pull requests are available for shared folders. Empty folders aren't kept while end-to-end encryption is on.
 - On Windows, a note renamed elsewhere to a name Windows can't store (such as `a:b.md`) is kept under its old name here, and the status panel lists the name to fix.
 
@@ -303,6 +307,7 @@ npm ci
 npm run dev      # watch build
 npm test         # unit tests and multi-device simulation against fake GitHub, GitLab, Gitea, Bitbucket and LFS servers
 VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live   # real GitHub API, including encrypted sync
+VSG_LIVE_KIND=gitlab VSG_LIVE_TOKEN=… VSG_LIVE_REPO=me/throwaway npm run test:hosts      # any host, on a throwaway branch
 npm run build    # type-check and production bundle
 npm run lint     # Obsidian's official review rules (eslint-plugin-obsidianmd)
 ```
@@ -313,7 +318,7 @@ Main source files:
 |---|---|
 | `src/sync.ts`, `src/plan.ts` | Sync engine and three-way decisions |
 | `src/merge.ts`, `src/smartmerge.ts` | Line merge (diff3) and structure-aware merge for JSON, canvas and frontmatter |
-| `src/remote.ts`, `src/hosts.ts` | Host interface and registry |
+| `src/remote.ts`, `src/hosts.ts`, `src/removed-hosts.ts` | Host interface, registry, and the pause for removed hosts |
 | `src/github.ts`, `src/gitlab.ts`, `src/gitea.ts`, `src/bitbucket.ts` | Host clients on Obsidian's `requestUrl` |
 | `src/ghapp.ts`, `src/gitlabapp.ts`, `src/ghapp-ui.ts` | Sign in with GitHub / GitLab (device flow) |
 | `src/codec.ts`, `src/crypto.ts`, `src/lfs.ts`, `src/ghformat.ts` | Shared-folder mapping, encryption, Git LFS and GitHub-friendly Markdown layers |
