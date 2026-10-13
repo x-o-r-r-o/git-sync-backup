@@ -96,13 +96,13 @@ The token is stored only on the device, in Obsidian's secure storage. It is neve
 ### Syncing
 
 - **Triggers:** on startup, after edits (debounced), on a timer, when the app returns to the foreground or goes to the background, and manually.
-- **Modes:** two-way sync, backup only (upload, never changes local files) or pull only (read-only copy).
+- **Modes:** two-way sync, backup only (upload; never changes your files, and when the repository also changed a file its version is saved next to yours as a conflict copy) or pull only (read-only copy).
 - **Scope:** gitignore-style exclude patterns (`*`, `**`, `?`, `/` to anchor, `!` to re-include; the last matching pattern wins; brackets are literal) and a maximum file size. Files outside scope are never touched on either side.
 - **Settings folder, part by part:** turn on settings-folder sync, then choose appearance and themes, CSS snippets, hotkeys, core settings, which plugins are on, plugin code and plugin settings separately. **Choose per plugin** sets single plugins to code and settings, code only, settings only, or this device only, which is useful for plugins that store device-specific paths. Your exclude patterns still have the last word.
 - **Hidden files** (optional): files and folders at the top of the vault whose names start with a dot, such as `.github/` or `.editorconfig`. Turn on **Hidden files inside folders** to also include ones inside your notes folders (for example `Notes/.assets/`). Never `.git`, `.trash` or the settings folder.
 - **`.gitignore`** (optional): files listed in the vault's `.gitignore` files are not synced (a `.gitignore` inside a folder applies to that folder, as in Git), and the `.gitignore` files themselves sync to every device.
 - **Sync current file now** (command) syncs only the open note; everything else waits for the next sync. **Sync when opening a note** (optional) fetches its latest version first, at most every 30 seconds.
-- **Renames and moves** are detected, also when the file was edited at the same time. Nothing is downloaded again, open tabs and bookmarks follow the file, and moving a whole folder doesn't trip the delete guard.
+- **Renames and moves** are detected, also when the file was edited at the same time. Nothing is downloaded again, open tabs and bookmarks follow the file, and moving a whole folder doesn't trip the delete guard. Lines a note shares with its neighbours (a template) don't count, so a deleted note and a new note from the same template aren't mistaken for a rename.
 - **Line endings:** a change that is only CRLF ↔ LF is ignored (on by default).
 - **Fast on phones:** only files whose timestamps changed, or that Obsidian reports as edited, are re-checked, with a periodic full rescan as a safety net. Hashing yields to the interface so Obsidian never freezes.
 
@@ -137,7 +137,7 @@ When a file changed on both sides, choose what happens: **merge automatically** 
   - files skipped in the last sync and why, and files kept in the repository only
   - when each device last synced, the API budget (GitHub) and the next scheduled sync
 - **File explorer:** a dot on files edited since the last sync, and a warning on conflict copies (can be turned off).
-- **Notifications:** by default a short notice when a sync changed files on phones (which have no status bar), and only errors on desktop.
+- **Notifications:** by default a short notice when a sync changed files on phones (which have no status bar), and only errors on desktop. Errors are shown in your language with a hint for the likely cause (sign-in expired, repository not found, rate limit, server or network trouble).
 - **Sync log**, status bar (desktop) and a spinning ribbon icon while syncing.
 
 ### End-to-end encryption
@@ -182,7 +182,7 @@ Settings → *Large file storage threshold*. Files at least this big go to the h
 
 ### Languages and settings search
 
-The interface follows Obsidian's language. Every screen is available in English, Simplified Chinese, German, Spanish, French, Japanese, Korean and Portuguese (Brazil). Corrections are welcome, and adding a language is one file: see [docs/TRANSLATING.md](docs/TRANSLATING.md). On Obsidian 1.13+ the plugin's settings appear in Obsidian's settings search.
+The interface follows Obsidian's language. Every screen and error message is available in English, Simplified Chinese, German, Spanish, French, Japanese, Korean and Portuguese (Brazil). Corrections are welcome, and adding a language is one file: see [docs/TRANSLATING.md](docs/TRANSLATING.md). On Obsidian 1.13+ the plugin's settings appear in Obsidian's settings search. The sync log and *Copy diagnostics* stay in English so bug reports are readable.
 
 ### Backup mirror
 
@@ -284,7 +284,7 @@ This section covers the disclosures Obsidian's developer policies require.
 - **GitHub:** stable. Every sync is one atomic commit with fast-forward-only updates.
 - **GitLab:** beta, live-tested on gitlab.com. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's file listing has no sizes, so the plugin looks each new file's size up once and remembers it on the device.
 - **Gitea / Forgejo (1.20+), Codeberg:** beta, live-tested on Codeberg. Atomic multi-file commits with per-file locking. Very large uploads are split into several commits. Files above the server's blob API limit (10 MB by default) are downloaded through its file API instead; Git LFS is still the better home for big media. Creating a repository from the plugin needs a token with **user: Read and Write**.
-- **Bitbucket Cloud:** beta, live-tested. Commits carry the expected parent, so a concurrent push is detected. Bitbucket's API has no file hashes, so the plugin keeps a hash index of the repository on each device (in its plugin folder, never synced); after the first sync only changed files are fetched.
+- **Bitbucket Cloud:** beta, live-tested. Commits carry the expected parent, so a concurrent push is detected. Bitbucket's API has no file hashes, so the plugin keeps a hash index of the repository on each device (in its plugin folder, never synced); after the first sync only changed files are fetched. Each download is checked against the size in the listing, so a cut-off download is retried instead of saved.
 - Snapshots are tags on every host. The API budget is shown for GitHub only.
 - **Removed in 1.4.0:** Gitee and Azure DevOps. A vault set up with either pauses sync with a notice (nothing is uploaded elsewhere and no files change) until you choose another host.
 
