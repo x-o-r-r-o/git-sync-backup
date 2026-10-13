@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.1 (2026-10-13)
 
 **Fixed**
 - **Sync could turn itself off on every device.** With settings-folder sync on, a list of enabled plugins without Vault Sync (from a device where it was switched off, or a list read while the plugin was starting) spread to all devices, so sync stopped everywhere after the next restart. A sync now never removes this plugin from the enabled list on a device where it runs, repairs a stale list before syncing, and uploads the repaired list so the repository heals itself.
