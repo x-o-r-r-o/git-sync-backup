@@ -139,6 +139,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 	 * result opens a page), so counts in descriptions go stale. Rebuild them while the tab is closed;
 	 * an open tab is left alone so nothing jumps while someone types in it.
 	 */
+	/** Rebuilds the tab after a change made elsewhere (sign-in, the setup wizard), whether or not it is on screen. */
+	redraw() {
+		if (this.containerEl.isShown()) this.refresh();
+		else this.refreshIfHidden();
+	}
+
 	refreshIfHidden() {
 		if (this.containerEl.isShown()) return;
 		if (requireApiVersion("1.13.0")) this.update();

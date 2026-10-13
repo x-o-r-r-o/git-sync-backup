@@ -135,6 +135,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private touchedDuringSync = new Set<string>();
 	private writtenBySync = new Map<string, number>();
 	private settingTab: VaultSyncSettingTab | null = null;
+	/** Redraws the plugin's settings page (after the setup wizard or a sign-in changed something). */
+	redrawSettings() {
+		this.settingTab?.redraw();
+	}
 	// Last status set (before the paused overlay), so the status bar can be redrawn on its own.
 	private baseStatus: Status = "idle";
 	private baseDetail = "";
@@ -698,7 +702,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					const web = this.gitlabWeb();
 					const clientId = this.gitlabApp()!.clientId;
 					const tokens = await pollGitLabDeviceFlow(web, clientId, code!, { isCancelled });
-					if (!isCancelled()) this.signedInWithGitLab(tokens, web, clientId);
+					if (isCancelled()) return;
+					this.signedInWithGitLab(tokens, web, clientId);
+					this.settingTab?.redraw();
 				},
 			};
 		}
@@ -710,7 +716,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			start: async () => (code = await startDeviceFlow(this.githubWeb(), this.githubApp()!.clientId)),
 			finish: async (isCancelled) => {
 				const tokens = await pollDeviceFlow(this.githubWeb(), this.githubApp()!.clientId, code!, { isCancelled });
-				if (!isCancelled()) this.signedInWithApp(tokens);
+				if (isCancelled()) return;
+				this.signedInWithApp(tokens);
+				// Signing in from the setup wizard: the settings page behind it shows "Signed in" too.
+				this.settingTab?.redraw();
 			},
 		};
 	}

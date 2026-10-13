@@ -39,6 +39,8 @@ export class SetupWizard extends Modal {
 		this.stopRepoWatch();
 		this.contentEl.empty();
 		this.plugin.onProgress = null;
+		// The wizard may have signed in, picked a repository or changed sync choices.
+		this.plugin.redrawSettings();
 	}
 
 	private go(step: Step) {
