@@ -10,9 +10,9 @@
 | `.git` folder in vault | yes | yes (full object store on phone) | yes | no |
 | Auth | token in remote URL (leaks into repo if not ignored) | device-flow OAuth, `repo` scope (all repos) | git credentials | PAT |
 | Auto sync | on startup only | debounce on save, on open, on close | interval | interval / manual |
-| Conflicts | opens unmerged files | Keep mine / Keep theirs / edit | git markers | keep both / overwrite |
+| Conflicts | opens unmerged files | Keep mine / Keep theirs / edit | git markers; since 2.41 also keep ours / theirs / both buttons in the editor, and a Conflicts section (sync stops until resolved) | keep both / overwrite |
 | Branches | main only | default | yes | one |
-| History / restore | no | no | yes (desktop) | no |
+| History / restore | no | no | yes: history view, diff view, file at commit, line authoring (blame, desktop) | no |
 
 ## Gaps found (and what this plugin does about each)
 
@@ -67,3 +67,17 @@ Regression tests were added for unsafe paths, chunked 1,200-file uploads, and no
   - Fix 2: a stale-head guard. The compare API detects a head older than the last synced one and retries instead of acting; a rewritten history means a fresh baseline with no deletions.
   - Regression tests added (30 unit and e2e tests total).
 - Note: hidden or background windows have their timers throttled by Chromium, so auto-sync after edits can run up to about 1 min late while Obsidian is in the background.
+
+## Obsidian Git in depth (2026-10-13, version 2.41.1)
+
+Full comparison of settings, commands and views; sources: its `src/constants.ts`, `src/setting/settings.ts`, `src/commands.ts`, README, docs and issues sorted by reactions.
+
+**What it has that we lack, and fits our API-based design:** editor change signs with hunk revert (theirs is desktop-only), a vault-wide history browser (commit → files → diff), per-file "discard my changes", richer commit-message templates (date format, `{{files}}`, manual vs automatic), "sync and close", "add file to .gitignore" and greyed-out ignored files, status-bar branch and countdown, a vault in a subfolder of the repository (`basePath`), and line authoring (blame).
+
+**What doesn't fit (needs a git working copy):** staging, amend, squash, rebase, merge strategies, remotes, submodules, raw git commands, custom git binary, SSH, and plain git servers without a supported API.
+
+**Where we are ahead:** no git engine on the phone (its README calls mobile "highly unstable": crashes and out-of-memory on clone and pull, no SSH, no LFS on mobile), automatic line and structure-aware merging that never stops the sync, one atomic commit per sync with retries, end-to-end encryption including file names, token-free sign-in, per-device scope and attachments on demand, settings-folder sync per plugin, shared folders with pull-request conflicts, backup mirror, timeline restore and recover deleted, setup link / QR and wizard, eight languages (it is English only).
+
+**Its top user pain points we already solve:** mobile freezes and crashes (#572, #654, #694, #57, #69), conflicts and data loss on mobile (#340, #803, #558), multiple repositories (#773, #703), LFS on mobile (#608), translations (#1071), force pull (#702), SSH and credential trouble (#42, #742, #959).
+
+**Requests of theirs we could answer next:** sync on close (#13, its most-requested issue, closed as not planned), ignored files shown in the explorer (#611), next-sync countdown (#1185), all diffs on one page (#852), per-folder sync frequency (#185), exclusion by frontmatter (#404), sync events for other plugins (discussion #1180).
