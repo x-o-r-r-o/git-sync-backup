@@ -12,6 +12,7 @@ import { localizeError } from "./errors.ts";
 import { t as tr } from "./i18n.ts";
 import { DeviceSignInModal } from "./ghapp-ui.ts";
 import { installUrl } from "./ghapp.ts";
+import { normalizeSubdir } from "./codec.ts";
 
 type Step = "connect" | "repo" | "vault" | "syncing" | "done";
 type FirstSync = "upload" | "download" | "merge" | "prefer-local";
@@ -210,15 +211,23 @@ export class SetupWizard extends Modal {
 			if (gen !== this.generation) return;
 		}
 		this.header(2, tr("w.repoTitle"), tr("w.repoSub", { user: this.login }));
+		// Optional: keep the vault in a folder of the repository (monorepos, several vaults in one repository).
+		let subdir = p.settings.repoSubdir ?? "";
 		const pick = async (owner: string, name: string, branch: string) => {
 			this.stopRepoWatch();
 			p.settings.owner = owner;
 			p.settings.repo = name;
 			p.settings.branch = branch || "main";
+			p.settings.repoSubdir = normalizeSubdir(subdir);
 			await p.saveSettings();
 			this.go("vault");
 		};
 		const signedInApp = p.usingGitHubApp();
+
+		new Setting(this.contentEl)
+			.setName(tr("w.subdir"))
+			.setDesc(tr("w.subdirDesc"))
+			.addText((t) => t.setPlaceholder("Vaults/personal").setValue(subdir).onChange((v) => (subdir = v)));
 
 		let newName = this.app.vault.getName().replace(/[^A-Za-z0-9._-]+/g, "-");
 		if (!signedInApp)

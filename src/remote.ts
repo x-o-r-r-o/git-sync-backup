@@ -24,6 +24,12 @@ export interface CommitInfo {
 	author: string;
 }
 
+export interface CommitFile {
+	filename: string;
+	status: string;
+	previous?: string;
+}
+
 /** A file to write in a commit. `sha` reuses an existing blob; otherwise `load` provides the bytes. */
 export interface Upsert {
 	path: string;
@@ -97,8 +103,10 @@ export interface Remote {
 	commit(req: CommitRequest): Promise<CommitResult>;
 	compare(base: string, head: string): Promise<Relation>;
 
-	listCommits(branch: string, path?: string, perPage?: number): Promise<CommitInfo[]>;
-	getCommitFiles(sha: string): Promise<{ parent: string | null; files: { filename: string; status: string }[] }>;
+	/** Newest first; `page` (1-based) pages through older commits, `perPage` at a time. */
+	listCommits(branch: string, path?: string, perPage?: number, page?: number): Promise<CommitInfo[]>;
+	/** Changed files of a commit vs its first parent; `previous` is the old path of a rename, when the host reports it. */
+	getCommitFiles(sha: string): Promise<{ parent: string | null; files: CommitFile[] }>;
 	getFileAt(path: string, ref: string): Promise<ArrayBuffer | null>;
 	listTags(): Promise<{ name: string; sha: string }[]>;
 	rateLimit(): Promise<{ limit: number; remaining: number; reset: number } | null>;

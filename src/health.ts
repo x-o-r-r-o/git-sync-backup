@@ -1,6 +1,6 @@
 // Sync health panel: what's going on, what's pending, what needs attention, and how to fix it.
 
-import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { confirmPlan } from "./ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { t } from "./i18n.ts";
@@ -25,6 +25,7 @@ export class HealthView extends ItemView {
 	private remoteInfo: { ahead: boolean | null; budget: string; devices: [string, number][]; versions: Map<string, string>; error?: string } | null = null;
 	private loadingRemote = false;
 	private remoteAgain = false;
+	private pendingOpen = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultSyncPlugin) {
 		super(leaf);
@@ -121,6 +122,29 @@ export class HealthView extends ItemView {
 			}
 		}
 
+	}
+
+	/** Edited files, collapsed by default: compare each with the repository or take the repository's version. */
+	private renderPendingFiles(parent: HTMLElement) {
+		const p = this.plugin;
+		const paths = [...p.pendingLocalPaths()].sort((a, b) => a.localeCompare(b));
+		const box = parent.createEl("details", { cls: "vsg-h-pending" });
+		if (this.pendingOpen) box.open = true;
+		box.addEventListener("toggle", () => (this.pendingOpen = box.open));
+		box.createEl("summary", { text: t("h.pendingFiles") });
+		const max = 50;
+		for (const path of paths.slice(0, max)) {
+			const row = box.createDiv({ cls: "vsg-h-row" });
+			row.createDiv({ text: path, cls: "vsg-h-path" });
+			const b = row.createDiv({ cls: "vsg-h-row-actions" });
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (f instanceof TFile) this.button(b, t("health.compare"), () => p.compareWithGitHub(f));
+			this.button(b, t("repo.use"), async () => {
+				await p.useRepositoryVersion(path);
+				this.refresh();
+			});
+		}
+		if (paths.length > max) box.createDiv({ cls: "vsg-muted", text: t("u.andMore", { n: paths.length - max }) });
 	}
 
 	private section(title: string, icon: string): HTMLElement {
@@ -225,6 +249,7 @@ export class HealthView extends ItemView {
 		const pend = this.section(t("health.pending"), "clock");
 		const edited = p.pendingLocalCount();
 		pend.createDiv({ text: edited ? t("health.editedN", { n: edited }) : t("health.noEdits") });
+		if (edited) this.renderPendingFiles(pend);
 		if (this.remoteInfo?.ahead || p.remoteAhead) pend.createDiv({ text: t("health.remoteAhead"), cls: "vsg-h-accent" });
 		else if (this.remoteInfo?.ahead === false) pend.createDiv({ text: t("health.remoteSame"), cls: "vsg-muted" });
 		else if (this.loadingRemote) pend.createDiv({ text: t("health.checking"), cls: "vsg-muted" });
@@ -317,6 +342,7 @@ export class HealthView extends ItemView {
 		const tools = this.section(t("health.tools"), "wrench");
 		const tl = tools.createDiv({ cls: "vsg-h-actions" });
 		this.button(tl, t("health.timeline"), () => p.openTimeline());
+		this.button(tl, t("hist.title"), () => p.openHistory());
 		this.button(tl, t("health.snapshot"), () => p.snapshot(true));
 		this.button(tl, t("health.reset"), () => p.resetToGitHub());
 		this.button(tl, t("cmd.overwrite"), () => p.overwriteRemote());

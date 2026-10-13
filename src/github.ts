@@ -6,7 +6,7 @@ import type { RequestUrlResponse } from "obsidian";
 import { webBase } from "./auth.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
 import { codedRemoteError } from "./errors.ts";
-import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
+import type { CommitFile, CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { pool, sleep } from "./util.ts";
 
 export type { CommitInfo, TreeEntry } from "./remote.ts";
@@ -62,7 +62,7 @@ interface GhSha { sha: string }
 interface GhCommit { tree: { sha: string } }
 interface GhTree { tree: TreeEntry[]; truncated: boolean }
 interface GhCommitListItem { sha: string; commit: { message: string; author?: { date?: string; name?: string }; committer?: { date?: string } } }
-interface GhCommitDetail { parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
+interface GhCommitDetail { parents?: { sha: string }[]; files?: { filename: string; status: string; previous_filename?: string }[] }
 interface GhTag { name: string; commit: { sha: string } }
 interface GhBranch { name: string; commit: { sha: string } }
 interface GhRateLimit { resources: { core: { limit: number; remaining: number; reset: number } } }
@@ -451,8 +451,9 @@ export class GitHub implements Remote {
 
 	// ---- history ----
 
-	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
+	async listCommits(branch: string, path?: string, perPage = 30, page = 1): Promise<CommitInfo[]> {
 		const q = new URLSearchParams({ sha: branch, per_page: String(perPage) });
+		if (page > 1) q.set("page", String(page));
 		if (path) q.set("path", path);
 		const list = await this.json<GhCommitListItem[]>("GET", `${this.repoPath}/commits?${q.toString()}`);
 		return list.map((c) => ({
@@ -463,7 +464,7 @@ export class GitHub implements Remote {
 		}));
 	}
 
-	async getCommitFiles(sha: string): Promise<{ parent: string | null; files: { filename: string; status: string }[] }> {
+	async getCommitFiles(sha: string): Promise<{ parent: string | null; files: CommitFile[] }> {
 		// Files come 300 per page (GitHub stops at 3000 in total).
 		const c = await this.json<GhCommitDetail>("GET", `${this.repoPath}/commits/${sha}?per_page=300&page=1`);
 		const files = [...(c.files ?? [])];
@@ -472,7 +473,10 @@ export class GitHub implements Remote {
 			files.push(...more);
 			last = more.length;
 		}
-		return { parent: c.parents?.[0]?.sha ?? null, files };
+		return {
+			parent: c.parents?.[0]?.sha ?? null,
+			files: files.map((f) => (f.previous_filename ? { filename: f.filename, status: f.status, previous: f.previous_filename } : { filename: f.filename, status: f.status })),
+		};
 	}
 
 	/** File content at a commit, or null if it did not exist there. */

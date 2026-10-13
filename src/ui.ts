@@ -41,9 +41,21 @@ function renderSides(el: HTMLElement, d: DiffSides) {
 	renderDiff(el, d.oldText, d.newText, { oldLabel: d.oldLabel, newLabel: d.newLabel });
 }
 
-/** Shows a diff that is loaded asynchronously. */
+/** A button under a diff (closes the dialog, then runs). */
+export interface DiffAction {
+	label: string;
+	run: () => void;
+	warning?: boolean;
+}
+
+/** Shows a diff that is loaded asynchronously, with optional actions decided once it has loaded. */
 export class DiffModal extends Modal {
-	constructor(app: App, private title: string, private load: () => Promise<DiffSides>) {
+	constructor(
+		app: App,
+		private title: string,
+		private load: () => Promise<DiffSides>,
+		private actions: (d: DiffSides) => DiffAction[] = () => [],
+	) {
 		super(app);
 	}
 	async onOpen() {
@@ -54,6 +66,18 @@ export class DiffModal extends Modal {
 			const d = await this.load();
 			status.remove();
 			renderSides(this.contentEl, d);
+			const acts = this.actions(d);
+			if (acts.length) {
+				const row = new Setting(this.contentEl);
+				for (const a of acts)
+					row.addButton((b) => {
+						if (a.warning) destructive(b);
+						b.setButtonText(a.label).onClick(() => {
+							this.close();
+							a.run();
+						});
+					});
+			}
 		} catch (e) {
 			status.setText(tr("u.loadFailed", { error: errText(e) }));
 		}

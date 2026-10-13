@@ -96,6 +96,14 @@ export class MirrorHost implements SyncHost {
 	isUnloaded(): boolean {
 		return this.plugin.isUnloaded();
 	}
+	/** The trigger and typed message of the sync that started this mirror run (commit messages). */
+	commitContext() {
+		return this.plugin.commitContext();
+	}
+	/** `sync: false` notes stay on this device: never uploaded to the backup mirror either. */
+	frontmatterScope() {
+		return this.plugin.frontmatterScope();
+	}
 	codec(): Codec {
 		const enc = this.plugin.encryptionLayer();
 		// The same `filter=lfs` patterns (.gitattributes) as the main repository's codec, so files tracked

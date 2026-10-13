@@ -11,7 +11,10 @@ function setup() {
 	const mirrorRepo = new FakeGitHub();
 	const a = device("A", main);
 	const lfsPatterns: string[] = [];
+	const fm = { out: new Set<string>(), unknown: new Set<string>() };
 	const plugin = {
+		frontmatterScope: () => fm,
+		commitContext: () => ({ trigger: "manual", message: null }),
 		app: a.host.app,
 		settings: a.host.settings,
 		stateFilePath: a.host.stateFilePath,
@@ -33,7 +36,7 @@ function setup() {
 		codec: () => new Codec([new LfsLayer(main as never, 0, undefined, lfsPatterns)]),
 	};
 	const mirror = new MirrorHost(plugin as never, { enabled: true, provider: "github", owner: "me", repo: "backup", branch: "main" }, mirrorRepo as never);
-	return { main, mirrorRepo, a, mirror, lfsPatterns };
+	return { main, mirrorRepo, a, mirror, lfsPatterns, fm };
 }
 
 test("mirror: uploads the vault push-only and follows deletions", async () => {
@@ -76,4 +79,24 @@ test("mirror: its large-file layer uses the same .gitattributes patterns as the 
 	assert.ok(lfs);
 	assert.deepEqual(lfs.trackedPatterns, ["*.psd", "Assets/**"]);
 	assert.match(lfs.fingerprint, /attr:\*\.psd\|Assets/);
+});
+
+test("mirror: a `sync: false` note is never uploaded to the backup mirror", async () => {
+	const { mirrorRepo, a, mirror, fm } = setup();
+	a.fs.put("public.md", "ok\n");
+	a.fs.put("secret.md", "---\nsync: false\n---\nprivate\n");
+	a.fs.put("pending.md", "not read yet\n");
+	fm.out.add("secret.md");
+	fm.unknown.add("pending.md");
+	await mirror.engine.run("push");
+	const files = mirrorRepo.headFiles();
+	assert.ok(files.has("public.md"));
+	assert.ok(!files.has("secret.md"), "flagged note stays off the mirror");
+	assert.ok(!files.has("pending.md"), "a note whose frontmatter isn't read yet waits");
+	// Edited later while still flagged: still never uploaded.
+	a.fs.put("secret.md", "---\nsync: false\n---\nprivate, edited\n");
+	a.fs.put("public.md", "ok 2\n");
+	await mirror.engine.run("push");
+	assert.ok(!mirrorRepo.headFiles().has("secret.md"));
+	assert.equal(mirrorRepo.headFiles().get("public.md"), "ok 2\n");
 });

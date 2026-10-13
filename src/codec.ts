@@ -82,6 +82,46 @@ export class Codec {
 
 export const PLAIN = new Codec();
 
+/** "/Vaults/Work/" → "Vaults/Work" (no leading or trailing slashes, no empty or "." / ".." parts). */
+export function normalizeSubdir(subdir: unknown): string {
+	return (typeof subdir === "string" ? subdir : "")
+		.replace(/\\/g, "/")
+		.split("/")
+		.map((s) => s.trim())
+		.filter((s) => s && s !== "." && s !== "..")
+		.join("/");
+}
+
+/** Path filter for commit lists of this vault: its repository folder, or none (the whole repository). */
+export function vaultCommitsPath(subdir: unknown): string | undefined {
+	return normalizeSubdir(subdir) || undefined;
+}
+
+/**
+ * The whole vault kept in a folder of the repository (monorepos, several vaults in one repository):
+ * vault "a.md" ↔ repository "<subdir>/a.md". Everything outside that folder is not part of this vault:
+ * it is never listed, downloaded, changed or deleted. Paths only; content is untouched.
+ */
+export class RepoSubdirLayer implements Layer {
+	readonly id: string;
+	readonly transformsPaths = true;
+	/** The repository folder, with a trailing slash. */
+	readonly repoSubdir: string;
+	constructor(subdir: string) {
+		const sub = normalizeSubdir(subdir);
+		if (!sub) throw new Error("RepoSubdirLayer needs a folder");
+		this.repoSubdir = sub + "/";
+		this.id = `subdir:${this.repoSubdir}`;
+	}
+	async encodePath(p: string) {
+		return this.repoSubdir + p;
+	}
+	async decodePath(raw: string): Promise<string | null> {
+		if (!raw.startsWith(this.repoSubdir) || raw.length === this.repoSubdir.length) return null;
+		return raw.slice(this.repoSubdir.length);
+	}
+}
+
 /** Maps a vault folder to the root of a repository (e.g. "Work/" ↔ repo root) for shared folders. */
 export class PrefixLayer implements Layer {
 	readonly id: string;

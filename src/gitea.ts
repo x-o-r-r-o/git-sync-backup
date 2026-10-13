@@ -25,7 +25,7 @@ const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
 interface GtUser { login?: string; username?: string }
 interface GtRepo { private?: boolean; default_branch?: string; html_url: string; size?: number; name: string; updated_at: string; owner?: GtUser }
 interface GtBranch { name?: string; commit?: { id?: string } }
-interface GtCommit { sha: string; commit?: { tree?: { sha: string }; message?: string; author?: { name?: string; date?: string } }; tree?: { sha: string }; created?: string; parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
+interface GtCommit { sha: string; commit?: { tree?: { sha: string }; message?: string; author?: { name?: string; date?: string } }; tree?: { sha: string }; created?: string; parents?: { sha: string }[]; files?: { filename: string; status: string; previous_filename?: string }[] }
 interface GtTree { tree?: TreeEntry[]; truncated?: boolean }
 interface GtBlob { content?: string | null; size?: number }
 interface GtTag { name: string; id?: string; commit?: { sha: string } }
@@ -248,15 +248,24 @@ export class Gitea implements Remote {
 		);
 	}
 
-	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
+	async listCommits(branch: string, path?: string, perPage = 30, page = 1): Promise<CommitInfo[]> {
 		const q = new URLSearchParams({ sha: branch, limit: String(perPage), stat: "false", files: "false", verification: "false" });
+		if (page > 1) q.set("page", String(page));
 		if (path) q.set("path", path);
 		const list = await this.json<GtCommit[]>("GET", `${this.repoPath}/commits?${q.toString()}`);
 		return list.map((c) => ({ sha: c.sha, message: c.commit?.message ?? "", date: c.commit?.author?.date ?? c.created ?? "", author: c.commit?.author?.name ?? "" }));
 	}
 	async getCommitFiles(sha: string) {
 		const c = await this.json<GtCommit>("GET", `${this.repoPath}/git/commits/${sha}?stat=false&files=true`);
-		return { parent: c.parents?.[0]?.sha ?? null, files: (c.files ?? []).map((f) => ({ filename: f.filename, status: f.status === "deleted" ? "removed" : f.status })) };
+		return {
+			parent: c.parents?.[0]?.sha ?? null,
+			files: (c.files ?? []).map((f) =>
+				// A rename names its old path (history shows "old → new" and restores from the old path).
+				f.previous_filename && f.previous_filename !== f.filename
+					? { filename: f.filename, status: "renamed", previous: f.previous_filename }
+					: { filename: f.filename, status: f.status === "deleted" ? "removed" : f.status },
+			),
+		};
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
 		const res = await this.request("GET", `${this.repoPath}/raw/${encPath(path)}?ref=${encodeURIComponent(ref)}`, undefined, { accept: "*/*", okStatuses: [404] });

@@ -2,8 +2,9 @@
 
 import { arrayBufferToBase64 } from "obsidian";
 import type { App } from "obsidian";
-import { Codec, PLAIN } from "./codec.ts";
-import { MARKER_PATH } from "./crypto.ts";
+import { Codec, PLAIN, RepoSubdirLayer } from "./codec.ts";
+import { renderCommitTemplate, templateFor } from "./commit-template.ts";
+import { MARKER_PATH, markerPathFor, pickMarker } from "./crypto.ts";
 
 /** Repository file listing the vault's empty folders (git can't store empty folders). */
 export const FOLDERS_PATH = ".vault-sync/folders.json";
@@ -76,6 +77,13 @@ export interface SyncHost {
 	 * when this device is the first to encrypt the repository, else null.
 	 */
 	checkEncryption?(markerSha: string | null): Promise<string | null>;
+	/** What started this sync ("manual", "interval", …) and a message the user typed for it, if any. */
+	commitContext?(): { trigger?: string; message?: string | null };
+	/**
+	 * Notes left out on this device by `sync: false` in their frontmatter (`out`), and notes whose
+	 * frontmatter Obsidian hasn't read yet (`unknown`: they wait for the next sync, keeping their baseline).
+	 */
+	frontmatterScope?(): { out: Set<string>; unknown: Set<string> } | null;
 }
 
 export interface DeviceScope {
@@ -242,10 +250,20 @@ export class SyncEngine {
 		return this.codec.encodePath(path);
 	}
 
+	/** This vault's folder in the repository ("" = its root), from the codec. */
+	private get repoSubdir(): string {
+		return this.codec.layers.find((l): l is RepoSubdirLayer => l instanceof RepoSubdirLayer)?.repoSubdir ?? "";
+	}
+
+	/** Where this vault's encryption marker lives (inside its repository folder when it has one). */
+	private get markerPath(): string {
+		return markerPathFor(this.repoSubdir);
+	}
+
 	/** Vault path of a repository path, or null if it isn't a file this vault manages. */
 	vaultPathOf(raw: string): Promise<string | null> {
 		this.loadCodec();
-		if (raw === MARKER_PATH) return Promise.resolve(null);
+		if (raw === MARKER_PATH || raw === this.markerPath) return Promise.resolve(null);
 		return this.codec.transformsPaths ? this.codec.decodePath(raw) : Promise.resolve(raw);
 	}
 
@@ -325,8 +343,11 @@ export class SyncEngine {
 		// A codec that maps a folder (shared folders) only ever handles paths inside that folder.
 		const prefix = (this.codec.layers.find((l) => "folderPrefix" in l) as { folderPrefix?: string } | undefined)?.folderPrefix;
 		const included = includes.length ? compileGlobs(includes.map(sub)) : null;
+		// Notes marked `sync: false` stay on this device: never uploaded, and their repository copy is left alone.
+		const fmOut = device ? this.host.frontmatterScope?.()?.out : undefined;
 		return (p: string) => {
 			if (excluded(p)) return false;
+			if (fmOut?.has(p)) return false;
 			if (prefix && !p.startsWith(prefix)) return false;
 			if (included && !included(p) && !p.startsWith(cfg + "/")) return false;
 			if (!isHiddenPath(p)) return true;
@@ -447,6 +468,7 @@ export class SyncEngine {
 			ds?.maxDownloadMB ?? 0,
 			[...(ds?.pinned ?? [])].sort(),
 			this.host.extraExcludes?.() ?? [],
+			[...(this.host.frontmatterScope?.()?.out ?? [])].sort(),
 		]);
 	}
 
@@ -750,6 +772,7 @@ export class SyncEngine {
 		};
 		const scope = (p: string) => baseScope(p) && !skipPaths.has(p);
 		for (const p of opts.defer ?? []) skip(p, "deferred");
+		for (const p of this.host.frontmatterScope?.()?.unknown ?? []) if (baseScope(p)) skip(p, "frontmatterPending");
 
 		// ---- local ----
 		// Vault file stats come from Obsidian's in-memory index, so listing is cheap; only files whose
@@ -877,6 +900,7 @@ export class SyncEngine {
 		const remoteOnly: SyncState["remoteOnly"] = {};
 		let treeSha: string | null = null;
 		let markerSha: string | null = null;
+		let markerLegacy = false;
 		let foldersSha: string | null = null;
 		const winSkipped = new Set<string>();
 		// Folder + extension of each skipped name: a note renamed (and edited) into it shares both.
@@ -896,10 +920,19 @@ export class SyncEngine {
 			const lowerLocal = new Map([...localShas.keys()].map((p) => [fold(p), p]));
 			const seenLower = new Map<string, string>();
 			const listed: { raw: TreeEntry; vp: string }[] = [];
-			for (const raw of await this.gh.listTree(treeSha)) {
-				if (raw.path === MARKER_PATH) markerSha = raw.sha;
+			const tree = await this.gh.listTree(treeSha);
+			// The encryption marker of this vault: its own copy inside its repository folder, or (migration)
+			// the root copy older versions wrote, when this vault is the encrypted one.
+			const markerFile = this.markerPath;
+			const picked = pickMarker(tree, this.repoSubdir, this.codec.has("enc:"));
+			markerSha = picked.sha;
+			markerLegacy = picked.legacy;
+			if (picked.sha && !picked.legacy) this.metaShas.set(markerFile, picked.sha);
+			for (const raw of tree) {
 				if (raw.path === FOLDERS_PATH) foldersSha = raw.sha;
-				if (raw.path === MARKER_PATH || raw.path === FOLDERS_PATH) this.metaShas.set(raw.path, raw.sha);
+				if (raw.path === FOLDERS_PATH) this.metaShas.set(raw.path, raw.sha);
+				// Marker files are never vault files (neither this vault's nor the root copy).
+				if (raw.path === MARKER_PATH || raw.path === markerFile) continue;
 				if (raw.type !== "blob" || (raw.mode !== "100644" && raw.mode !== "100755")) continue;
 				// Map the repository path back to a vault path (decrypt names, strip folder prefix).
 				const vp = this.codec.transformsPaths ? await this.codec.decodePath(raw.path) : raw.path;
@@ -965,6 +998,11 @@ export class SyncEngine {
 		// Encryption: refuse to read an encrypted repo without the key, or to mix keys.
 		if (this.host.checkEncryption && !readOnly) this.markerToAdd = await this.host.checkEncryption(head ? markerSha : null);
 		else if (this.host.checkEncryption) await this.host.checkEncryption(head ? markerSha : null);
+		// Migration: this vault's marker was only at the repository root. Its next commit writes a copy into
+		// the vault's own folder (the root copy is left for other devices still on an older version).
+		if (markerLegacy && markerSha && !readOnly && !this.markerToAdd && this.codec.has("enc:")) {
+			this.markerToAdd = new TextDecoder().decode(await this.gh.getBlob(markerSha));
+		}
 		// Renamed elsewhere to a name Windows can't store: the old name looks deleted remotely. Keep the
 		// note here (skip its old path too) instead of trashing it.
 		// Renamed and edited at once: same folder and type as a name that is NEW in this sync (a name
@@ -1626,7 +1664,7 @@ export class SyncEngine {
 		}
 		if (this.markerToAdd) {
 			const content = this.markerToAdd;
-			upserts.push({ path: MARKER_PATH, mode: "100644", load: async () => encodeText(content), text: () => content });
+			upserts.push({ path: this.markerPath, mode: "100644", load: async () => encodeText(content), text: () => content });
 		}
 		if (foldersJson !== null) upserts.push({ path: FOLDERS_PATH, mode: "100644", load: async () => encodeText(foldersJson), text: () => foldersJson });
 		const rawDeletes: string[] = [];
@@ -1660,8 +1698,11 @@ export class SyncEngine {
 		if (!head) return [];
 		const tree = await gh.getCommitTree(head);
 		const foreign: string[] = [];
+		// A vault in a folder of the repository: everything outside that folder belongs to others.
+		const sub = this.repoSubdir;
 		for (const e of await gh.listTree(tree)) {
-			if (e.type !== "blob" || e.path === MARKER_PATH || e.path === ".gitattributes") continue;
+			if (e.type !== "blob" || e.path === MARKER_PATH || e.path === this.markerPath || e.path === ".gitattributes") continue;
+			if (sub && !e.path.startsWith(sub)) continue;
 			if ((await this.codec.decodePath(e.path)) === null) foreign.push(e.path);
 		}
 		if (!foreign.length) return [];
@@ -1697,7 +1738,11 @@ export class SyncEngine {
 		for (const [p, e] of await this.filesAt(head, shared)) remote.set(p, e.sha);
 
 		const plan: FreeSpacePlan = { files: [], bytes: 0 };
+		// Notes marked `sync: false` are kept on this device on purpose (and ones not read yet may be):
+		// they read as "not this device's" above, but are never removed here.
+		const fm = this.host.frontmatterScope?.();
 		for (const f of this.io.listVault(shared)) {
+			if (fm?.out.has(f.path) || fm?.unknown.has(f.path)) continue;
 			if (mine(f.path) && !(max && f.size > max && !pinned.has(f.path))) continue;
 			const r = remote.get(f.path);
 			if (!r) continue;
@@ -1907,11 +1952,24 @@ export class SyncEngine {
 			...deletes.filter((p) => !sources.has(p)),
 		].slice(0, 10);
 		const summary = parts.join(", ") || "sync";
-		const subject = this.s.commitTemplate
-			.split("{{device}}").join(device)
-			.split("{{summary}}").join(summary)
-			.split("{{date}}").join(new Date().toISOString())
-			.split("{{count}}").join(String(uploads.length + deletes.length));
+		const ctx = this.host.commitContext?.() ?? {};
+		const changedPaths = [
+			...renames.map((r) => r.split(" → ")[1]),
+			...uploads.map((u) => u.path).filter((p) => !targets.has(p)),
+			...deletes.filter((p) => !sources.has(p)),
+		];
+		const custom = ctx.message?.replace(/[\r\n]+/g, " ").trim();
+		const subject =
+			custom ||
+			renderCommitTemplate(templateFor(this.s.commitTemplate, this.s.commitTemplateAuto, ctx.trigger), {
+				device,
+				summary,
+				count: uploads.length + deletes.length,
+				files: changedPaths,
+				trigger: ctx.trigger ?? "manual",
+				date: new Date(),
+			}) ||
+			`${device}: ${summary}`;
 		const total = renames.length + uploads.filter((u) => !targets.has(u.path)).length + deleted;
 		const more = total - files.length;
 		const list = `${files.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- …and ${more} more` : ""}`;

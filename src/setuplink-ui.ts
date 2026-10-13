@@ -10,6 +10,7 @@ import { buildSetupLink, decryptToken, encryptToken, newSetupCode } from "./setu
 import type { SetupPayload } from "./setuplink.ts";
 import { localizeError } from "./errors.ts";
 import { t } from "./i18n.ts";
+import { normalizeSubdir } from "./codec.ts";
 
 const SVG = "http://www.w3.org/2000/svg";
 
@@ -79,6 +80,7 @@ export class CreateSetupLinkModal extends Modal {
 			syncHidden: s.syncHidden,
 			useGitignore: s.useGitignore,
 			...(s.excludePatterns !== DEFAULT_SETTINGS.excludePatterns ? { exclude: s.excludePatterns } : {}),
+			...(s.repoSubdir ? { subdir: s.repoSubdir } : {}),
 		};
 	}
 
@@ -167,9 +169,15 @@ export class ApplySetupLinkModal extends Modal {
 		if (s.useGitignore) ul.createEl("li", { text: t("link.withGitignore") });
 		if (s.exclude !== undefined) ul.createEl("li", { text: t("link.withExclude") });
 		if (s.token) ul.createEl("li", { text: t("link.withToken") });
+		const sub = normalizeSubdir(s.subdir);
+		ul.createEl("li", { text: t("link.subdir", { folder: sub || t("s.subdirRoot") }) });
 		const warn = contentEl.createDiv({ cls: "vsg-h-error" });
 		warn.setText(t("link.onlyYours"));
 		if (p.isConfigured()) contentEl.createEl("p", { cls: "vsg-h-accent", text: t("link.replaces", { repo: `${p.settings.owner}/${p.settings.repo}` }) });
+		// This vault already synced with a folder of the repository: the next sync compares from scratch there.
+		if (p.isConfigured() && p.state.lastSync > 0 && sub !== normalizeSubdir(p.settings.repoSubdir)) {
+			contentEl.createEl("p", { cls: "vsg-h-accent", text: t("s.subdirChangeBody", { folder: sub || t("s.subdirRoot") }) });
+		}
 
 		let code = "";
 		if (s.token) {

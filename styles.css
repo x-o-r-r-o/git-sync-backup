@@ -652,3 +652,237 @@
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
 }
+
+/* ---------- 1.6: history sidebar ---------- */
+.vsg-history {
+	padding: var(--size-4-2);
+	overflow-x: hidden;
+}
+.vsg-hist-bar {
+	display: flex;
+	gap: var(--size-4-1);
+	align-items: center;
+	margin-bottom: var(--size-4-2);
+}
+.vsg-hist-filter {
+	flex: 1;
+	min-width: 0;
+}
+.vsg-hist-msg {
+	padding: var(--size-4-2) 0;
+}
+.vsg-hist-commits,
+.vsg-hist-files {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+}
+.vsg-hist-commit {
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+.vsg-hist-head {
+	display: flex;
+	gap: var(--size-4-1);
+	padding: var(--size-4-2) var(--size-4-1);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+.vsg-hist-head:hover,
+.vsg-hist-name:hover {
+	background: var(--background-modifier-hover);
+}
+.vsg-hist-head:focus-visible,
+.vsg-hist-name:focus-visible {
+	box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+	outline: none;
+}
+.vsg-hist-chevron {
+	flex: none;
+	color: var(--text-muted);
+}
+.vsg-hist-text {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+.vsg-hist-body {
+	padding: 0 var(--size-4-1) var(--size-4-2) var(--size-4-6);
+}
+.vsg-hist-file {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-1);
+	padding: 2px 0;
+}
+.vsg-hist-name {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: baseline;
+	flex: 1;
+	min-width: 0;
+	padding: var(--size-4-1);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+}
+.vsg-hist-path {
+	overflow-wrap: anywhere;
+	min-width: 0;
+}
+.vsg-hist-status {
+	flex: none;
+	width: 1.4em;
+	text-align: center;
+	font-family: var(--font-monospace);
+	font-weight: var(--font-semibold);
+}
+.vsg-hist-status.is-added {
+	color: var(--color-green);
+}
+.vsg-hist-status.is-modified {
+	color: var(--color-yellow);
+}
+.vsg-hist-status.is-deleted {
+	color: var(--color-red);
+}
+.vsg-hist-status.is-renamed {
+	color: var(--color-blue);
+}
+.vsg-hist-restore {
+	font-size: var(--font-ui-smaller);
+}
+.vsg-hist-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	margin-top: var(--size-4-2);
+}
+.vsg-hist-more {
+	width: 100%;
+	margin-top: var(--size-4-2);
+}
+.vsg-h-pending summary {
+	cursor: pointer;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	padding: var(--size-4-1) 0;
+}
+
+/* Editor change markers: lines changed since the last sync */
+.vsg-change-gutter .cm-gutterElement {
+	padding: 0;
+	cursor: pointer;
+}
+.vsg-change-mark {
+	position: relative;
+	width: 8px;
+	height: 100%;
+}
+.is-mobile .vsg-change-mark {
+	width: 12px;
+}
+.vsg-change-mark::before {
+	content: "";
+	position: absolute;
+	left: 2px;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+	border-radius: 1px;
+}
+.vsg-change-add::before {
+	background: var(--color-green);
+}
+.vsg-change-change::before {
+	background: var(--color-blue);
+}
+.vsg-change-delete::before,
+.vsg-change-delete-below::before {
+	bottom: auto;
+	top: -4px;
+	width: 0;
+	height: 0;
+	border: 4px solid transparent;
+	border-left: 6px solid var(--color-red);
+	border-radius: 0;
+}
+.vsg-change-delete-below::before {
+	top: auto;
+	bottom: -4px;
+}
+.vsg-change-popover {
+	position: fixed;
+	top: var(--vsg-pop-top, 0);
+	left: var(--vsg-pop-left, 0);
+	z-index: var(--layer-popover);
+	max-width: min(480px, calc(100vw - 16px));
+	padding: var(--size-4-2) var(--size-4-3);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-small);
+}
+.vsg-change-popover-title {
+	font-weight: var(--font-semibold);
+}
+.vsg-change-popover-label {
+	margin: var(--size-4-1) 0;
+	color: var(--text-muted);
+}
+.vsg-change-old {
+	max-height: 40vh;
+	overflow: auto;
+	margin: 0;
+	padding: var(--size-4-2);
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+.vsg-change-popover-buttons {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+}
+
+/* Files and folders that don't sync (file explorer, when sync status is shown there). */
+.nav-file-title.vsg-x-excluded,
+.nav-folder-title.vsg-x-excluded {
+	opacity: 0.5;
+}
+.nav-file-title.vsg-x-excluded .nav-file-title-content,
+.nav-folder-title.vsg-x-excluded .nav-folder-title-content {
+	font-style: italic;
+}
+
+/* Status bar: branch and time until the next sync. */
+.vsg-status-extra {
+	display: inline-flex;
+	gap: var(--size-4-2);
+}
+.vsg-status-part {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-2-1);
+}
+.vsg-status-icon {
+	display: inline-flex;
+}
+.vsg-status-icon svg {
+	width: var(--icon-xs);
+	height: var(--icon-xs);
+}
+
+/* "Sync with a custom message…" and the exclude patterns editor. */
+.vsg-commit-input,
+.vsg-exclude-editor {
+	width: 100%;
+}
+.vsg-exclude-editor {
+	font-family: var(--font-monospace);
+}

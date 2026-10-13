@@ -96,6 +96,13 @@ export class SharedFolderHost implements SyncHost {
 	get windows(): boolean {
 		return this.plugin.windows;
 	}
+	commitContext() {
+		return this.plugin.commitContext();
+	}
+	/** `sync: false` notes stay on this device inside shared folders too. */
+	frontmatterScope() {
+		return this.plugin.frontmatterScope();
+	}
 	conflictsAsPullRequest(): boolean {
 		return this.def.conflicts === "pr";
 	}

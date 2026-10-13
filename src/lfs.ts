@@ -44,6 +44,43 @@ export function lfsPatternsFrom(gitattributes: string): string[] {
 	return out;
 }
 
+/**
+ * The repository root's `filter=lfs` patterns as they apply to a vault kept in folder `subdir` of the
+ * repository (patterns are matched against vault paths). Patterns without a slash match at any depth
+ * and stay as they are; anchored ones ("/x", "a/b/*.psd") are relative to the repository root, so the
+ * vault's folder is taken off their front, and those outside the vault's folder are dropped.
+ */
+export function lfsPatternsForSubdir(patterns: string[], subdir: string): string[] {
+	const sub = subdir.replace(/^\/+|\/+$/g, "");
+	if (!sub) return patterns;
+	const subSegs = sub.split("/");
+	const out: string[] = [];
+	for (const p of patterns) {
+		const core = p.replace(/\/+$/, "");
+		if (!core.startsWith("/") && !core.includes("/")) {
+			out.push(p);
+			continue;
+		}
+		const segs = core.replace(/^\/+/, "").split("/");
+		let i = 0;
+		let keep = true;
+		for (; i < subSegs.length && i < segs.length; i++) {
+			// "**" may stand for the rest of the vault's folder: the remainder then matches at any depth.
+			if (segs[i] === "**") break;
+			if (!compileGlobs(["/" + segs[i]])(subSegs[i])) {
+				keep = false;
+				break;
+			}
+		}
+		if (!keep) continue;
+		const rest = segs.slice(i).join("/");
+		// The pattern names the vault's folder or one above it: every file of the vault.
+		if (!rest) out.push("**");
+		else out.push(segs[i] === "**" ? rest : "/" + rest);
+	}
+	return out;
+}
+
 export function pointerFor(oid: string, size: number): string {
 	return `${SPEC}\noid sha256:${oid}\nsize ${size}\n`;
 }

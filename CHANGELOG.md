@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.6.0 (2026-10-13)
+
+**New**
+- **Sync history sidebar.** *Open sync history* (ribbon, command or the status panel's Tools) lists recent syncs of the repository with date, device (from the `Device:` line) and author, 30 at a time with *Load more*. Expand a sync to see its changed files as added, modified, deleted or renamed, with encrypted names shown decrypted; click a file for its diff against the previous version, or restore that file. *Browse files*, *Restore a folder…* and *Restore whole vault* work from any sync. Filter by path; refreshes after every sync; keyboard and touch friendly.
+- **Use the repository version of a file.** In *Compare with repository*, in the status panel's list of edited files, from the file menu (*Git: Use repository version*) and as a command: the file on this device is replaced by the repository's latest version after a confirmation. The version on this device goes to the trash first (system trash, else the vault's `.trash`, even when Obsidian is set to delete files permanently), and the next sync uploads nothing for that file. Refused while a sync runs.
+- **Changes since the last sync in the editor.** Lines added, changed or deleted since the last sync are marked next to the text, on desktop and mobile. Click or tap a mark for a popover with the last-synced text and **Revert**; commands *Revert this change*, *Go to next change* and *Go to previous change*. The last-synced version is read once (through encryption and large file storage, like a sync) and cached in memory, so marks keep working offline; files over 1 MB and binary files are skipped. Setting: *Show changes since the last sync in the editor* (on by default).
+- **Who last changed this line.** A command (and a button in the change popover) that walks the file's last 30 versions on the device and shows *Last changed on … by … (commit)*, with the device from the commit's `Device:` line and a button to open that version. Works with end-to-end encryption.
+- **Vault in a folder of the repository.** *Folder in the repository* (settings, and optional in the wizard's repository step) keeps the vault in a subfolder such as `vaults/personal/`, for monorepos or several vaults in one repository. Files outside that folder are never downloaded, changed or deleted; changing the folder starts a fresh comparison that deletes nothing. Setup links carry the folder.
+- **Commit message upgrades.** New template variables `{{files}}` (changed paths, first 10 then "and N more"), `{{trigger}}` (manual, interval, startup, …) and `{{date:FORMAT}}` (moment.js formats such as `YYYY-MM-DD HH:mm`), a live preview under the template, an optional separate template for automatic syncs, and the command *Sync with a custom message…*.
+- **Sync and close Obsidian** (desktop command): syncs, then closes Obsidian only when the sync succeeded. Closing a desktop window now also starts a last upload of pending edits (best effort: a closing window can't wait for it).
+- **Excluded files greyed out** in the file explorer (with *Show sync status in the file explorer* on), with the tooltip *Not synced*. File menu: *Git: Exclude this file from sync* and *Git: Include in sync* (removes your pattern or adds a `!` re-include); command *Edit exclude patterns*.
+- **Leave out notes with `sync: false`** in their properties: never uploaded from that device, and a copy already in the repository stays as it is. Setting *Respect sync: false in frontmatter* (on by default).
+- **Status bar extras** (desktop, optional): time until the next scheduled sync and the branch name.
+- **Events for other plugins:** `vault-sync-git:sync-start` and `vault-sync-git:sync-done` (with counts of uploaded, downloaded, deleted and conflicting files, and an error if any) on `app.workspace`. See the README.
+
+**Improved**
+- Restoring an older version over the current file (*Version history* → *Restore this version*) now moves the current contents to the trash first instead of overwriting them.
+- Vaults in different folders of one repository each keep their own encryption marker, so one vault can be encrypted while another isn't; their history, timeline and large-file rules only cover their own folder.
+- Changing *Folder in the repository* asks first, and warns when that folder already holds files; setup links show the folder.
+
+**Fixed (review before release)**
+- The backup mirror respects `sync: false` notes and never uploads them.
+- *Sync and close* only closes when every part of the sync succeeded (main repository, shared folders, mirror); otherwise it lists what failed.
+- The history sidebar only reloads when there is something new and it is visible; change markers reuse this device's text instead of downloading it again after a sync; *Free up space* never removes `sync: false` notes; Gitea renames show in history; Bitbucket history pages follow the server's own paging links; sync events never carry unredacted error details.
+
 ## 1.5.0 (2026-10-13)
 
 **New**

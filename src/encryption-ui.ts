@@ -1,16 +1,25 @@
 // Turn on / unlock end-to-end encryption.
 
 import { App, Modal, Notice, Setting } from "obsidian";
-import { createEncryption, MARKER_PATH, passphraseStrength, unlockEncryption } from "./crypto.ts";
+import { createEncryption, MARKER_PATH, passphraseStrength, pickMarker, unlockEncryption } from "./crypto.ts";
+import { normalizeSubdir } from "./codec.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { localizeError } from "./errors.ts";
 import { t as tr } from "./i18n.ts";
 
+/** This vault's encryption marker in the repository (inside its repository folder when it has one). */
 export async function readRemoteMarker(plugin: VaultSyncPlugin): Promise<EncryptionMeta | null> {
 	const head = await plugin.gh.getRef(plugin.settings.branch);
 	if (!head) return null;
-	const data = await plugin.gh.getFileAt(MARKER_PATH, head);
+	const sub = normalizeSubdir(plugin.settings.repoSubdir);
+	let data: ArrayBuffer | null;
+	if (!sub) data = await plugin.gh.getFileAt(MARKER_PATH, head);
+	else {
+		// Its own copy, else (migration) the root copy of an older version when this vault is the encrypted one.
+		const picked = pickMarker(await plugin.gh.listTree(await plugin.gh.getCommitTree(head)), sub, plugin.isEncrypted());
+		data = picked.sha ? await plugin.gh.getBlob(picked.sha) : null;
+	}
 	return data ? (JSON.parse(new TextDecoder().decode(data)) as EncryptionMeta) : null;
 }
 

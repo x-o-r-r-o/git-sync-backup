@@ -97,7 +97,9 @@ The token is stored only on the device, in Obsidian's secure storage. It is neve
 
 - **Triggers:** on startup, after edits (debounced), on a timer, when the app returns to the foreground or goes to the background, and manually.
 - **Modes:** two-way sync, backup only (upload; never changes your files, and when the repository also changed a file its version is saved next to yours as a conflict copy) or pull only (read-only copy).
-- **Scope:** gitignore-style exclude patterns (`*`, `**`, `?`, `/` to anchor, `!` to re-include; the last matching pattern wins; brackets are literal) and a maximum file size. Files outside scope are never touched on either side.
+- **Scope:** gitignore-style exclude patterns (`*`, `**`, `?`, `/` to anchor, `!` to re-include; the last matching pattern wins; brackets are literal) and a maximum file size. Files outside scope are never touched on either side. With *Show sync status in the file explorer* on, files and folders that don't sync are greyed out (tooltip *Not synced*). The file menu has **Git: Exclude this file from sync** and, for anything your patterns leave out, **Git: Include in sync**; **Edit exclude patterns** (command) opens the patterns in a window.
+- **Leave out a note with `sync: false`:** a note whose properties (frontmatter) say `sync: false` stays on the device: it is never uploaded, and a copy already in the repository is kept as it is (not deleted, not downloaded over the local note). Other devices sync it as usual unless their copy says the same. On by default (*Respect sync: false in frontmatter*).
+- **Vault in a folder of the repository** (Settings → *Folder in the repository*, or the wizard's repository step): keeps the vault in, say, `vaults/personal/` of a monorepo or a repository shared by several vaults. Everything outside that folder is never downloaded, changed or deleted. Changing the folder starts a fresh comparison that deletes nothing, but files already at the new location are downloaded into the vault and the vault's files are uploaded there (the plugin asks first and warns when that folder already has files). With several vaults in one repository, give each its own folder: the folders must not be nested inside each other (`vaults/a/` and `vaults/a/b/`), and no vault may use the repository root while others use subfolders, or one vault would see the other's files as its own. Each vault in a folder keeps its own end-to-end encryption marker (`<folder>/.vault-sync/encryption.json`), so encrypting one vault doesn't affect the others.
 - **Settings folder, part by part:** turn on settings-folder sync, then choose appearance and themes, CSS snippets, hotkeys, core settings, which plugins are on, plugin code and plugin settings separately. **Choose per plugin** sets single plugins to code and settings, code only, settings only, or this device only, which is useful for plugins that store device-specific paths. Your exclude patterns still have the last word.
 - **Hidden files** (optional): files and folders at the top of the vault whose names start with a dot, such as `.github/` or `.editorconfig`. Turn on **Hidden files inside folders** to also include ones inside your notes folders (for example `Notes/.assets/`). Never `.git`, `.trash` or the settings folder.
 - **`.gitignore`** (optional): files listed in the vault's `.gitignore` files are not synced (a `.gitignore` inside a folder applies to that folder, as in Git), and the `.gitignore` files themselves sync to every device.
@@ -122,6 +124,10 @@ When a file changed on both sides, choose what happens: **merge automatically** 
 - One commit per sync. Commits carry a `Device:` line, so you can see which device made each change.
 - **Version history** of any file from the file menu (**Git: Version history**, next to Obsidian Sync's own *Open version history*), with **Compare with current**.
 - **Timeline:** browse every sync and snapshot, and restore the whole vault or a single folder to an earlier point. Restores are new commits, so history is never rewritten and a restore can be undone the same way.
+- **Sync history sidebar** (ribbon or **Open sync history**): every sync with its date, device and author, and its changed files (added, modified, deleted, renamed; encrypted names shown decrypted). Click a file for its diff, restore a single file, browse the files at that point or restore a folder or the whole vault. Filter by path, load older syncs, works with keyboard and on mobile.
+- **Use the repository version** of one file (in *Compare with repository*, the status panel's list of edited files, the file menu and a command): replaces the file on this device with the repository's latest version. The version on this device goes to the trash first, and the next sync uploads nothing for that file.
+- **Changes since the last sync in the editor:** lines added, changed or deleted since the last sync are marked next to the text (desktop and mobile). Click or tap a mark to see the last-synced text and **Revert** it; or use **Revert this change**, **Go to next change** and **Go to previous change**. The last-synced text is read once per version and kept in memory, decrypted on the device; files over 1 MB and binary files get no marks. Turn it off under *Settings → Sync behaviour*.
+- **Who last changed this line:** walks the file's last 30 versions on the device (so it works with encryption) and shows the date, device and commit of the last change to the line under the cursor, with a button to open that version. Also in the change popover, for the line as it was at the last sync.
 - **Recover deleted files**, plus daily or manual snapshot tags.
 - **Make this device match the repository** discards unsynced local changes. Replaced and removed files go to the trash first.
 
@@ -205,7 +211,23 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 - **Names Windows can't store** (such as `a:b.md`) are listed in the status panel; a Windows device skips them instead of failing.
 - **Plugin versions**: commits record the plugin version, and the status panel warns when devices run different versions.
 - **Copy diagnostics** for a bug report, with tokens hidden.
-- Commit author name and email, custom API URL for GitHub Enterprise and self-hosted servers, commit message template, and device names (shown in commits and on conflict copies).
+- **Commit messages:** a template with `{{device}}`, `{{summary}}`, `{{count}}`, `{{files}}` (the changed paths, the first 10 then "and N more"), `{{trigger}}` (`manual`, `startup`, `change`, `interval`, `resume`, `background`, `open` or `close`), `{{date}}` (ISO time) and `{{date:YYYY-MM-DD HH:mm}}` (any moment.js format), with a live preview in settings. An optional second template is used for automatic syncs. **Sync with a custom message…** asks for the message of one sync.
+- **Sync and close Obsidian** (desktop command): syncs, then closes Obsidian only if that sync succeeded. When a desktop window is closed without it, the plugin starts a last upload of pending edits, but the window can't wait for it to finish (see *Limits*).
+- **Status bar extras** (desktop, optional): time until the next scheduled sync ("in 4 min") and the branch name, refreshed every 30 seconds.
+- Commit author name and email, custom API URL for GitHub Enterprise and self-hosted servers, and device names (shown in commits and on conflict copies).
+
+### For other plugins
+
+The plugin triggers two workspace events that other plugins (or scripts such as Templater) can listen to:
+
+```js
+app.workspace.on("vault-sync-git:sync-start", ({ trigger, mode }) => { /* a sync started */ });
+app.workspace.on("vault-sync-git:sync-done", (summary) => {
+	// summary: { trigger, mode, upToDate, uploaded, downloaded, deleted, conflicts, error? }
+});
+```
+
+Counts are numbers of files in the main repository's sync; `error` is set when the sync failed or was cancelled (or the first file error). A listener that throws doesn't affect the sync.
 
 ## Commands
 
@@ -225,7 +247,11 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 | Make this device match the repository (discard local changes) | Reset this device |
 | Create backup snapshot | Tag the current state |
 | Show history of current file | Version history |
+| Revert this change / Go to next change / Go to previous change (since the last sync) | Work with the change marks in the editor |
+| Show who last changed this line | Date, device and commit of the last change to the line under the cursor |
 | Compare current file with the repository | Diff against the repository's latest version |
+| Use the repository version of this file | Replace the open note with the repository's latest version (the local one goes to the trash) |
+| Open sync history | Sidebar of recent syncs with their changed files, diffs and restore |
 | Recover deleted files | Restore files deleted in earlier syncs |
 | Show sync log | Recent sync activity |
 | Open repository in browser | Open the repository on your host |
@@ -234,6 +260,9 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 | Make the repository match this device | One forward commit that sets the repository to this device's files |
 | Copy diagnostics (for a bug report) | Versions, settings and recent log, with tokens hidden |
 | Sync current file now | Sync only the open note |
+| Sync with a custom message… | Sync once with a commit message you type |
+| Sync and close Obsidian | Sync, then close Obsidian if the sync succeeded (desktop) |
+| Edit exclude patterns | Edit the exclude patterns in a window |
 | Add another device (setup link) | Show a QR code and setup link for a new device |
 
 ## Requirements
@@ -298,6 +327,9 @@ This section covers the disclosures Obsidian's developer policies require.
 - GitHub-friendly Markdown doesn't rewrite links relative to the note's folder, and doesn't convert callouts nested inside other quotes.
 - GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0, but stay marked beta until they have more real-world use. Phones haven't been tested on real devices yet. Reports from real servers and phones are welcome.
 - Conflicts as pull requests are available for shared folders. Empty folders aren't kept while end-to-end encryption is on.
+- Closing a desktop window starts a last upload of pending edits, but a closing window can't wait for network requests, so a large or slow upload may not finish; the edits then simply sync next time. Use **Sync and close Obsidian** to be sure.
+- With the vault in a folder of the repository, empty folders aren't kept, and the end-to-end encryption marker (`.vault-sync/encryption.json` at the repository root) applies to the whole repository. The setup wizard's file count covers the whole repository.
+- `sync: false` is read from Obsidian's metadata cache; a note Obsidian hasn't indexed yet waits for the next sync instead of being uploaded.
 - On Windows, a note renamed elsewhere to a name Windows can't store (such as `a:b.md`) is kept under its old name here, and the status panel lists the name to fix.
 
 ## Development

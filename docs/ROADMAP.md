@@ -111,16 +111,9 @@ Shipped in 1.5 from the 1.4 list: translated sync errors (4), lighter `.gitignor
 2. **Drop "beta"** for GitLab, Gitea / Forgejo and Bitbucket once real-world reports confirm the live-suite results.
 3. **Native-speaker review** of the seven translations (including the new error messages).
 
-### From comparing with Obsidian Git (see docs/RESEARCH.md)
+### Status after 1.6.0 (2026-10-13)
 
-4. **Change markers in the editor** for lines changed since the last sync, with "revert this change" and next/previous change (works on mobile; Obsidian Git's is desktop-only).
-5. **History sidebar:** every sync as a commit with its changed files and diffs, device and author, with restore from there.
-6. **Per-file "use the repository version"** in Compare and the status panel (today only the whole vault can be reset).
-7. **Commit message upgrades:** date format, `{{files}}`, `{{trigger}}` (automatic or manual), a "Sync with message…" command and a preview.
-8. **"Sync and close Obsidian"** command, and a check that the sync on leaving the app finishes when a desktop window closes.
-9. **Excluded files greyed out** in the file explorer, plus "Git: Exclude this file" and an "Edit exclude patterns" command.
-10. **Vault in a subfolder of the repository** (monorepos, several vaults in one repository), reusing the shared-folder subfolder mapping.
-11. **Status bar:** optional next-sync countdown and branch name.
-12. **Line authoring:** "last changed by device X on date Y", built on the device from history so it also works with encryption.
-13. **Sync events for other plugins** and leaving out notes by frontmatter (`sync: false`).
+Shipped in 1.6 from the Obsidian Git comparison: change markers in the editor (4), history sidebar (5), per-file "use the repository version" (6), commit message upgrades (7), sync and close (8), excluded files greyed out with exclude/include in the file menu (9), vault in a folder of the repository (10), status bar countdown and branch (11), line authoring (12), sync events and `sync: false` (13).
+
+Next after 1.6: the three items above (real phones, dropping "beta", native-speaker review), plus host-side line authoring for shared folders and following renames back through history.
 

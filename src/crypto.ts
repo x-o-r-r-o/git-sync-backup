@@ -15,6 +15,37 @@ import { t as tr } from "./i18n.ts";
 import { SyncError } from "./errors.ts";
 
 export const MARKER_PATH = ".vault-sync/encryption.json";
+
+/**
+ * Where a vault's encryption marker lives: inside its folder of the repository when it has one, so
+ * several vaults sharing a repository each have their own (encrypting one never affects the others).
+ */
+export function markerPathFor(repoSubdir: string): string {
+	const sub = repoSubdir.replace(/^\/+|\/+$/g, "");
+	return sub ? `${sub}/${MARKER_PATH}` : MARKER_PATH;
+}
+
+/**
+ * The marker that applies to a vault, from a repository listing. A vault in a folder uses its own copy;
+ * without one, the root copy written by older versions is used for migration only, and only when this
+ * vault is encrypted (this device holds its key, or its folder holds encrypted names): a root marker
+ * left by another vault in the same repository never locks this one. `legacy` = the root copy was used.
+ */
+export function pickMarker(entries: Iterable<{ path: string; sha: string }>, repoSubdir: string, keyHere: boolean): { sha: string | null; legacy: boolean } {
+	const own = markerPathFor(repoSubdir);
+	const sub = repoSubdir.replace(/^\/+|\/+$/g, "");
+	let mine: string | null = null;
+	let root: string | null = null;
+	let encryptedNames = false;
+	for (const e of entries) {
+		if (e.path === own) mine = e.sha;
+		else if (sub && e.path === MARKER_PATH) root = e.sha;
+		else if (sub && e.path.startsWith(`${sub}/e/`)) encryptedNames = true;
+	}
+	if (mine || !sub) return { sha: mine, legacy: false };
+	if (root && (keyHere || encryptedNames)) return { sha: root, legacy: true };
+	return { sha: null, legacy: false };
+}
 const MAGIC = new Uint8Array([0x56, 0x53, 0x47, 0x31]); // "VSG1"
 const ITERATIONS = 600_000;
 const CHECK_TEXT = "vault-sync-check";

@@ -215,3 +215,31 @@ export function friendlyError(err: unknown, host = t("err.someHost")): FriendlyE
 	return { title: t("h.failed"), hint: shown, action: "retry" };
 }
 
+
+/** How the last sync ended as a whole: the main repository, shared folders and the backup mirror. */
+export interface SyncOutcome {
+	/** Increases with every finished sync, so a caller can tell its own sync from an earlier one. */
+	seq: number;
+	ok: boolean;
+	/** Translated reasons when not everything synced. */
+	problems: string[];
+}
+
+/** Why a finished sync didn't fully succeed (translated); empty when everything synced. */
+export function syncProblems(o: { errors: string[]; sharedErrors: string[]; mirrorError: string | null }): string[] {
+	const out: string[] = [];
+	if (o.errors.length) out.push(t("m.syncFileErrors", { count: o.errors.length, first: o.errors[0] ?? "" }));
+	if (o.sharedErrors.length) out.push(`${t("m.sharedFailed")} ${o.sharedErrors.join("; ")}`);
+	if (o.mirrorError) out.push(t("m.mirrorFailed", { error: o.mirrorError }));
+	return out;
+}
+
+/**
+ * "Sync and close": quit only when the sync started after `beforeSeq` finished and everything synced
+ * (main repository, shared folders, backup mirror, every file). Otherwise the message to show.
+ */
+export function closeVerdict(beforeSeq: number, outcome: SyncOutcome | null, lastError: string | null): { quit: true } | { quit: false; message: string } {
+	if (!outcome || outcome.seq <= beforeSeq) return { quit: false, message: lastError ? t("m.closeFailed", { error: lastError }) : t("m.closeNotSynced") };
+	if (!outcome.ok) return { quit: false, message: outcome.problems.length ? t("m.closeIncomplete", { reasons: outcome.problems.join("\n") }) : t("m.closeNotSynced") };
+	return { quit: true };
+}

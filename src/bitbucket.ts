@@ -494,18 +494,35 @@ export class Bitbucket implements Remote {
 		return "diverged";
 	}
 
-	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
+	/** `next` links of commit list pages already fetched (Bitbucket's page tokens are opaque): list key → URL. */
+	private commitPages = new Map<string, string>();
+	async listCommits(branch: string, path?: string, perPage = 30, page = 1): Promise<CommitInfo[]> {
+		const key = (n: number) => `${this.base}${this.repoPath}\0${branch}\0${path ?? ""}\0${perPage}\0${n}`;
 		const q = new URLSearchParams({ pagelen: String(perPage) });
 		if (path) q.set("path", path);
-		const page = await this.json<BbPage<BbCommit>>("GET", `${this.repoPath}/commits/${encodeURIComponent(branch)}?${q.toString()}`);
-		return (page.values ?? []).map((c) => ({ sha: c.hash, message: c.message ?? "", date: c.date ?? "", author: c.author?.user?.display_name ?? c.author?.raw ?? "" }));
+		// Page n follows the `next` link of page n-1 when that page was fetched; else the page number.
+		let url = page > 1 ? this.commitPages.get(key(page)) : undefined;
+		if (!url) {
+			if (page > 1) q.set("page", String(page));
+			url = `${this.repoPath}/commits/${encodeURIComponent(branch)}?${q.toString()}`;
+		}
+		const res = await this.json<BbPage<BbCommit>>("GET", url);
+		if (res.next) {
+			if (this.commitPages.size > 200) this.commitPages.clear();
+			this.commitPages.set(key(page + 1), res.next);
+		}
+		return (res.values ?? []).map((c) => ({ sha: c.hash, message: c.message ?? "", date: c.date ?? "", author: c.author?.user?.display_name ?? c.author?.raw ?? "" }));
 	}
 	async getCommitFiles(sha: string) {
 		const c = await this.json<BbCommit>("GET", `${this.repoPath}/commit/${sha}`);
 		const stats = await this.pages<BbDiffstat>(`${this.repoPath}/diffstat/${sha}?pagelen=500`, 20);
 		return {
 			parent: c.parents?.[0]?.hash ?? null,
-			files: stats.map((d) => ({ filename: d.new?.path ?? d.old?.path ?? "", status: d.status === "removed" ? "removed" : d.status === "added" ? "added" : "modified" })),
+			files: stats.map((d) =>
+				d.status === "renamed" && d.new?.path && d.old?.path
+					? { filename: d.new.path, status: "renamed", previous: d.old.path }
+					: { filename: d.new?.path ?? d.old?.path ?? "", status: d.status === "removed" ? "removed" : d.status === "added" ? "added" : "modified" },
+			),
 		};
 	}
 	getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {

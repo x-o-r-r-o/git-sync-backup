@@ -24,6 +24,8 @@ export interface SetupPayload {
 	useGitignore?: boolean;
 	/** The exclude patterns, only when they differ from the defaults. */
 	exclude?: string;
+	/** Folder of the repository the vault lives in, only when set. */
+	subdir?: string;
 	/** Access token encrypted with the one-time code (AES-GCM, key from PBKDF2-SHA256). */
 	token?: { salt: string; iv: string; ct: string };
 }
@@ -96,6 +98,8 @@ export function parseSetupPayload(s: string | undefined): SetupPayload | null {
 	if (raw.configSync && typeof raw.configSync === "object") out.configSync = normalizeConfigSync(raw.configSync);
 	const exclude = str(raw.exclude, 10000);
 	if (exclude !== null) out.exclude = exclude;
+	const subdir = str(raw.subdir, 500);
+	if (subdir) out.subdir = subdir;
 	const t = raw.token as Record<string, unknown> | undefined;
 	if (t && str(t.salt) && str(t.iv) && str(t.ct, 4000)) out.token = { salt: t.salt as string, iv: t.iv as string, ct: t.ct as string };
 	return out;

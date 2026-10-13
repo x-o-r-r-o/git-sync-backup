@@ -54,6 +54,16 @@ export interface VaultSyncSettings {
 	dailySnapshot: boolean;
 
 	commitTemplate: string;
+	/** Template for automatic syncs (empty = the same as commitTemplate). */
+	commitTemplateAuto: string;
+	/** Folder of the repository the vault lives in ("" = the repository root). */
+	repoSubdir: string;
+	/** Status bar (desktop): time until the next scheduled sync. */
+	statusCountdown: boolean;
+	/** Status bar (desktop): the branch this vault syncs with. */
+	statusBranch: boolean;
+	/** Notes with `sync: false` in their frontmatter are never uploaded from this device. */
+	respectFrontmatter: boolean;
 	/** Commit author (empty = the host's default identity for the token). */
 	authorName: string;
 	authorEmail: string;
@@ -66,6 +76,8 @@ export interface VaultSyncSettings {
 	syncOnOpen: boolean;
 	/** Mark files in the file explorer: edited since the last sync, conflict copies. */
 	explorerBadges: boolean;
+	/** Mark lines changed since the last sync in the editor gutter. */
+	changeMarkers: boolean;
 	wizardShown: boolean;
 	/** Folders synced to their own repositories (e.g. a team folder). No secrets in here. */
 	sharedFolders: SharedFolder[];
@@ -145,6 +157,11 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	dailySnapshot: false,
 
 	commitTemplate: "{{device}}: {{summary}}",
+	commitTemplateAuto: "",
+	repoSubdir: "",
+	statusCountdown: false,
+	statusBranch: false,
+	respectFrontmatter: true,
 	authorName: "",
 	authorEmail: "",
 	keepEmptyFolders: true,
@@ -152,6 +169,7 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	noticeLevel: "auto",
 	syncOnOpen: false,
 	explorerBadges: true,
+	changeMarkers: true,
 	wizardShown: false,
 	sharedFolders: [],
 };
@@ -240,4 +258,17 @@ export interface SyncOptions {
 	only?: Set<string>;
 	/** First sync only (no baseline): which side wins when a file differs. Default: keep both. */
 	firstSyncPrefer?: "local" | "remote";
+}
+
+/** Passed with the `vault-sync-git:sync-done` workspace event (other plugins can listen to it). */
+export interface SyncEventSummary {
+	trigger: string;
+	mode: SyncMode;
+	upToDate: boolean;
+	uploaded: number;
+	downloaded: number;
+	deleted: number;
+	conflicts: number;
+	/** Set when the sync failed (or was cancelled). */
+	error?: string;
 }

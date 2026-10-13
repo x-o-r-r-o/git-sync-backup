@@ -17,7 +17,7 @@ interface GlProject { visibility?: string; default_branch?: string; web_url: str
 interface GlBranch { name?: string; commit?: { id?: string } }
 interface GlTreeItem { path: string; mode: string; type: "blob" | "tree" | "commit"; id: string }
 interface GlCommit { id: string; message?: string; title?: string; authored_date?: string; created_at?: string; author_name?: string; parent_ids?: string[] }
-interface GlDiff { new_path: string; old_path: string; new_file?: boolean; deleted_file?: boolean }
+interface GlDiff { new_path: string; old_path: string; new_file?: boolean; deleted_file?: boolean; renamed_file?: boolean }
 interface GlTag { name: string; commit?: { id: string } }
 
 /** Minimal JSON store (the plugin's per-repository cache file). */
@@ -319,8 +319,9 @@ export class GitLab implements Remote {
 		return "diverged";
 	}
 
-	async listCommits(branch: string, path?: string, perPage = 30): Promise<CommitInfo[]> {
+	async listCommits(branch: string, path?: string, perPage = 30, page = 1): Promise<CommitInfo[]> {
 		const q = new URLSearchParams({ ref_name: branch, per_page: String(perPage) });
+		if (page > 1) q.set("page", String(page));
 		if (path) q.set("path", path);
 		const list = await this.json<GlCommit[]>("GET", `${this.project}/repository/commits?${q.toString()}`);
 		return list.map((c) => ({ sha: c.id, message: c.message ?? c.title ?? "", date: c.authored_date ?? c.created_at ?? "", author: c.author_name ?? "" }));
@@ -336,7 +337,7 @@ export class GitLab implements Remote {
 			const next = header(res, "x-next-page");
 			if (!list.length || (next !== undefined ? !next : list.length < 100)) break;
 		}
-		return { parent: c.parent_ids?.[0] ?? null, files: diff.map((d) => ({ filename: d.deleted_file ? d.old_path : d.new_path, status: d.deleted_file ? "removed" : d.new_file ? "added" : "modified" })) };
+		return { parent: c.parent_ids?.[0] ?? null, files: diff.map((d) => (d.renamed_file && !d.deleted_file && !d.new_file ? { filename: d.new_path, status: "renamed", previous: d.old_path } : { filename: d.deleted_file ? d.old_path : d.new_path, status: d.deleted_file ? "removed" : d.new_file ? "added" : "modified" })) };
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
 		const res = await this.request("GET", `${this.project}/repository/files/${this.file(path)}/raw?ref=${encodeURIComponent(ref)}`, undefined, { accept: "*/*", okStatuses: [404] });

@@ -12,6 +12,8 @@ import { t } from "./i18n.ts";
 import { DeviceSignInModal } from "./ghapp-ui.ts";
 import { GITLAB_APP } from "./gitlabapp.ts";
 import type { PluginSyncMode } from "./scope-config.ts";
+import { normalizeSubdir } from "./codec.ts";
+import { previewCommitMessage } from "./commit-template.ts";
 
 /** Runs `fn` when the field is committed (blur or Enter) instead of on every keystroke. */
 function onCommit(c: TextComponent, fn: (v: string) => Promise<void>): TextComponent {
@@ -157,14 +159,15 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		/** GitHub refuses files over 100 MB without large file storage; other hosts (or LFS) allow up to 2000 MB here. */
 		const maxSizeCap = () => ((s.provider ?? "github") === "github" && !(s.lfsThresholdMB > 0) ? 100 : 2000);
 
-		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges" | "keepEmptyFolders" | "syncHiddenNested";
+		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges" | "keepEmptyFolders" | "syncHiddenNested" | "respectFrontmatter" | "statusCountdown" | "statusBranch";
 		const toggle = (key: ToggleKey, reschedule = false, redraw = false) => (st: Setting): unknown =>
 			st.addToggle((c) =>
 				c.setValue(s[key]).onChange(async (v) => {
 					s[key] = v;
 					await save();
 					if (reschedule) p.rescheduleTriggers();
-					if (key === "explorerBadges") p.refreshBadges();
+					if (key === "explorerBadges" || key === "respectFrontmatter") p.refreshBadges();
+					if (key === "statusCountdown" || key === "statusBranch") p.updateStatusExtras();
 					if (redraw) this.refresh();
 				}),
 			);
@@ -381,6 +384,38 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 								),
 					},
 					{
+						name: t("s.repoSubdir"),
+						desc: t("s.repoSubdirDesc"),
+						render: (st) =>
+							st.addText((c) => {
+								c.setPlaceholder("Vaults/personal");
+								onCommit(c.setValue(s.repoSubdir ?? ""), async (v) => {
+									const next = normalizeSubdir(v);
+									c.setValue(next);
+									if (next === normalizeSubdir(s.repoSubdir)) return;
+									if (p.isSyncing()) {
+										c.setValue(s.repoSubdir ?? "");
+										return void new Notice(t("notice.busy"));
+									}
+									// Once this vault has synced, moving it to another folder of the repository starts a fresh
+									// comparison there: say what that does, and warn when that folder already holds files.
+									if (p.isConfigured() && p.state.lastSync > 0) {
+										const count = await p.repoFolderFileCount(next);
+										const where = next || t("s.subdirRoot");
+										const intro = [t("s.subdirChangeBody", { folder: where }), count === null ? t("s.subdirMaybeFiles") : count > 0 ? t("s.subdirHasFiles", { count }) : ""].filter(Boolean).join(" ");
+										const ok = await confirmPlan(this.app, t("s.subdirChangeTitle"), intro, [], t("s.subdirChangeConfirm"), !!count);
+										if (!ok) return void c.setValue(s.repoSubdir ?? "");
+										if (p.isSyncing()) {
+											c.setValue(s.repoSubdir ?? "");
+											return void new Notice(t("notice.busy"));
+										}
+									}
+									s.repoSubdir = next;
+									await save();
+								});
+							}),
+					},
+					{
 						name: t("s.check"),
 						desc: t("s.checkDesc"),
 						render: (st) =>
@@ -507,6 +542,18 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{ name: t("s.onBackground"), desc: t("s.onBackgroundDesc"), render: toggle("syncOnBackground", true) },
 					{ name: t("s.onOpen"), desc: t("s.onOpenDesc"), render: toggle("syncOnOpen") },
 					{ name: t("s.badges"), desc: t("s.badgesDesc"), render: toggle("explorerBadges") },
+					{
+						name: t("s.changeMarkers"),
+						desc: t("s.changeMarkersDesc"),
+						render: (st) =>
+							st.addToggle((c) =>
+								c.setValue(s.changeMarkers).onChange(async (v) => {
+									s.changeMarkers = v;
+									await save();
+									p.changeMarkers?.setEnabled(v);
+								}),
+							),
+					},
 				],
 			},
 			{
@@ -533,6 +580,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 								});
 							}),
 					},
+					{ name: t("s.frontmatter"), desc: t("s.frontmatterDesc"), render: toggle("respectFrontmatter") },
 					{
 						name: t("s.maxSize"),
 						desc: t("s.maxSizeDesc"),
@@ -786,14 +834,39 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.commitMsg"),
 						desc: t("s.commitMsgDesc"),
-						render: (st) =>
-							st.addText((c) =>
+						render: (st) => {
+							const preview = st.descEl.createDiv({ cls: "vsg-muted" });
+							const show = (v: string) => preview.setText(t("s.commitPreview", { msg: previewCommitMessage(v, p.deviceName()) }));
+							show(s.commitTemplate);
+							st.addText((c) => {
+								c.inputEl.addEventListener("input", () => show(c.getValue()));
 								onCommit(c.setValue(s.commitTemplate), async (v) => {
 									s.commitTemplate = v.trim() || "{{device}}: {{summary}}";
 									c.setValue(s.commitTemplate);
+									show(s.commitTemplate);
 									await save();
-								}),
-							),
+								});
+							});
+						},
+					},
+					{
+						name: t("s.commitMsgAuto"),
+						desc: t("s.commitMsgAutoDesc"),
+						render: (st) => {
+							const preview = st.descEl.createDiv({ cls: "vsg-muted" });
+							const show = (v: string) => preview.setText(t("s.commitPreview", { msg: previewCommitMessage(v.trim() || s.commitTemplate, p.deviceName(), "interval") }));
+							show(s.commitTemplateAuto ?? "");
+							st.addText((c) => {
+								c.setPlaceholder(s.commitTemplate);
+								c.inputEl.addEventListener("input", () => show(c.getValue()));
+								onCommit(c.setValue(s.commitTemplateAuto ?? ""), async (v) => {
+									s.commitTemplateAuto = v.trim();
+									c.setValue(s.commitTemplateAuto);
+									show(s.commitTemplateAuto);
+									await save();
+								});
+							});
+						},
 					},
 					{
 						name: t("s.author"),
@@ -836,6 +909,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 									}),
 							),
 					},
+					...(Platform.isMobile
+						? []
+						: [
+								{ name: t("s.statusCountdown"), desc: t("s.statusCountdownDesc"), render: toggle("statusCountdown") },
+								{ name: t("s.statusBranch"), desc: t("s.statusBranchDesc"), render: toggle("statusBranch") },
+							]),
 					{
 						name: t("s.resetState"),
 						desc: t("s.resetStateDesc"),

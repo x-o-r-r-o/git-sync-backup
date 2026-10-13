@@ -3,6 +3,9 @@ import { HOSTS, makeRemote } from "./hosts.ts";
 import type { Remote } from "./remote.ts";
 import type { BlobCache, BlobCacheStore } from "./bitbucket.ts";
 import { HEALTH_VIEW, HealthView } from "./health.ts";
+import { HISTORY_VIEW, HistoryView } from "./history-view.ts";
+import type { HistoryHost } from "./history-view.ts";
+import { decodeCommitFiles, HISTORY_PAGE, parentPathOf, replaceWithRepositoryVersion } from "./history.ts";
 import { nestedHiddenIndex, VaultIO } from "./io.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { VaultSyncSettingTab } from "./settings-tab.ts";
@@ -12,14 +15,16 @@ import { SetupWizard } from "./wizard.ts";
 import { readState, writeState } from "./statefile.ts";
 import { SharedFolderHost, sharedFolderPattern } from "./shared.ts";
 import type { HostKind } from "./hosts.ts";
-import { Codec } from "./codec.ts";
+import { Codec, normalizeSubdir, RepoSubdirLayer, vaultCommitsPath } from "./codec.ts";
+import type { Layer } from "./codec.ts";
 import { b64, EncryptionLayer, unb64 } from "./crypto.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import { encryptionGuard } from "./encryption.ts";
-import { LfsLayer, lfsPatternsFrom } from "./lfs.ts";
+import { LfsLayer, lfsPatternsForSubdir, lfsPatternsFrom } from "./lfs.ts";
 import type { EncryptionRecord } from "./encryption.ts";
 import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import { DEFAULT_SETTINGS, emptyState } from "./types.ts";
+import type { SyncEventSummary } from "./types.ts";
 import type {
 	ConflictChoice,
 	ConflictInfo,
@@ -63,21 +68,24 @@ import type { SignInFlow } from "./ghapp-ui.ts";
 import type { AppConfig, AppTokens } from "./ghapp.ts";
 import { webBase } from "./auth.ts";
 import { normalizeConfigSync } from "./scope-config.ts";
-import { scopeGitignore } from "./glob.ts";
+import { compileGlobs, scopeGitignore } from "./glob.ts";
 import { ExplorerBadges } from "./explorer.ts";
+import { addScopeMenuItems, emitSyncEvent, frontmatterScope, installSyncExtras, SYNC_DONE_EVENT, SYNC_START_EVENT } from "./sync-extras.ts";
 import { parseSetupPayload, SETUP_ACTION } from "./setuplink.ts";
 import type { SetupPayload } from "./setuplink.ts";
 import { ApplySetupLinkModal, CreateSetupLinkModal } from "./setuplink-ui.ts";
 import { detectOtherSync } from "./othersync.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
 import { conflictResolver } from "./conflict-editor.ts";
+import { ChangeMarkers } from "./change-markers.ts";
 import { MirrorHost } from "./mirror.ts";
 import { dropRemovedHosts, isKnownProvider, mainSyncBlocked, removedHostNotice, syncableMirror, syncableSharedFolders } from "./removed-hosts.ts";
 import { fetchRegistry, findPluginNeeds, installPlugin, obsidianFetch } from "./pluginsync.ts";
-import { localizeError, skippedLines } from "./errors.ts";
+import { localizeError, skippedLines, syncProblems } from "./errors.ts";
+import type { SyncOutcome } from "./errors.ts";
 import { asText, conflictCopyOriginal, errMsg, portableNameProblem, redactSecrets, restoredCopyPath, sleep, stamp, tokenLooksLike, urlHost } from "./util.ts";
 
-type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background" | "open";
+type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background" | "open" | "close";
 type Status = "idle" | "syncing" | "ok" | "error" | "offline" | "conflict" | "paused";
 
 export default class VaultSyncPlugin extends Plugin implements SyncHost {
@@ -89,6 +97,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private expiredNoticeShown = false;
 	private lastOpenSync = 0;
 	private badges: ExplorerBadges | null = null;
+	/** Editor marks for lines changed since the last sync. */
+	changeMarkers: ChangeMarkers | null = null;
 	refreshBadges: () => void = () => {};
 	lastReport: SyncReport | null = null;
 	private encLayer: EncryptionLayer | null = null;
@@ -97,6 +107,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	onProgress: ((text: string) => void) | null = null;
 	/** English message of the last failure (log and diagnostics); see lastErrorCause for display. */
 	lastError: string | null = null;
+	/** How the last finished sync ended as a whole (main repository, shared folders, mirror, files). */
+	syncOutcome: SyncOutcome | null = null;
+	private syncOutcomeSeq = 0;
 	/** The error behind lastError, for translated display (status panel). */
 	lastErrorCause: unknown = null;
 	lastErrorAt = 0;
@@ -140,6 +153,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		await this.loadEncryption();
 
 		this.registerView(HEALTH_VIEW, (leaf) => new HealthView(leaf, this));
+		this.registerView(HISTORY_VIEW, (leaf) => new HistoryView(leaf, this.historyHost()));
 		// Reading view: offer to download embeds whose file wasn't downloaded to this device.
 		this.registerMarkdownPostProcessor((el, ctx) => {
 			if (!Object.keys(this.state.remoteOnly ?? {}).length) return;
@@ -156,6 +170,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		});
 		this.ribbonEl = this.addRibbonIcon("refresh-cw", t("ribbon.sync"), () => this.sync("manual"));
 		this.addRibbonIcon("activity", t("ribbon.status"), () => this.openHealth());
+		this.addRibbonIcon("history", t("ribbon.history"), () => void this.openHistory());
 		if (!Platform.isMobile) {
 			this.statusEl = this.addStatusBarItem();
 			this.statusEl.addClass("vsg-status");
@@ -166,15 +181,20 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.addSettingTab(this.settingTab);
 		this.register(() => this.clearPauseTimer());
 		this.registerCommands();
+		this.updateStatusExtras = installSyncExtras(this).updateStatus;
 
 		// Conflict blocks written by "merge with markers" get keep-this/keep-that buttons in the editor.
 		this.registerEditorExtension(conflictResolver({ ours: t("ce.ours"), theirs: t("ce.theirs"), both: t("ce.both"), hint: t("ce.hint") }));
+		// Lines changed since the last sync, marked in the editor (revert, next/previous, line history).
+		this.changeMarkers = this.createChangeMarkers();
+		this.registerEditorExtension(this.changeMarkers.extensions);
+		this.changeMarkers.addCommands(this);
 		this.registerObsidianProtocolHandler(SETUP_ACTION, (params) => {
 			const payload = parseSetupPayload(params.s);
 			if (!payload) return void new Notice(t("link.invalid"));
 			new ApplySetupLinkModal(this.app, this, payload).open();
 		});
-		this.badges = new ExplorerBadges(this.app, () => this.pendingLocalPaths(), () => this.settings.explorerBadges && this.isConfigured());
+		this.badges = new ExplorerBadges(this.app, () => this.pendingLocalPaths(), () => this.settings.explorerBadges && this.isConfigured(), () => this.syncedPathTest(), () => this.explorerScopeKey());
 		this.badgeTimer = debounce(() => {
 			if (!this.unloaded) this.badges?.refresh();
 		}, 1500, true);
@@ -212,6 +232,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			};
 			this.registerEvent(this.app.vault.on("create", onFolder));
 			this.registerEvent(this.app.vault.on("rename", onFolder));
+			// Files appearing, disappearing or moving can change which rows the explorer greys out.
+			const shapeChanged = () => void this.vaultShapeGen++;
+			this.registerEvent(this.app.vault.on("create", shapeChanged));
+			this.registerEvent(this.app.vault.on("delete", shapeChanged));
+			this.registerEvent(this.app.vault.on("rename", shapeChanged));
 			this.rescheduleTriggers();
 			if (!this.isConfigured() && !this.settings.wizardShown) {
 				this.settings.wizardShown = true;
@@ -248,6 +273,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.pendingTimer?.cancel();
 		this.badges?.destroy();
 		this.badges = null;
+		this.changeMarkers?.destroy();
 		this.onChangeDebounced?.cancel();
 	}
 	isUnloaded(): boolean {
@@ -336,10 +362,20 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (text === null && this.isConfigured() && !this.isEncrypted()) {
 				// The repository's copy, read once per head (not on every sync).
 				const head = this.state.head;
-				if (head && this.gitattributesHead === head) return;
-				const data = head ? await this.gh.getFileAt(".gitattributes", head) : null;
-				text = data ? new TextDecoder().decode(data) : "";
-				this.gitattributesHead = head;
+				const sub = normalizeSubdir(this.settings.repoSubdir);
+				const key = head ? `${sub}#${head}` : null;
+				if (key && this.gitattributesHead === key) return;
+				const read = async (p: string) => {
+					const data = head ? await this.gh.getFileAt(p, head) : null;
+					return data ? new TextDecoder().decode(data) : "";
+				};
+				// A vault in a folder of the repository: the root file's anchored patterns are relative to the
+				// repository root (matched here against vault paths), and the folder's own file applies too.
+				const patterns = lfsPatternsForSubdir(lfsPatternsFrom(await read(".gitattributes")), sub);
+				if (sub) patterns.push(...lfsPatternsFrom(await read(`${sub}/.gitattributes`)));
+				this.gitattributesHead = key;
+				this.lfsPatterns = patterns;
+				return;
 			}
 			// The engine rebuilds its layers from codec() on each run; the LFS fingerprint changes with the
 			// patterns, so cached hashes are recomputed once.
@@ -386,6 +422,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		// The settings object kept its identity; open views just redraw with the new values.
 		this.settingTab?.refreshIfOpen();
 		this.refreshHealth();
+		if (this.changeMarkers && (this.changeMarkers.extensions.length > 0) !== this.settings.changeMarkers) this.changeMarkers.setEnabled(this.settings.changeMarkers);
 	}
 
 	// ---------------- device-local secrets ----------------
@@ -1048,7 +1085,33 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	codec(): Codec {
 		// LFS is always present for reading pointers; it only uploads when a threshold is set.
 		const lfs = new LfsLayer(this.gh, (this.settings.lfsThresholdMB ?? 0) * 1024 * 1024, undefined, this.lfsPatterns);
-		return new Codec(this.encLayer ? [this.encLayer, lfs] : [lfs]);
+		const layers: Layer[] = this.encLayer ? [this.encLayer, lfs] : [lfs];
+		// The vault in a folder of the repository: last, so encrypted names go inside that folder.
+		const sub = normalizeSubdir(this.settings.repoSubdir);
+		if (sub) layers.push(new RepoSubdirLayer(sub));
+		return new Codec(layers);
+	}
+	/**
+	 * Number of files already in the repository at `subdir` ("" = the whole repository), for the warning
+	 * shown before changing "Folder in the repository". null when the repository can't be read.
+	 */
+	async repoFolderFileCount(subdir: string): Promise<number | null> {
+		try {
+			const head = await this.gh.getRef(this.settings.branch);
+			if (!head) return 0;
+			const sub = normalizeSubdir(subdir);
+			const prefix = sub ? sub + "/" : "";
+			let n = 0;
+			for (const e of await this.gh.listTree(await this.gh.getCommitTree(head))) {
+				if (e.type !== "blob" || !e.path.startsWith(prefix)) continue;
+				const rel = e.path.slice(prefix.length);
+				if (rel === ".gitattributes" || rel.startsWith(".vault-sync/")) continue;
+				n++;
+			}
+			return n;
+		} catch {
+			return null;
+		}
 	}
 	checkEncryption = (markerSha: string | null): Promise<string | null> =>
 		encryptionGuard(
@@ -1085,6 +1148,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (s.syncHidden !== undefined) this.settings.syncHidden = s.syncHidden;
 		if (s.useGitignore !== undefined) this.settings.useGitignore = s.useGitignore;
 		if (s.exclude !== undefined) this.settings.excludePatterns = s.exclude;
+		// Always set: a vault in a repository folder must not land at the root on the new device.
+		this.settings.repoSubdir = normalizeSubdir(s.subdir);
 		this.settings.wizardShown = true;
 		if (token) this.setToken(token);
 		await this.saveSettings();
@@ -1260,6 +1325,51 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return this.nextIntervalAt;
 	}
 
+	// ---------------- commit context, frontmatter scope, explorer scope ----------------
+
+	/** Redraws the status bar countdown and branch (desktop). */
+	updateStatusExtras: () => void = () => {};
+	private customCommitMessage: { text: string; at: number } | null = null;
+	private syncContext: { trigger: string; message: string | null } = { trigger: "manual", message: null };
+	/** The next manual sync uses this as its commit message ("Sync with a custom message…"). */
+	setCustomCommitMessage(text: string) {
+		this.customCommitMessage = { text, at: Date.now() };
+	}
+	commitContext(): { trigger: string; message: string | null } {
+		return this.syncContext;
+	}
+	private fmCache: { at: number; value: { out: Set<string>; unknown: Set<string> } } | null = null;
+	/** Notes marked `sync: false` (see sync-extras.ts); recomputed at most every 2 seconds. */
+	frontmatterScope(): { out: Set<string>; unknown: Set<string> } | null {
+		if (!this.settings.respectFrontmatter) return null;
+		if (!this.fmCache || Date.now() - this.fmCache.at > 2000) this.fmCache = { at: Date.now(), value: frontmatterScope(this.app) };
+		return this.fmCache.value;
+	}
+	/** Whether a vault path syncs on this device (the main repository or a shared folder). */
+	syncedPathTest(): (path: string) => boolean {
+		const main = this.engine.buildScope();
+		const shared = (this.settings.sharedFolders ?? []).filter((f) => f.enabled && f.folder).map((f) => f.folder.replace(/^\/+|\/+$/g, "") + "/");
+		if (!shared.length) return main;
+		const userExcluded = compileGlobs(this.settings.excludePatterns.split("\n").map((l) => l.split("{config}").join(this.app.vault.configDir)));
+		return (p: string) => main(p) || (shared.some((f) => p.startsWith(f)) && !userExcluded(p));
+	}
+	/** Counts files created, deleted or renamed (the explorer's greyed-out rows are cached against it). */
+	private vaultShapeGen = 0;
+	/** Everything the explorer's greyed-out rows depend on; they are recomputed only when this changes. */
+	private explorerScopeKey(): string {
+		const fm = this.frontmatterScope();
+		return [
+			this.vaultShapeGen,
+			JSON.stringify(this.settings),
+			JSON.stringify(this.deviceScope()),
+			this.gitignorePatterns().join("\n"),
+			fm ? `${[...fm.out].sort().join("\n")}\u0001${[...fm.unknown].sort().join("\n")}` : "",
+		].join("\u0000");
+	}
+	isPathSynced(path: string): boolean {
+		return this.syncedPathTest()(path);
+	}
+
 	// ---------------- logging / UI ----------------
 
 	log(msg: string) {
@@ -1373,6 +1483,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			const v = leaf.view;
 			if (v instanceof HealthView) v.refresh(withRemote);
 		}
+		// The history sidebar lists repository commits: only worth reloading when the repository may have changed.
+		if (withRemote) {
+			for (const leaf of this.app.workspace.getLeavesOfType(HISTORY_VIEW)) {
+				const v = leaf.view;
+				if (v instanceof HistoryView) v.refreshIfChanged();
+			}
+		}
 	}
 
 	askConflict(info: ConflictInfo): Promise<ConflictChoice> {
@@ -1417,13 +1534,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async sync(trigger: Trigger, mode: SyncMode = this.settings.mode, opts: SyncOptions = {}): Promise<void> {
 		if (this.unloaded) return;
-		if (trigger !== "manual" && this.isPaused()) return void this.setStatus("paused", t("m.pausedStatus"));
+		// "Sync and close" is asked for by the user: like a manual sync it runs while paused.
+		if (trigger !== "manual" && trigger !== "close" && this.isPaused()) return void this.setStatus("paused", t("m.pausedStatus"));
 		// Battery saver keeps only startup, returning to Obsidian and manual syncs.
 		if (this.batterySaver() && (trigger === "change" || trigger === "interval" || trigger === "open" || trigger === "background")) return;
 		if (this.usingSignIn() && navigator.onLine) await this.ensureFreshToken();
 		const problem = this.configProblem();
 		if (problem) {
-			if (trigger === "manual") new Notice(problem);
+			if (trigger === "manual" || trigger === "close") new Notice(problem);
 			return;
 		}
 		if (trigger === "manual" && this.settings.reviewBeforeManualSync && !Object.keys(opts).length && mode === this.settings.mode) {
@@ -1452,12 +1570,22 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.setStatus("syncing");
 		const started = Date.now();
 		let written = new Set<string>();
+		// What the commit message template sees: the trigger, and a message typed for this sync.
+		const typed = this.customCommitMessage;
+		this.customCommitMessage = null;
+		this.syncContext = { trigger, message: typed && trigger === "manual" && Date.now() - typed.at < 10 * 60_000 ? typed.text : null };
+		const event: SyncEventSummary = { trigger, mode, upToDate: false, uploaded: 0, downloaded: 0, deleted: 0, conflicts: 0 };
+		emitSyncEvent(this.app, SYNC_START_EVENT, { trigger, mode });
 		try {
 			const r = await this.engine.run(mode, opts);
+			Object.assign(event, { upToDate: r.upToDate, uploaded: r.uploaded.length, downloaded: r.downloaded.length, deleted: r.deletedLocal.length + r.deletedRemote.length, conflicts: r.conflictCopies.length });
+			if (r.errors.length) event.error = redactSecrets(r.errors[0] ?? "");
 			const sharedErrors = opts.defer || opts.only || opts.firstSyncPrefer ? [] : await this.syncShared(mode);
 			if (sharedErrors.length) this.notify(`${t("m.sharedFailed")}\n${sharedErrors.join("\n")}`, true);
 			const mirrorError = opts.defer || opts.only || opts.firstSyncPrefer ? null : await this.syncMirror(r.guardKept ?? []);
 			if (mirrorError) this.notify(t("m.mirrorFailed", { error: mirrorError }), true);
+			const problems = syncProblems({ errors: r.errors, sharedErrors, mirrorError });
+			this.syncOutcome = { seq: ++this.syncOutcomeSeq, ok: !problems.length, problems };
 			// A plugin's manifest.json arriving through sync means it was updated on another device.
 			const cfgDir = this.app.vault.configDir;
 			const updated = r.downloaded.map((p) => new RegExp(`^${cfgDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/plugins/([^/]+)/manifest\\.json$`).exec(p)?.[1]).filter((x): x is string => !!x);
@@ -1477,6 +1605,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.lastFailed = false;
 			await this.maybeDailySnapshot();
 		} catch (e) {
+			event.error = redactSecrets(errMsg(e));
+			this.syncOutcome = { seq: ++this.syncOutcomeSeq, ok: false, problems: [this.errorText(e)] };
 			if (e instanceof SyncCancelled) {
 				this.log(e.message);
 				this.setStatus("idle", this.errorText(e));
@@ -1493,6 +1623,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			}
 		} finally {
 			this.syncing = false;
+			this.syncContext = { trigger: "manual", message: null };
+			emitSyncEvent(this.app, SYNC_DONE_EVENT, event);
+			this.updateStatusExtras();
+			this.changeMarkers?.refresh();
 			// Real edits made during the sync stay pending; the sync's own writes do not.
 			for (const p of this.touchedDuringSync) if (!written.has(p)) this.dirty.set(p, ++this.dirtySeq);
 			this.touchedDuringSync.clear();
@@ -1616,14 +1750,142 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	async compareWithGitHub(file: TFile) {
-		new DiffModal(this.app, `${file.path}: ${this.hostLabel()} → ${t("u.thisDevice")}`, async () => {
-			const head = await this.gh.getRef(this.settings.branch);
-			const remote = head ? await this.engine.readRemoteFile(file.path, head) : null;
-			const localData = await this.app.vault.readBinary(file);
-			const o = await this.textOf(file.path, remote);
-			const n = await this.textOf(file.path, localData);
-			return { oldLabel: remote ? this.hostLabel() : t("m.notThere", { host: this.hostLabel() }), newLabel: t("u.thisDevice"), oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
-		}).open();
+		let differs = false;
+		new DiffModal(
+			this.app,
+			`${file.path}: ${this.hostLabel()} → ${t("u.thisDevice")}`,
+			async () => {
+				const head = await this.gh.getRef(this.settings.branch);
+				const remote = head ? await this.engine.readRemoteFile(file.path, head) : null;
+				const localData = await this.app.vault.readBinary(file);
+				const [a, b] = [new Uint8Array(remote ?? new ArrayBuffer(0)), new Uint8Array(localData)];
+				differs = !!remote && (a.length !== b.length || !a.every((x, i) => x === b[i]));
+				const o = await this.textOf(file.path, remote);
+				const n = await this.textOf(file.path, localData);
+				return { oldLabel: remote ? this.hostLabel() : t("m.notThere", { host: this.hostLabel() }), newLabel: t("u.thisDevice"), oldText: o.text, newText: n.text, oldSize: o.size, newSize: n.size };
+			},
+			() => (differs ? [{ label: t("repo.use"), warning: true, run: () => void this.useRepositoryVersion(file.path) }] : []),
+		).open();
+	}
+
+	/**
+	 * Replaces one local file with the repository's latest version, after a confirmation. The local
+	 * version goes to the recoverable trash first; the next sync then finds the file equal to the
+	 * repository and uploads nothing. Refused while a sync (or restore, reset…) runs.
+	 */
+	async useRepositoryVersion(path: string) {
+		const problem = this.configProblem();
+		if (problem) return void new Notice(problem);
+		if (this.syncing) return void new Notice(t("notice.busy"));
+		// A note inside a shared folder lives in that folder's repository.
+		const shared = (await this.sharedHosts()).find((h) => path.startsWith(h.def.folder.replace(/\/+$/, "") + "/"));
+		if (!shared && (await this.needsUnlock())) return;
+		const host = shared ? shared.gh.label : this.hostLabel();
+		if (!(await confirmPlan(this.app, t("repo.use"), t("repo.useBody", { path, host }), [], t("repo.use"), true))) return;
+		if (!this.beginExclusive()) return;
+		try {
+			const engine = shared ? shared.engine : this.engine;
+			const head = shared ? await shared.gh.getRef(shared.def.branch || "main") : await this.gh.getRef(this.settings.branch);
+			const remote = head ? await engine.readRemoteFile(path, head) : null;
+			const r = await replaceWithRepositoryVersion(this.io, path, remote);
+			if (r.kind === "replaced") this.forgetTempCopy(r.trashedAs);
+			if (r.kind === "replaced") this.log(`Used the repository version of ${path}; the local version is in the trash as ${r.trashedAs}`);
+			new Notice(
+				r.kind === "replaced" ? t("repo.used", { path, host, copy: r.trashedAs.split("/").pop() ?? r.trashedAs })
+				: r.kind === "restored" ? t("repo.restored", { path, host })
+				: r.kind === "same" ? t("repo.same", { path, host })
+				: t("repo.missing", { path, host }),
+				8000,
+			);
+		} catch (e) {
+			new Notice(t("repo.failed", { error: this.errorText(e) }), 8000);
+		} finally {
+			this.endExclusive();
+			this.refreshHealth();
+		}
+	}
+
+	/**
+	 * The dated copy "Use repository version" writes and moves to the trash at once was never a real
+	 * edit: it must not stay behind as a pending change (its create and delete events arrive meanwhile).
+	 */
+	private forgetTempCopy(path: string) {
+		this.touchedDuringSync.delete(path);
+		this.dirty.delete(path);
+		this.writtenBySync.set(path, Date.now());
+		this.refreshBadges();
+	}
+
+	// ---------------- history sidebar ----------------
+
+	async openHistory() {
+		const existing = this.app.workspace.getLeavesOfType(HISTORY_VIEW)[0];
+		const leaf = existing ?? this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		if (!existing) await leaf.setViewState({ type: HISTORY_VIEW, active: true });
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Repository, branch, folder and last-synced commit: what the history sidebar's list depends on. */
+	private historyVersion(): string {
+		const s = this.settings;
+		return `${s.provider}:${s.owner}/${s.repo}@${s.branch}/${normalizeSubdir(s.repoSubdir)}#${this.state.head ?? ""}`;
+	}
+	/** Whether the repository has an encryption marker for this vault, checked once per synced commit. */
+	private unlockCache: { key: string; value: boolean } | null = null;
+	private async remoteEncryptedCached(): Promise<boolean> {
+		const key = this.historyVersion();
+		if (this.unlockCache?.key === key) return this.unlockCache.value;
+		try {
+			const value = !!(await readRemoteMarker(this));
+			this.unlockCache = { key, value };
+			return value;
+		} catch {
+			return false; // not cached: asked again next time
+		}
+	}
+
+	private historyHost(): HistoryHost {
+		const entry = (c: { sha: string; title: string; date: string; author: string }): TimelineEntry => ({ sha: c.sha, message: c.title, date: c.date, author: c.author, tags: [] });
+		return {
+			problem: () => this.configProblem(),
+			needsUnlock: async (ask) => (ask ? this.needsUnlock() : !this.isEncrypted() && (await this.remoteEncryptedCached())),
+			version: () => this.historyVersion(),
+			listCommits: (page) => this.gh.listCommits(this.settings.branch, vaultCommitsPath(this.settings.repoSubdir), HISTORY_PAGE, page),
+			commitFiles: async (sha) => {
+				const d = await this.gh.getCommitFiles(sha);
+				return { parent: d.parent, files: await decodeCommitFiles(d.files, (raw) => this.engine.vaultPathOf(raw)) };
+			},
+			showDiff: (c, parent, f) =>
+				new DiffModal(this.app, `${f.path} @ ${c.sha.slice(0, 7)}`, async () => {
+					const [before, after] = await Promise.all([
+						parent && f.status !== "added" ? this.engine.readRemoteFile(parentPathOf(f), parent) : Promise.resolve(null),
+						f.status !== "deleted" ? this.engine.readRemoteFile(f.path, c.sha) : Promise.resolve(null),
+					]);
+					const o = await this.textOf(f.path, before);
+					const n = await this.textOf(f.path, after);
+					return {
+						oldLabel: before ? t("hist.before", { sha: (parent ?? "").slice(0, 7) }) : t("hist.none"),
+						newLabel: after ? t("hist.after", { sha: c.sha.slice(0, 7) }) : t("hist.none"),
+						oldText: o.text,
+						newText: n.text,
+						oldSize: o.size,
+						newSize: n.size,
+					};
+				}).open(),
+			// A deleted file is restored as it was just before this sync deleted it.
+			restoreFile: (c, parent, f) =>
+				f.status === "deleted"
+					? parent
+						? void this.openVersion(parentPathOf(f), { sha: parent, message: t("m.beforeCommit", { sha: c.sha.slice(0, 7) }), date: c.date })
+						: undefined
+					: void this.openVersion(f.path, { sha: c.sha, message: c.title, date: c.date }),
+			browse: (c) => void this.browseAt(entry(c)),
+			restoreFolder: (c) => new FolderSuggestModal(this.app, (f) => void this.restore(entry(c), f.path)).open(),
+			restoreVault: (c) => void this.restore(entry(c), ""),
+			deviceName: () => this.deviceName(),
+			errorText: (e) => this.errorText(e),
+		};
 	}
 
 	compareFiles(a: TFile, b: TFile) {
@@ -1684,7 +1946,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	private async timelineEntries(): Promise<TimelineEntry[]> {
 		const [commits, tags] = await Promise.all([
-			this.gh.listCommits(this.settings.branch, undefined, 60),
+			this.gh.listCommits(this.settings.branch, vaultCommitsPath(this.settings.repoSubdir), 60),
 			this.gh.listTags().catch(() => []),
 		]);
 		const bySha = new Map<string, string[]>();
@@ -1869,6 +2131,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				return true;
 			},
 		});
+		this.addCommand({ id: "open-history", name: t("cmd.openHistory"), callback: () => void this.openHistory() });
+		this.addCommand({
+			id: "use-repository-version",
+			name: t("cmd.useRepo"),
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || !this.isConfigured()) return false;
+				if (!checking) void this.useRepositoryVersion(file.path);
+				return true;
+			},
+		});
 		this.addCommand({
 			id: "sync-current-file",
 			name: t("cmd.syncFile"),
@@ -1914,6 +2187,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				// "Git: …" keeps our items apart from core ones such as Obsidian Sync's "Open version history"
 				// (the public API has no submenus to group them under the plugin's name).
 				const ours = (item: string) => t("menu.prefixed", { item });
+				addScopeMenuItems(this, menu, file);
 				if (file instanceof TFolder && file.path && file.path !== "/") {
 					menu.addItem((i) => i.setTitle(ours(t("menu.shareFolder"))).setIcon("folder-sync").onClick(() => new SharedFolderModal(this.app, this, () => this.refreshHealth(), file.path).open()));
 					menu.addItem((i) => i.setTitle(ours(t("menu.excludeFolder"))).setIcon("eye-off").onClick(() => void this.excludeFolder(file.path)));
@@ -1922,6 +2196,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				if (!(file instanceof TFile)) return;
 				menu.addItem((i) => i.setTitle(ours(t("menu.history"))).setIcon("history").onClick(() => void this.showFileHistory(file)));
 				menu.addItem((i) => i.setTitle(ours(t("menu.compare"))).setIcon("file-diff").onClick(() => this.compareWithGitHub(file)));
+				if (this.isConfigured()) menu.addItem((i) => i.setTitle(ours(t("menu.useRepo"))).setIcon("download").onClick(() => void this.useRepositoryVersion(file.path)));
 				if (this.isConfigured()) {
 					menu.addItem((i) => i.setTitle(ours(t("menu.openOnHost", { host: this.hostLabel() }))).setIcon("external-link").onClick(() => void this.openOnHost(file, "file")));
 					menu.addItem((i) => i.setTitle(ours(t("menu.copyHostLink", { host: this.hostLabel() }))).setIcon("link").onClick(() => void this.openOnHost(file, "copy")));
@@ -1985,6 +2260,24 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		}
 	}
 
+	/** Change markers and line history. A file in a shared folder takes its base from that folder's sync. */
+	private createChangeMarkers(): ChangeMarkers {
+		const sharedOf = (path: string) => this.sharedHostsCached().find((h) => path.startsWith(h.def.folder.replace(/\/+$/, "") + "/")) ?? null;
+		return new ChangeMarkers({
+			app: this.app,
+			// Without a repository there is no last-synced version, so nothing is marked.
+			enabled: () => this.settings.changeMarkers,
+			hostFor: (path) => sharedOf(path) ?? this,
+			// Line history reads the vault's repository (versions open in the vault's version modal).
+			hasHistory: (path) => this.isConfigured() && !sharedOf(path),
+			listCommits: async (path, limit) => this.gh.listCommits(this.settings.branch, await this.engine.remotePathOf(path), limit),
+			readVersion: (path, sha) => this.engine.readRemoteFile(path, sha),
+			openVersion: (path, commit) => void this.openVersion(path, commit),
+			canBrowse: async () => !(await this.needsUnlock()),
+			log: (m) => this.log(m),
+		});
+	}
+
 	private async showFileHistory(file: TFile) {
 		if (await this.needsUnlock()) return;
 		new CommitListModal(this.app, t("m.history", { path: file.path }), async () => {
@@ -2014,8 +2307,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 					if (!same && !(await confirmPlan(this.app, t("u.restoreThis"), t("m.restoreOverBody", { path, date: new Date(commit.date).toLocaleString() }), [], t("u.restoreThis"), true))) return;
 				}
 				try {
-					// VaultIO recreates missing folders and handles hidden (config) paths.
-					await this.io.write(target, data);
+					// VaultIO recreates missing folders and handles hidden (config) paths. Replacing the
+					// current file moves its old contents to the recoverable trash first.
+					if (asCopy) await this.io.write(target, data);
+					else {
+						const r = await replaceWithRepositoryVersion(this.io, target, data);
+						if (r.kind === "replaced") this.forgetTempCopy(r.trashedAs);
+					}
 				} catch (e) {
 					return void new Notice(t("m.restoreFailed", { error: this.errorText(e) }));
 				}
@@ -2031,7 +2329,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private async showDeletedFiles() {
 		if (await this.needsUnlock()) return;
 		new CommitListModal(this.app, t("m.recentlyDeleted"), async () => {
-			const commits = await this.gh.listCommits(this.settings.branch, undefined, 25);
+			const commits = await this.gh.listCommits(this.settings.branch, vaultCommitsPath(this.settings.repoSubdir), 25);
 			const rows: { label: string; sub: string; run: () => void }[] = [];
 			const seen = new Set<string>();
 			for (const c of commits) {
