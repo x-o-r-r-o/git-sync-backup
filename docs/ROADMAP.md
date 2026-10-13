@@ -89,13 +89,26 @@ From the 1.2 review list, shipped in 1.3: granular settings-folder sync (1), set
 
 Also in 1.3, from researching 29 other plugins: Azure DevOps and Gitee hosts, backup mirror, conflicts as pull requests (shared folders), shared folder to a repository subfolder, plugin installs from official releases, make repository match this device, branch picker, .gitattributes LFS rules, empty folders, pause and battery saver, remote-change indicator, open/copy on host, folder menu actions, diagnostics, commit author, plugin-version warning, Windows-name checks, review filters.
 
-## Status after 1.4.0 (2026-10-13)
+## Status after 1.4.0 (released 2026-10-13)
 
-Shipped in 1.4: inline conflict resolution in the editor (3), GitHub-friendly Markdown for shared folders (4), hidden files inside folders and nested `.gitignore` files (5), Sign in with GitLab (6). Also: Windows rename-plus-edit protection, a live test suite that runs against every host, and a proofreading pass over the translations.
+Shipped in 1.4: inline conflict resolution in the editor (3), GitHub-friendly Markdown for shared folders (4), hidden files inside folders and nested `.gitignore` files (5), Sign in with GitLab (6).
+
+Also in 1.4:
+- **Repository picking:** after Sign in with GitHub the wizard lists the repositories the app can use first and refreshes by itself when you come back from GitHub; settings gained a repository picker for every host.
+- **Live testing on real servers:** the suite `tests/live/hosts.live.test.ts` passes against github.com, gitlab.com, codeberg.org and bitbucket.org (12 tests each, plus 13 GitHub-specific tests including encryption).
+- **Full audit (about 40 fixes):** template notes no longer mistaken for renames, force-push safety for skipped files, no large downloads during rename detection, LFS size limits, recoverable trash for replaced local content, a Bitbucket commit-adoption race, GitLab paging behind proxies, Gitea files over the blob limit, settings edits lost after an external change, accurate status bar count and paused state, confirmations for reset and restore.
+- Windows rename-plus-edit protection, a proofreading pass over the translations, and conflict blocks styled in the editor.
 
 Removed in 1.4: the Gitee and Azure DevOps hosts added in 1.3. They could not be verified against real servers; settings that use them pause sync with a notice until another host is chosen, and files are left untouched.
 
 ## Next
 
-1. More real-world use of GitLab, Gitea and Bitbucket (all three passed the live suite `tests/live/hosts.live.test.ts` against real servers for 1.4), and real-phone testing (iOS, Android), before dropping "beta".
-2. Native-speaker review of the translations.
+1. **Real phones.** Test on iOS and Android through BRAT: first sync, attachments on demand, background sync, battery saver, sign-in, conflict buttons with touch.
+2. **Drop "beta"** for GitLab, Gitea / Forgejo and Bitbucket once real-world reports confirm the live-suite results.
+3. **Native-speaker review** of the seven translations.
+4. **Translated sync errors.** Engine and host error messages are English only; give them error codes so notices and the status panel can show them in the user's language.
+5. **Lighter `.gitignore` and hidden-file scanning.** Finding nested `.gitignore` files lists every folder every few minutes; track them with file events instead, for big vaults on phones.
+6. **Push-only mode keeps both.** When the repository changed a file that this device also changed, push mode keeps only this device's version (the other stays in history); offer a conflict copy instead.
+7. **Smarter rename detection** for notes from rich templates (today a deleted note and a new note sharing most template lines can still pair when they are at least 80% alike; nothing is lost, but the edit may land in the new note).
+8. **Bitbucket download checks.** Bitbucket's API has no content hashes, so a truncated download can't be detected the way it is on the other hosts.
+9. Small polish: steady conflict-dialog height when switching tabs, and clearer naming next to Obsidian Sync's own *Open version history* in the file menu.
