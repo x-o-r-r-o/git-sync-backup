@@ -69,6 +69,10 @@ export class SharedFolderModal extends Modal {
 					.onChange((v) => (this.def.conflicts = v === "pr" ? "pr" : undefined)),
 			);
 		new Setting(contentEl)
+			.setName(tr("sh.ghFormat"))
+			.setDesc(tr("sh.ghFormatDesc"))
+			.addToggle((t) => t.setValue(!!this.def.githubFormat).onChange((v) => (this.def.githubFormat = v || undefined)));
+		new Setting(contentEl)
 			.setName(tr("sh.token"))
 			.setDesc(tr("sh.tokenDesc"))
 			.addText((t) => {
@@ -95,9 +99,14 @@ export class SharedFolderModal extends Modal {
 					b.setDisabled(true);
 					msg.setText(tr("sh.checking"));
 					// The main token is only ever used for the same host (exactly as the sync itself does).
-					const token = this.token || (d.provider === this.plugin.settings.provider ? this.plugin.getToken() : "");
+					const own = this.token;
 					try {
-						const remote = makeRemote(d.provider, () => ({ token, apiBase: this.plugin.getApiBaseFor(d.provider), owner: d.owner, repo: d.repo }));
+						const remote = makeRemote(d.provider, () => ({
+							...(own ? { token: own, bearer: false } : this.plugin.borrowedAuth(d.provider)),
+							apiBase: this.plugin.getApiBaseFor(d.provider),
+							owner: d.owner,
+							repo: d.repo,
+						}));
 						if (!(await remote.getRepo())) throw new Error(tr("sh.notFound"));
 					} catch (e) {
 						busy = false;

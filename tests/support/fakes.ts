@@ -16,6 +16,13 @@ export class FakeFS {
 	files = new Map<string, { data: Uint8Array; mtime: number }>();
 	dirs = new Set<string>();
 	trash: string[] = [];
+	/** Paths moved to the system trash (only when `systemTrash` is on; otherwise trashSystem fails). */
+	systemTrashed: string[] = [];
+	systemTrash = false;
+	/** Like Obsidian's "Deleted files: permanently delete" preference: fileManager.trashFile deletes for good. */
+	permanentDelete = false;
+	/** Paths whose listing fails (adapter.list throws). */
+	unlistable = new Set<string>();
 	configDir = ".obsidian";
 	/** Like Obsidian on macOS/Windows/iOS: a rename whose target differs only by letter case "already exists". */
 	caseInsensitive = false;
@@ -50,6 +57,7 @@ export class FakeFS {
 			},
 			list: async (rawDir: string) => {
 				const dir = rawDir.replace(/^\/+|\/+$/g, "");
+				if (fs.unlistable.has(dir)) throw new Error("cannot list " + dir);
 				const files = new Set<string>();
 				const folders = new Set<string>();
 				const all = [...fs.files.keys(), ...[...fs.dirs].map((d) => d + "/")];
@@ -81,12 +89,22 @@ export class FakeFS {
 				fs.dirs.delete(p);
 				fs.trash.push(p);
 			},
+			trashSystem: async (p: string) => {
+				if (!fs.systemTrash) return false;
+				fs.files.delete(p);
+				fs.dirs.delete(p);
+				fs.systemTrashed.push(p);
+				return true;
+			},
 			read: async (p: string) => {
 				const f = fs.files.get(p);
 				if (!f) throw new Error("no state");
 				return dec.decode(f.data);
 			},
-			write: async () => {},
+			remove: async (p: string) => void fs.files.delete(p),
+			write: async (p: string, text: string) => {
+				fs.files.set(p, { data: enc.encode(text), mtime: ++clock });
+			},
 		};
 		return {
 			vault: {
@@ -124,7 +142,13 @@ export class FakeFS {
 				delete: async (f: TFolder) => void fs.dirs.delete(f.path),
 				trash: async (f: TFile) => adapter.trashLocal(f.path),
 			},
-			fileManager: { trashFile: async (f: TFile) => adapter.trashLocal(f.path) },
+			fileManager: {
+				trashFile: async (f: TFile) => {
+					if (!fs.permanentDelete) return adapter.trashLocal(f.path);
+					fs.files.delete(f.path);
+					fs.dirs.delete(f.path);
+				},
+			},
 		};
 	}
 }

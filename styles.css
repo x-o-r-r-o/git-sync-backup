@@ -564,3 +564,79 @@
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
 }
+
+/* Inline conflict resolution: buttons above each <<<<<<< block */
+.vsg-conflict-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-2-2);
+	padding: var(--size-2-2) var(--size-4-2);
+	margin: var(--size-2-1) 0;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+}
+.vsg-conflict-hint {
+	color: var(--text-muted);
+	margin-inline-end: var(--size-2-2);
+}
+.vsg-conflict-btn {
+	font-size: var(--font-ui-smaller);
+	padding: 2px var(--size-4-2);
+}
+/* Touch screens: full-height buttons that are easy to hit. */
+.is-mobile .vsg-conflict-btn {
+	min-height: var(--input-height);
+	padding: var(--size-4-1) var(--size-4-3);
+	font-size: var(--font-ui-small);
+}
+
+/* Conflict blocks in the editor: tinted sides, marker lines as small labels, no Markdown styling. */
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-side,
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-marker {
+	font-size: var(--font-text-size);
+	font-weight: var(--font-normal);
+	line-height: var(--line-height-normal);
+	color: var(--text-normal);
+	border-inline-start: 3px solid transparent;
+	padding-inline-start: var(--size-4-2);
+}
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-side .cm-header,
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-side .cm-quote {
+	font: inherit;
+	color: inherit;
+}
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-ours {
+	background: rgba(var(--color-green-rgb), 0.08);
+	border-inline-start-color: rgba(var(--color-green-rgb), 0.6);
+}
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-theirs {
+	background: rgba(var(--color-blue-rgb), 0.08);
+	border-inline-start-color: rgba(var(--color-blue-rgb), 0.6);
+}
+.markdown-source-view.mod-cm6 .cm-line.vsg-cm-base {
+	background: var(--background-modifier-hover);
+}
+.vsg-cm-marker-label {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+.vsg-cm-marker-open::before {
+	content: "▼ ";
+}
+.vsg-cm-marker-close::before {
+	content: "▲ ";
+}
+.vsg-cm-marker-sep {
+	display: inline-block;
+	width: 100%;
+	border-top: 1px dashed var(--background-modifier-border);
+	vertical-align: middle;
+}
+.vsg-badge-new {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}

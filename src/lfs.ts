@@ -69,6 +69,10 @@ export class LfsLayer implements Layer {
 	/** Patterns marked `filter=lfs` in .gitattributes (repos set up with `git lfs track`). */
 	private patterns: string[];
 	private tracked: (path: string) => boolean;
+	/** The `filter=lfs` patterns this layer was built with (a mirror uses the same ones). */
+	get trackedPatterns(): string[] {
+		return [...this.patterns];
+	}
 
 	constructor(remote: Remote, thresholdBytes: number, transport: Transport = obsidianTransport, lfsPatterns: string[] = []) {
 		this.remote = remote;

@@ -171,6 +171,7 @@ test("commit author: GitHub createCommit carries author with a date", async () =
 				return json({ sha: "c2" }, 201);
 			}
 			if (u.pathname.includes("/git/refs/heads/")) return json({ object: { sha: "c2" } });
+			if (u.pathname.includes("/git/ref/heads/")) return json({ object: { sha: "c1" } });
 			return json({ message: "no route" }, 404);
 		},
 		async () => {

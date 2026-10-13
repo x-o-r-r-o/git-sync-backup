@@ -4,15 +4,18 @@
 import { b64decode, b64encode, compareByWalking, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import { NotFastForward } from "./remote.ts";
-import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
+import type { BlobHint, CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
+import { gitBlobSha } from "./util.ts";
 
 export interface HostConfig {
 	token: string;
 	apiBase: string;
 	owner: string;
 	repo: string;
-	/** GitHub only: refresh a sign-in token after a 401. */
+	/** Refresh a sign-in token after a 401 (GitHub, GitLab); true = retry with the new token. */
 	onUnauthorized?: (failedToken: string) => Promise<boolean>;
+	/** The token is an OAuth access token (GitLab sign-in): sent as Bearer instead of PRIVATE-TOKEN. */
+	bearer?: boolean;
 }
 
 const encPath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
@@ -23,7 +26,7 @@ interface GtRepo { private?: boolean; default_branch?: string; html_url: string;
 interface GtBranch { name?: string; commit?: { id?: string } }
 interface GtCommit { sha: string; commit?: { tree?: { sha: string }; message?: string; author?: { name?: string; date?: string } }; tree?: { sha: string }; created?: string; parents?: { sha: string }[]; files?: { filename: string; status: string }[] }
 interface GtTree { tree?: TreeEntry[]; truncated?: boolean }
-interface GtBlob { content?: string }
+interface GtBlob { content?: string | null; size?: number }
 interface GtTag { name: string; id?: string; commit?: { sha: string } }
 interface GtChangeFiles { commit?: { sha: string; parents?: { sha: string }[] }; sha?: string; parents?: { sha: string }[] }
 // Keep each ChangeFiles request comfortably under typical proxy body limits.
@@ -127,13 +130,27 @@ export class Gitea implements Remote {
 		for (let page = 1; page < 1000; page++) {
 			const t = await this.json<GtTree>("GET", `${this.repoPath}/git/trees/${treeSha}?recursive=true&per_page=1000&page=${page}`);
 			for (const e of t.tree ?? []) out.push({ path: e.path, mode: e.mode, type: e.type, sha: e.sha, size: e.size });
-			if (!t.truncated || !(t.tree ?? []).length) break;
+			if (!t.truncated || !(t.tree ?? []).length) return out;
 		}
-		return out;
+		// Stopping here would return a partial listing, and the missing files would look deleted.
+		throw new Error("Repository is too large to list (more than 999 pages of files).");
 	}
-	async getBlob(sha: string): Promise<ArrayBuffer> {
+	/**
+	 * Blob content. Above the server's blob size limit (DEFAULT_MAX_BLOB_SIZE, 10 MiB by default)
+	 * /git/blobs returns no content; then the file is read through /raw/{path} when the caller says
+	 * where the blob lives, and checked against `sha`. Never returns empty bytes for a non-empty blob.
+	 */
+	async getBlob(sha: string, hint?: BlobHint): Promise<ArrayBuffer> {
 		const b = await this.json<GtBlob>("GET", `${this.repoPath}/git/blobs/${sha}`);
-		return b64decode(b.content ?? "");
+		const size = typeof b.size === "number" ? b.size : null;
+		if (typeof b.content === "string" && (b.content !== "" || !size)) {
+			const data = b64decode(b.content);
+			if (size === null || data.byteLength === size) return data;
+		}
+		if (!hint) throw new Error("Gitea: file too large for this server's API (over its blob size limit)");
+		const data = await this.getFileAt(hint.path, hint.ref);
+		if (!data || (await gitBlobSha(data)) !== sha) throw new Error("Gitea: file too large for this server's API (over its blob size limit), and the raw file did not match");
+		return data;
 	}
 	async putFile(path: string, message: string, base64: string, branch: string): Promise<void> {
 		await this.json<unknown>("POST", `${this.repoPath}/contents/${encPath(path)}`, { content: base64, message, branch, new_branch: branch });

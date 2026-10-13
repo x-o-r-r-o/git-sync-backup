@@ -78,6 +78,41 @@ export class VaultIO {
 		return out;
 	}
 
+	/**
+	 * Hidden entries inside normal vault folders (e.g. Notes/.assets/, Project/.gitignore), which Obsidian
+	 * doesn't index: lists every indexed folder on disk, then walks the hidden folders found. With
+	 * `onlyNames`, only files with those names are returned (no hidden folders are walked).
+	 */
+	async listNestedHidden(inScope: (path: string) => boolean, onlyNames?: Set<string>): Promise<LocalFileInfo[]> {
+		const out: LocalFileInfo[] = [];
+		const strip = (p: string) => p.replace(/^\/+/, "");
+		const name = (p: string) => p.split("/").pop() ?? p;
+		const addFile = async (file: string) => {
+			if (!inScope(file)) return;
+			const st = await this.adapter.stat(file);
+			if (st && st.type === "file") out.push({ path: file, mtime: st.mtime, size: st.size });
+		};
+		const walk = async (dir: string) => {
+			const listing = await this.adapter.list(dir);
+			for (const f of listing.files) await addFile(strip(f));
+			for (const sub of listing.folders) if (inScope(strip(sub))) await walk(strip(sub));
+		};
+		const all = (this.app.vault as { getAllLoadedFiles?: () => TAbstractFile[] }).getAllLoadedFiles?.() ?? [];
+		for (const folder of all) {
+			if (!(folder instanceof TFolder) || !folder.path || folder.path === "/" || isHiddenPath(folder.path)) continue;
+			// Listing errors propagate (a partial list would make the missing files look deleted).
+			const listing = await this.adapter.list(folder.path);
+			for (const f of listing.files.map(strip)) {
+				if (!name(f).startsWith(".")) continue;
+				if (onlyNames && !onlyNames.has(name(f))) continue;
+				await addFile(f);
+			}
+			if (onlyNames) continue;
+			for (const d of listing.folders.map(strip)) if (name(d).startsWith(".") && inScope(d)) await walk(d);
+		}
+		return out;
+	}
+
 	/** Empty folders in the vault (indexed by Obsidian), in scope. */
 	listEmptyFolders(inScope: (path: string) => boolean): string[] {
 		const out: string[] = [];
@@ -89,11 +124,13 @@ export class VaultIO {
 	async folderHasChildren(path: string): Promise<boolean> {
 		try {
 			const l = await this.adapter.list(path);
-			// Hidden entries (.DS_Store, desktop.ini-style files) don't count: Obsidian doesn't show them either.
-			const visible = (p: string) => !(p.split("/").pop() ?? "").startsWith(".");
+			// System clutter (.DS_Store, ._ files, Thumbs.db, desktop.ini) doesn't count. Other hidden files
+			// do: they may be synced (hidden files, .gitignore), and removing the folder would delete them.
+			const visible = (p: string) => !/^(\.DS_Store|\._.*|Thumbs\.db|desktop\.ini)$/i.test(p.split("/").pop() ?? "");
 			return l.files.some(visible) || l.folders.some(visible);
 		} catch {
-			return false;
+			// Couldn't list it: assume it holds something, so it is never removed blindly.
+			return true;
 		}
 	}
 	async makeFolder(path: string): Promise<void> {
@@ -182,7 +219,7 @@ export class VaultIO {
 				throw e;
 			}
 		} else await this.renameFile(from, to);
-		await this.pruneEmptyDirs(parentDir(from));
+		await this.pruneLater(parentDir(from));
 	}
 
 	private async renameFile(from: string, to: string): Promise<void> {
@@ -200,7 +237,50 @@ export class VaultIO {
 		} else if (await this.adapter.exists(path)) {
 			await this.adapter.trashLocal(path);
 		}
-		await this.pruneEmptyDirs(parentDir(path));
+		await this.pruneLater(parentDir(path));
+	}
+
+	/**
+	 * Removes local content that exists nowhere else (it is about to be replaced by the repository's
+	 * version): always to the system trash, else the vault's .trash folder, even when the user's
+	 * preference is to delete files permanently.
+	 */
+	async removeRecoverable(path: string): Promise<void> {
+		if (await this.adapter.exists(path)) {
+			let trashed = false;
+			try {
+				trashed = await this.adapter.trashSystem(path);
+			} catch {
+				trashed = false;
+			}
+			if (!trashed) await this.adapter.trashLocal(path);
+		}
+		await this.pruneLater(parentDir(path));
+	}
+
+	/** Folders whose pruning waits until a batch of parallel writes is done (null = prune right away). */
+	private pruneQueue: Set<string> | null = null;
+
+	/**
+	 * Runs `fn` with empty-folder pruning held back until it finishes, so parallel work inside it (a
+	 * download pool) can never have a folder trashed just as another task writes a file into it.
+	 */
+	async deferPruning<T>(fn: () => Promise<T>): Promise<T> {
+		if (this.pruneQueue) return fn();
+		const queue = new Set<string>();
+		this.pruneQueue = queue;
+		try {
+			return await fn();
+		} finally {
+			this.pruneQueue = null;
+			// Deepest first, so a parent emptied by pruning its child is pruned too.
+			for (const dir of [...queue].sort((a, b) => b.length - a.length)) await this.pruneEmptyDirs(dir);
+		}
+	}
+
+	private async pruneLater(dir: string): Promise<void> {
+		if (this.pruneQueue) this.pruneQueue.add(dir);
+		else await this.pruneEmptyDirs(dir);
 	}
 
 	private async pruneEmptyDirs(dir: string): Promise<void> {

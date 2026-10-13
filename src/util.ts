@@ -121,7 +121,43 @@ export function portableNameProblem(path: string): string | null {
 /** Hides tokens and secrets in text meant for bug reports. */
 export function redactSecrets(text: string): string {
 	return text
-		.replace(/\b(gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{10,}|ATBB[A-Za-z0-9]{10,}|ATATT[A-Za-z0-9_=-]{10,})/g, "[token]")
-		.replace(/\b(Bearer|token|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [token]")
-		.replace(/([?&](access_token|private_token|token)=)[^&\s]+/gi, "$1[token]");
+		.replace(/\b(gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{10,}|ATBB[A-Za-z0-9]{10,}|ATATT[A-Za-z0-9_=-]{10,}|ATCTT[A-Za-z0-9_=-]{10,})/g, "[token]")
+		// "Authorization: token <hex>" (Gitea) and similar headers, whatever the scheme word.
+		.replace(/(Authorization["']?\s*[:=]\s*["']?)(?:(Bearer|token|Basic)\s+)?[^\s"',;]{8,}/gi, (_m, pre: string, scheme?: string) => `${pre}${scheme ? `${scheme} ` : ""}[token]`)
+		.replace(/\b(Bearer|token|Basic)\s+(?!\[token\])[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [token]")
+		// Gitea access tokens are bare 40-character hex strings.
+		.replace(/\btoken\s*[:=]?\s*["']?[a-f0-9]{40}\b/gi, "token [token]")
+		.replace(/([?&](access_token|private_token|token)=)[^&\s]+/gi, "$1[token]")
+		// GitLab OAuth access/refresh tokens are bare 64-character hex strings.
+		.replace(/\b[a-f0-9]{64}\b/gi, "[token]");
+}
+
+/**
+ * Whether a pasted token plausibly belongs to `provider`, by its format. Used when the record of which
+ * host a token was entered for is gone (device storage cleared): the token is only adopted for the
+ * current host when it looks like one of that host's tokens, never sent to a host it can't be for.
+ */
+export function tokenLooksLike(provider: string, token: string): boolean {
+	const t = token.trim();
+	switch (provider) {
+		case "github":
+			return /^(ghp_|github_pat_|gho_|ghu_|ghs_)[A-Za-z0-9_]+$/.test(t);
+		case "gitlab":
+			return /^glpat-[A-Za-z0-9_.-]+$/.test(t);
+		case "bitbucket":
+			return /^(ATCTT|ATBB)[A-Za-z0-9_=-]+$/.test(t) || /^[^\s:]+:\S+$/.test(t);
+		case "gitea":
+			return /^[a-f0-9]{40}$/i.test(t);
+		default:
+			return false;
+	}
+}
+
+/** Lower-cased host (hostname and non-default port) of a URL, or null when it doesn't parse. */
+export function urlHost(url: string): string | null {
+	try {
+		return new URL(url).host.toLowerCase() || null;
+	} catch {
+		return null;
+	}
 }

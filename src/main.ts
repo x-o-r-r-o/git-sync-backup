@@ -46,19 +46,35 @@ import {
 	TimelineModal,
 } from "./ui.ts";
 import { t } from "./i18n.ts";
-import { DeviceFlowError, GITHUB_APP, needsRefresh, parseTokens, refreshAppToken } from "./ghapp.ts";
+import { DeviceFlowError, GITHUB_APP, needsRefresh, parseTokens, pollDeviceFlow, refreshAppToken, startDeviceFlow } from "./ghapp.ts";
+import type { DeviceCode } from "./ghapp.ts";
+import {
+	DeviceFlowError as GitLabFlowError,
+	GITLAB_APP,
+	needsRefresh as gitlabNeedsRefresh,
+	parseTokens as parseGitLabTokens,
+	pollDeviceFlow as pollGitLabDeviceFlow,
+	refreshAppToken as refreshGitLabToken,
+	startDeviceFlow as startGitLabDeviceFlow,
+	webBaseFromApi,
+} from "./gitlabapp.ts";
+import type { DeviceCode as GitLabDeviceCode } from "./gitlabapp.ts";
+import type { SignInFlow } from "./ghapp-ui.ts";
 import type { AppConfig, AppTokens } from "./ghapp.ts";
 import { webBase } from "./auth.ts";
 import { normalizeConfigSync } from "./scope-config.ts";
+import { scopeGitignore } from "./glob.ts";
 import { ExplorerBadges } from "./explorer.ts";
 import { parseSetupPayload, SETUP_ACTION } from "./setuplink.ts";
 import type { SetupPayload } from "./setuplink.ts";
 import { ApplySetupLinkModal, CreateSetupLinkModal } from "./setuplink-ui.ts";
 import { detectOtherSync } from "./othersync.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
+import { conflictResolver } from "./conflict-editor.ts";
 import { MirrorHost } from "./mirror.ts";
+import { dropRemovedHosts, isKnownProvider, mainSyncBlocked, removedHostNotice, syncableMirror, syncableSharedFolders } from "./removed-hosts.ts";
 import { fetchRegistry, findPluginNeeds, installPlugin, obsidianFetch } from "./pluginsync.ts";
-import { asText, conflictCopyOriginal, errMsg, portableNameProblem, redactSecrets, restoredCopyPath, sleep, stamp } from "./util.ts";
+import { asText, conflictCopyOriginal, errMsg, portableNameProblem, redactSecrets, restoredCopyPath, sleep, stamp, tokenLooksLike, urlHost } from "./util.ts";
 
 type Trigger = "manual" | "startup" | "change" | "interval" | "resume" | "background" | "open";
 type Status = "idle" | "syncing" | "ok" | "error" | "offline" | "conflict" | "paused";
@@ -100,6 +116,12 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// Paths touched while a sync runs, and paths the sync itself wrote (their vault events can arrive late).
 	private touchedDuringSync = new Set<string>();
 	private writtenBySync = new Map<string, number>();
+	private settingTab: VaultSyncSettingTab | null = null;
+	// Last status set (before the paused overlay), so the status bar can be redrawn on its own.
+	private baseStatus: Status = "idle";
+	private baseDetail = "";
+	private pauseTimer: number | null = null;
+	private pendingTimer: Debouncer<[], void> | null = null;
 
 	get stateFilePath(): string {
 		const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
@@ -136,9 +158,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.statusEl.onClickEvent(() => this.openHealth());
 		}
 		this.setStatus("idle");
-		this.addSettingTab(new VaultSyncSettingTab(this.app, this));
+		this.settingTab = new VaultSyncSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
+		this.register(() => this.clearPauseTimer());
 		this.registerCommands();
 
+		// Conflict blocks written by "merge with markers" get keep-this/keep-that buttons in the editor.
+		this.registerEditorExtension(conflictResolver({ ours: t("ce.ours"), theirs: t("ce.theirs"), both: t("ce.both"), hint: t("ce.hint") }));
 		this.registerObsidianProtocolHandler(SETUP_ACTION, (params) => {
 			const payload = parseSetupPayload(params.s);
 			if (!payload) return void new Notice(t("link.invalid"));
@@ -149,6 +175,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (!this.unloaded) this.badges?.refresh();
 		}, 1500, true);
 		this.refreshBadges = () => this.badgeTimer?.();
+		this.pendingTimer = debounce(() => {
+			if (!this.unloaded) this.renderStatus();
+		}, 1500, true);
 		this.registerEvent(this.app.workspace.on("layout-change", () => this.refreshBadges()));
 		this.app.workspace.onLayoutReady(() => {
 			this.refreshBadges();
@@ -163,6 +192,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				if (file instanceof TFile) touch(file.path);
 				if (oldPath) touch(oldPath);
 				this.refreshBadges();
+				this.pendingTimer?.();
 				if (!this.settings.syncOnChange) return;
 				// Our own writes during a sync also land here; that only costs one cheap no-op sync later.
 				if (this.syncing) this.changedDuringSync = true;
@@ -205,6 +235,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	onunload() {
 		this.unloaded = true;
 		this.badgeTimer?.cancel();
+		this.pendingTimer?.cancel();
 		this.badges?.destroy();
 		this.badges = null;
 		this.onChangeDebounced?.cancel();
@@ -265,6 +296,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	resumeSync() {
 		this.localSet("pausedUntil", null);
+		this.renderStatus();
 		new Notice(t("m.resumed"));
 		void this.sync("resume");
 	}
@@ -310,22 +342,41 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	gitignorePatterns(): string[] {
 		return this.gitignoreLines;
 	}
-	/** Reads the vault's .gitignore (it isn't indexed by Obsidian, so read it from disk before each sync). */
+	/** Reads the vault's .gitignore files (Obsidian doesn't index them, so they are read from disk before each sync). */
 	async loadGitignore() {
 		if (!this.settings.useGitignore) return void (this.gitignoreLines = []);
+		const a = this.app.vault.adapter;
 		try {
-			const a = this.app.vault.adapter;
-			this.gitignoreLines = (await a.exists(".gitignore")) ? (await a.read(".gitignore")).split(/\r?\n/) : [];
-		} catch {
-			this.gitignoreLines = [];
+			// Finding .gitignore files in subfolders lists every folder on disk, so new ones are looked for
+			// at most every 5 minutes; the ones already known are re-read on every sync.
+			if (Date.now() - this.nestedGitignoreAt > 5 * 60_000) {
+				const found = await this.io.listNestedHidden(() => true, new Set([".gitignore"]));
+				this.nestedGitignorePaths = found.map((f) => f.path).sort((x, y) => x.localeCompare(y));
+				this.nestedGitignoreAt = Date.now();
+			}
+			const root = (await a.exists(".gitignore")) ? (await a.read(".gitignore")).split(/\r?\n/) : [];
+			const nested: string[] = [];
+			for (const path of this.nestedGitignorePaths) {
+				if (!(await a.exists(path))) continue;
+				nested.push(...scopeGitignore(path.slice(0, -"/.gitignore".length), (await a.read(path)).split(/\r?\n/)));
+			}
+			this.gitignoreLines = [...root, ...nested];
+		} catch (e) {
+			// Keep the last rules: syncing with none could upload ignored files.
+			this.log(`Could not read .gitignore files (keeping the previous rules): ${errMsg(e)}`);
 		}
 	}
+	private nestedGitignorePaths: string[] = [];
+	private nestedGitignoreAt = 0;
 
 	// Called by Obsidian when data.json changes on disk (e.g. synced from another device).
 	async onExternalSettingsChange() {
 		await this.loadSettings();
 		this.fullScanNeeded = true;
 		this.rescheduleTriggers();
+		// The settings object kept its identity; open views just redraw with the new values.
+		this.settingTab?.refreshIfOpen();
+		this.refreshHealth();
 	}
 
 	// ---------------- device-local secrets ----------------
@@ -384,13 +435,18 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	getToken(): string {
 		if (this.usingGitHubApp()) return this.appTokens()?.access ?? "";
+		if (this.usingGitLabApp()) return this.gitlabTokens()?.access ?? "";
 		const token = this.getSecret("token");
 		if (!token) return "";
 		// A pasted token is only ever sent to the host and API URL it was entered for: a synced data.json,
 		// a setup link or a host switch can't redirect it. Tokens saved before 1.3 get bound on first use.
 		const bound = this.localGet("token:for");
-		if (bound === null) this.localSet("token:for", this.tokenTarget());
-		else if (bound !== this.tokenTarget()) return "";
+		if (bound === null) {
+			// The binding is gone (device storage cleared): adopt the token for this host only when it looks
+			// like one of this host's tokens; otherwise it stays unused until a new one is pasted.
+			if (!tokenLooksLike(this.settings.provider ?? "github", token)) return "";
+			this.localSet("token:for", this.tokenTarget());
+		} else if (bound !== this.tokenTarget()) return "";
 		return token;
 	}
 	private tokenTarget(): string {
@@ -400,9 +456,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	rebindToken() {
 		// Only within the same host (e.g. fixing a typo in a self-hosted URL): a token entered for another
 		// host stays hidden until a new one is pasted.
+		// Same provider and same server (host name and port), e.g. a changed path or http→https. An unbound
+		// token is left to getToken, which only adopts it when its format fits the host.
 		const bound = this.localGet("token:for");
 		const provider = this.settings.provider ?? "github";
-		if (this.getSecret("token") && (bound === null || bound.startsWith(`${provider}|`))) this.localSet("token:for", this.tokenTarget());
+		if (!this.getSecret("token") || bound === null || !bound.startsWith(`${provider}|`)) return;
+		const oldHost = urlHost(bound.slice(provider.length + 1));
+		if (oldHost !== null && oldHost === urlHost(this.getApiBase())) this.localSet("token:for", this.tokenTarget());
 	}
 	/** A shared folder's own token, only for the host and API URL it was entered for (empty otherwise). */
 	sharedToken(def: SharedFolder): string {
@@ -423,17 +483,19 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.localSet(`token-shared-for:${def.id}`, token ? `${def.provider}|${this.getApiBaseFor(def.provider).replace(/\/+$/, "")}` : null);
 	}
 	setToken(token: string) {
+		if (token) this.authGen++;
 		this.setSecret("token", token);
 		this.localSet("token:for", token ? this.tokenTarget() : null);
 		// Pasting a token switches this device back to token sign-in.
 		if (token && this.usingGitHubApp()) this.localSet("auth:github", null);
+		if (token && this.usingGitLabApp()) this.localSet("auth:gitlab", null);
 	}
 
 	// ---------------- Sign in with GitHub (GitHub App device flow) ----------------
 
 	/** Days until the pasted token expires, when the host reports it (GitHub); null = unknown. */
 	tokenExpiryDays(): number | null {
-		if (this.usingGitHubApp()) return null;
+		if (this.usingSignIn()) return null;
 		const at = this.gh.tokenExpiresAt?.() ?? null;
 		return at === null ? null : Math.floor((at - Date.now()) / 86_400_000);
 	}
@@ -478,7 +540,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		const tokens = parseTokens(this.getSecret("ghapp"));
 		if (!tokens) return null;
 		const app = this.githubApp();
-		if ((tokens.web && tokens.web !== this.githubWeb()) || (tokens.clientId && tokens.clientId !== app?.clientId)) return null;
+		// Tokens without a record of the server that issued them are never used (they could go anywhere).
+		if (!tokens.web || tokens.web !== this.githubWeb() || (tokens.clientId && tokens.clientId !== app?.clientId)) return null;
 		return tokens;
 	}
 	signedInWithApp(tokens: AppTokens) {
@@ -487,41 +550,147 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.expiredNoticeShown = false;
 	}
 	signOutApp() {
+		this.authGen++;
 		this.setSecret("ghapp", "");
 		this.localSet("auth:github", null);
 	}
+	// ---------------- Sign in with GitLab (OAuth device flow) ----------------
+
+	/** The GitLab application to sign in with: a custom one (self-managed), else the built-in one on gitlab.com. */
+	gitlabApp(): { clientId: string } | null {
+		const clientId = this.localGet("glapp:clientId") ?? "";
+		if (clientId) return { clientId };
+		const api = this.getApiBaseFor("gitlab").replace(/\/+$/, "");
+		return GITLAB_APP.clientId && /^https:\/\/gitlab\.com\/api\/v4$/i.test(api) ? GITLAB_APP : null;
+	}
+	setCustomGitLabApp(clientId: string) {
+		this.localSet("glapp:clientId", clientId || null);
+	}
+	gitlabWeb(): string {
+		return webBaseFromApi(this.getApiBaseFor("gitlab"));
+	}
+	usingGitLabApp(): boolean {
+		return this.settings.provider === "gitlab" && this.localGet("auth:gitlab") === "app";
+	}
+	/** Signed in through a host app (GitHub or GitLab) rather than a pasted token. */
+	usingSignIn(): boolean {
+		return this.usingGitHubApp() || this.usingGitLabApp();
+	}
+	/** GitLab sign-in tokens, only for the server and application that issued them. */
+	gitlabTokens(): AppTokens | null {
+		const tokens = parseGitLabTokens(this.getSecret("glapp"));
+		if (!tokens) return null;
+		const web = (tokens as { web?: string }).web;
+		const clientId = (tokens as { clientId?: string }).clientId;
+		// Tokens without a record of the server that issued them are never used (they could go anywhere).
+		if (!web || web !== this.gitlabWeb() || (clientId && clientId !== this.gitlabApp()?.clientId)) return null;
+		return tokens;
+	}
+	signedInWithGitLab(tokens: AppTokens, web = this.gitlabWeb(), clientId = this.gitlabApp()?.clientId) {
+		this.setSecret("glapp", JSON.stringify({ ...tokens, web, clientId }));
+		this.localSet("auth:gitlab", "app");
+		this.expiredNoticeShown = false;
+	}
+	signOutGitLab() {
+		this.authGen++;
+		this.setSecret("glapp", "");
+		this.localSet("auth:gitlab", null);
+	}
+	/** Bumped on sign-out and when a token is pasted: a refresh or sign-in finishing later is dropped. */
+	authGen = 0;
+	/** Main-host credentials for a shared folder or mirror on the same host (never sent to another host). */
+	borrowedAuth(provider: string): { token: string; bearer: boolean; onUnauthorized: (failed: string) => Promise<boolean> } {
+		const same = provider === this.settings.provider;
+		return {
+			token: same ? this.getToken() : "",
+			bearer: same && provider === "gitlab" && this.usingGitLabApp(),
+			onUnauthorized: (failed) => (same ? this.ensureFreshToken(true, failed) : Promise.resolve(false)),
+		};
+	}
+	/** True when signed in through a host app and its tokens are present and valid for this server. */
+	signedInNow(): boolean {
+		return this.usingGitLabApp() ? !!this.gitlabTokens() : this.usingGitHubApp() ? !!this.appTokens() : false;
+	}
+	/** The device-flow steps for the sign-in dialog. */
+	signInFlow(kind: "github" | "gitlab"): SignInFlow {
+		if (kind === "gitlab") {
+			let code: GitLabDeviceCode | null = null;
+			return {
+				title: t("app.signInGitLab"),
+				host: "GitLab",
+				available: () => !!this.gitlabApp(),
+				start: async () => (code = await startGitLabDeviceFlow(this.gitlabWeb(), this.gitlabApp()!.clientId)),
+				finish: async (isCancelled) => {
+					const web = this.gitlabWeb();
+					const clientId = this.gitlabApp()!.clientId;
+					const tokens = await pollGitLabDeviceFlow(web, clientId, code!, { isCancelled });
+					if (!isCancelled()) this.signedInWithGitLab(tokens, web, clientId);
+				},
+			};
+		}
+		let code: DeviceCode | null = null;
+		return {
+			title: t("app.signIn"),
+			host: "GitHub",
+			available: () => !!this.githubApp(),
+			start: async () => (code = await startDeviceFlow(this.githubWeb(), this.githubApp()!.clientId)),
+			finish: async (isCancelled) => {
+				const tokens = await pollDeviceFlow(this.githubWeb(), this.githubApp()!.clientId, code!, { isCancelled });
+				if (!isCancelled()) this.signedInWithApp(tokens);
+			},
+		};
+	}
+
 	/**
 	 * Make sure the sign-in token is valid, refreshing it shortly before it expires (or right away
-	 * when `force`, after a 401). Only one refresh runs at a time: GitHub rotates the refresh token,
-	 * so two concurrent refreshes would sign the device out. Returns true when a usable token exists.
+	 * when `force`, after a 401). Only one refresh runs at a time: GitHub and GitLab rotate refresh
+	 * tokens, so two concurrent refreshes would sign the device out. Returns true when a usable token exists.
 	 */
 	ensureFreshToken(force = false, failedToken?: string): Promise<boolean> {
 		// A pasted token can't be renewed: retrying a 401 with it would fail again.
-		if (!this.usingGitHubApp()) return Promise.resolve(!force && !!this.getToken());
+		if (!this.usingSignIn()) return Promise.resolve(!force && !!this.getToken());
 		if (this.refreshing) return this.refreshing;
-		const before = this.appTokens();
+		const gitlab = this.usingGitLabApp();
+		const before = gitlab ? this.gitlabTokens() : this.appTokens();
 		if (!before) return Promise.resolve(false);
 		// Another request already renewed it: just retry with the new token.
 		if (failedToken && before.access !== failedToken) return Promise.resolve(true);
-		if (!force && !needsRefresh(before)) return Promise.resolve(true);
-		this.refreshing = (async () => {
+		if (!force && !(gitlab ? gitlabNeedsRefresh(before) : needsRefresh(before))) return Promise.resolve(true);
+		const gen = this.authGen;
+		let run!: Promise<boolean>;
+		run = (async () => {
+			// Yield first, so `this.refreshing` is set before an early failure clears it in `finally`.
+			await Promise.resolve();
 			try {
+				if (gitlab) {
+					const app = this.gitlabApp();
+					if (!app || !before.refresh) throw new DeviceFlowError("bad_refresh_token");
+					const web = this.gitlabWeb();
+					const fresh = await refreshGitLabToken(web, app.clientId, before.refresh);
+					// Signed out, or a token pasted, while refreshing: don't sign back in.
+					if (gen !== this.authGen) return false;
+					this.signedInWithGitLab(fresh, web, app.clientId);
+					return true;
+				}
 				const app = this.githubApp();
 				if (!app || !before.refresh) throw new DeviceFlowError("bad_refresh_token");
-				this.signedInWithApp(await refreshAppToken(this.githubWeb(), app.clientId, before.refresh));
+				const fresh = await refreshAppToken(this.githubWeb(), app.clientId, before.refresh);
+				if (gen !== this.authGen) return false;
+				this.signedInWithApp(fresh);
 				return true;
 			} catch (e) {
 				this.log(`Sign-in refresh failed: ${errMsg(e)}`);
-				if (e instanceof DeviceFlowError && e.code !== "http" && !this.expiredNoticeShown) {
+				if ((e instanceof DeviceFlowError || e instanceof GitLabFlowError) && e.code !== "http" && !this.expiredNoticeShown) {
 					this.expiredNoticeShown = true;
-					new Notice(t("app.expiredSession"), 10000);
+					new Notice(t("app.expiredSession", { host: gitlab ? "GitLab" : "GitHub" }), 10000);
 				}
 				return false;
 			} finally {
-				this.refreshing = null;
+				if (this.refreshing === run) this.refreshing = null;
 			}
 		})();
-		return this.refreshing;
+		this.refreshing = run;
+		return run;
 	}
 	/** The git host client for the configured provider (rebuilt when the provider changes). */
 	get gh(): Remote {
@@ -533,7 +702,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				kind: key,
 				remote: makeRemote(
 					kind,
-					() => ({ token: this.getToken(), apiBase: this.getApiBaseFor(kind), owner, repo, onUnauthorized: (failed) => this.ensureFreshToken(true, failed) }),
+					() => ({ token: this.getToken(), apiBase: this.getApiBaseFor(kind), owner, repo, onUnauthorized: (failed) => this.ensureFreshToken(true, failed), bearer: kind === "gitlab" && this.usingGitLabApp() }),
 					this.blobCacheStore(`${this.settings.owner}-${this.settings.repo}`),
 				),
 			};
@@ -699,8 +868,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return true;
 	}
 	async removeUnencryptedFiles() {
-		if (this.syncing) return void new Notice(t("notice.busy"));
-		this.syncing = true;
+		if (!this.beginExclusive()) return;
 		try {
 			const removed = await this.engine.removeUnencryptedFiles((files) =>
 				confirmPlan(this.app, t("m.plainTitle"), t("m.plainBody"), [{ title: t("m.deleteFrom", { host: this.hostLabel() }), items: files }], t("m.remove"), true),
@@ -709,7 +877,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		} catch (e) {
 			if (!(e instanceof SyncCancelled)) new Notice(t("m.removeFailed", { error: errMsg(e) }));
 		} finally {
-			this.syncing = false;
+			this.endExclusive();
 		}
 	}
 	/** Shared folders belong to their own repositories; the main vault repo never touches them. */
@@ -720,7 +888,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return this.shared?.hosts ?? [];
 	}
 	async sharedHosts(): Promise<SharedFolderHost[]> {
-		const defs = (this.settings.sharedFolders ?? []).filter((f) => f.enabled && f.folder && f.owner && f.repo);
+		const defs = syncableSharedFolders(this.settings.sharedFolders);
 		const sig = JSON.stringify(defs);
 		if (!this.shared || this.shared.sig !== sig) {
 			const hosts = defs.map((d) => new SharedFolderHost(this, d));
@@ -800,8 +968,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	private mirrorHost: { sig: string; host: MirrorHost } | null = null;
 	/** The backup mirror for the current settings (rebuilt when its target changes). */
 	async mirror(): Promise<MirrorHost | null> {
-		const m = this.settings.mirror;
-		if (!m?.enabled || !m.owner || !m.repo) return null;
+		const m = syncableMirror(this.settings.mirror);
+		if (!m) return null;
 		const sig = JSON.stringify(m);
 		if (!this.mirrorHost || this.mirrorHost.sig !== sig) {
 			const host = new MirrorHost(this, m);
@@ -814,7 +982,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	mirrorStatus(): { label: string; lastSync: number; lastError: string | null } | null {
 		const m = this.settings.mirror;
 		const h = this.mirrorHost?.host;
-		if (!m?.enabled) return null;
+		if (!m?.enabled || !isKnownProvider(m.provider)) return null;
 		return { label: `${HOSTS[m.provider].label} ${m.owner}/${m.repo}`, lastSync: h?.lastSync ?? 0, lastError: h?.lastError ?? null };
 	}
 	/** Uploads this vault to the backup mirror (push only). Returns an error message, or null. */
@@ -936,12 +1104,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async freeUpSpace() {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
-		if (this.syncing) return void new Notice(t("notice.busy"));
-		this.syncing = true;
+		if (!this.beginExclusive()) return;
 		try {
 			await this.freeUpSpaceInner();
 		} finally {
-			this.syncing = false;
+			this.endExclusive();
 		}
 	}
 	private async freeUpSpaceInner() {
@@ -968,10 +1135,39 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	async loadSettings() {
 		const saved = (await this.loadData()) as Partial<VaultSyncSettings> | null;
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
-		this.settings.configSync = normalizeConfigSync(saved?.configSync);
+		const next: VaultSyncSettings = Object.assign({}, DEFAULT_SETTINGS, saved);
+		next.configSync = normalizeConfigSync(saved?.configSync);
+		if (this.settings) {
+			// Reloaded (data.json changed on disk): update the object in place, since the settings tab and
+			// other closures hold it, and a replaced object would make their later edits not save.
+			const cur = this.settings as unknown as Record<string, unknown>;
+			for (const k of Object.keys(cur)) if (!(k in next)) delete cur[k];
+			Object.assign(this.settings, next);
+		} else this.settings = next;
+		this.handleRemovedHosts();
+	}
+	/**
+	 * Gitee and Azure DevOps were removed in 1.4.0. Settings that still use them pause instead of switching
+	 * host (which could push the vault to another repository); files are never touched. One notice per device.
+	 */
+	private handleRemovedHosts() {
+		const r = dropRemovedHosts(this.settings);
+		if (r.main) this.log(`Host "${r.main.provider}" is no longer supported (${r.main.owner}/${r.main.repo}): sync paused until another host is set up.`);
+		if (r.mirror) this.log(`Backup mirror host "${r.mirror.provider}" is no longer supported (${r.mirror.owner}/${r.mirror.repo}): mirror turned off.`);
+		for (const f of r.shared) this.log(`Shared folder ${f}: its host is no longer supported; it is skipped.`);
+		const kind = removedHostNotice(r, this.settings);
+		if (!kind) return;
+		try {
+			if (this.localGet(`removedHostNotice:${kind}`)) return;
+			this.localSet(`removedHostNotice:${kind}`, "1");
+		} catch {
+			// No device storage (shouldn't happen): show the notice anyway.
+		}
+		new Notice(t(kind === "main" ? "m.hostRemoved" : "m.hostRemovedOther"), 0);
 	}
 	async saveSettings() {
+		// A repository entered after a removed host: sync can run again.
+		if (this.settings.removedHost && this.settings.owner && this.settings.repo) delete this.settings.removedHost;
 		await this.saveData(this.settings);
 		// Scope settings may have changed: rescan everything next time.
 		this.fullScanNeeded = true;
@@ -991,11 +1187,17 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	async saveState() {
 		await writeState(this.app.vault.adapter, this.stateFilePath, this.state, this.deviceId());
 	}
-	async resetState() {
+	/** Forgets what was last synced on this device. Returns false (with a notice) while a sync runs. */
+	async resetState(): Promise<boolean> {
+		if (this.syncing) {
+			new Notice(t("notice.busy"));
+			return false;
+		}
 		this.state = { ...emptyState(), deviceId: this.deviceId() };
 		this.fullScanNeeded = true;
 		await this.saveState();
 		this.log("Sync state reset by user.");
+		return true;
 	}
 
 	// ---------------- change tracking (SyncHost) ----------------
@@ -1049,7 +1251,6 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		const line = `${stamp()}  ${msg}`;
 		this.logLines.push(line);
 		if (this.logLines.length > 300) this.logLines.shift();
-		console.debug(`[vault-sync] ${msg}`);
 	}
 
 	private notify(msg: string, important = false, changedFiles = false) {
@@ -1061,6 +1262,26 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	private setStatus(status: Status, detail = "") {
 		this.refreshBadges();
+		this.baseStatus = status;
+		this.baseDetail = detail;
+		this.renderStatus();
+		this.refreshHealth();
+	}
+
+	/** Draws the status bar and ribbon from the last status, the pause state and the pending edits. */
+	private renderStatus() {
+		let status = this.baseStatus;
+		let detail = this.baseDetail;
+		// While paused (and not busy or failing) the icon says so, also after a manual sync.
+		if (this.isPaused() && status !== "syncing" && status !== "error") {
+			if (status !== "paused") detail = detail ? `${t("m.pausedStatus")} · ${detail}` : t("m.pausedStatus");
+			status = "paused";
+		} else if (status === "paused") {
+			// The pause ended (or was lifted) since this was set.
+			status = "idle";
+			detail = "";
+		}
+		this.schedulePauseEnd();
 		const icons: Record<Status, string> = {
 			idle: "cloud",
 			syncing: "refresh-cw",
@@ -1076,14 +1297,60 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.statusEl.empty();
 			const icon = this.statusEl.createSpan({ cls: `vsg-icon vsg-${status}` });
 			setIcon(icon, icons[status]);
-			const pending = this.dirty.size;
-			if (pending && status !== "syncing") this.statusEl.createSpan({ cls: "vsg-pending", text: String(pending) });
+			// The same count the status panel shows.
+			const pending = status === "syncing" || !this.engine ? 0 : this.pendingLocalCount();
+			if (pending) this.statusEl.createSpan({ cls: "vsg-pending", text: String(pending) });
 			this.statusEl.setAttr("aria-label", t("m.statusTip", { title }));
 			this.statusEl.setAttr("data-tooltip-position", "top");
 		}
 		this.ribbonEl?.toggleClass("vsg-spinning", status === "syncing");
 		this.ribbonEl?.setAttr("aria-label", `${t("ribbon.sync")}: ${title}`);
-		this.refreshHealth();
+	}
+
+	private clearPauseTimer() {
+		if (this.pauseTimer !== null) window.clearTimeout(this.pauseTimer);
+		this.pauseTimer = null;
+	}
+	/** Redraws the status when a timed pause ends, so the paused icon doesn't linger. */
+	private schedulePauseEnd() {
+		this.clearPauseTimer();
+		const until = this.pausedUntil();
+		if (!until || until === Infinity || this.unloaded) return;
+		this.pauseTimer = window.setTimeout(
+			() => {
+				this.pauseTimer = null;
+				if (!this.unloaded) this.renderStatus();
+			},
+			Math.min(until - Date.now() + 500, 2_000_000_000),
+		);
+	}
+
+	/**
+	 * Restore, reset, overwrite, free up space and similar run with sync blocked. Edits made meanwhile are
+	 * parked like during a sync; endExclusive() puts them back into change tracking and syncs if needed.
+	 */
+	private beginExclusive(): boolean {
+		if (this.syncing) {
+			new Notice(t("notice.busy"));
+			return false;
+		}
+		this.syncing = true;
+		this.changedDuringSync = false;
+		this.touchedDuringSync.clear();
+		this.onChangeDebounced?.cancel();
+		return true;
+	}
+	private endExclusive() {
+		this.syncing = false;
+		for (const p of this.touchedDuringSync) this.dirty.set(p, ++this.dirtySeq);
+		this.touchedDuringSync.clear();
+		const q = this.queued;
+		this.queued = null;
+		if (q) window.setTimeout(() => void this.sync(q.manual ? "manual" : "change", q.mode, q.opts), 500);
+		else if (this.changedDuringSync) this.onChangeDebounced?.();
+		this.changedDuringSync = false;
+		this.refreshBadges();
+		this.pendingTimer?.();
 	}
 
 	private refreshHealth(withRemote = false) {
@@ -1126,6 +1393,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	// ---------------- sync ----------------
 
 	private configProblem(): string | null {
+		// Settings from a removed host (Gitee, Azure DevOps): nothing syncs until a new repository is set.
+		if (mainSyncBlocked(this.settings)) return t("m.hostRemoved");
 		if (!this.getToken()) return t("m.needToken");
 		if (!this.settings.owner || !this.settings.repo) return t("m.needRepo");
 		return null;
@@ -1134,8 +1403,9 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	async sync(trigger: Trigger, mode: SyncMode = this.settings.mode, opts: SyncOptions = {}): Promise<void> {
 		if (this.unloaded) return;
 		if (trigger !== "manual" && this.isPaused()) return void this.setStatus("paused", t("m.pausedStatus"));
-		if (this.batterySaver() && (trigger === "change" || trigger === "interval")) return;
-		if (this.usingGitHubApp() && navigator.onLine) await this.ensureFreshToken();
+		// Battery saver keeps only startup, returning to Obsidian and manual syncs.
+		if (this.batterySaver() && (trigger === "change" || trigger === "interval" || trigger === "open" || trigger === "background")) return;
+		if (this.usingSignIn() && navigator.onLine) await this.ensureFreshToken();
 		const problem = this.configProblem();
 		if (problem) {
 			if (trigger === "manual") new Notice(problem);
@@ -1424,9 +1694,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	private async restore(e: TimelineEntry, folder: string) {
-		if (this.syncing) return void new Notice(t("notice.busy"));
 		const what = folder ? t("m.whatFolder", { folder }) : t("m.whatVault");
-		this.syncing = true;
+		if (!this.beginExclusive()) return;
 		this.setStatus("syncing", t("m.restoring", { what }));
 		try {
 			await this.loadGitignore();
@@ -1455,7 +1724,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			}
 			this.log(errMsg(err));
 		} finally {
-			this.syncing = false;
+			this.endExclusive();
 			this.setStatus(this.lastError ? "error" : "ok");
 			this.refreshHealth(true);
 		}
@@ -1464,8 +1733,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	/** One forward commit that makes the repository equal to this device (the opposite of reset). */
 	async overwriteRemote() {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
-		if (this.syncing) return void new Notice(t("notice.busy"));
-		this.syncing = true;
+		if (!this.beginExclusive()) return;
 		this.setStatus("syncing", t("m.comparing"));
 		try {
 			await this.loadGitignore();
@@ -1486,10 +1754,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			new Notice(n ? t("ow.done", { n }) : t("m.alreadyMatches"));
 			this.fullScanNeeded = true;
 			this.dirty.clear();
-			this.syncing = false;
+			this.endExclusive();
 			this.setStatus("ok");
 		} catch (err) {
-			this.syncing = false;
+			this.endExclusive();
 			if (err instanceof SyncCancelled) this.setStatus("idle");
 			else {
 				new Notice(t("ow.failed", { error: errMsg(err) }), 8000);
@@ -1498,15 +1766,13 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				this.setStatus("error", errMsg(err));
 			}
 		} finally {
-			this.syncing = false;
 			this.refreshHealth(true);
 		}
 	}
 
 	async resetToGitHub() {
 		if (!this.isConfigured()) return void new Notice(this.configProblem()!);
-		if (this.syncing) return void new Notice(t("notice.busy"));
-		this.syncing = true;
+		if (!this.beginExclusive()) return;
 		this.setStatus("syncing", t("m.comparing"));
 		try {
 			await this.loadGitignore();
@@ -1528,10 +1794,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			new Notice(n ? t("m.matched", { n }) : t("m.alreadyMatches"));
 			this.fullScanNeeded = true;
 			this.dirty.clear();
-			this.syncing = false;
+			this.endExclusive();
 			this.setStatus("ok");
 		} catch (err) {
-			this.syncing = false;
+			this.endExclusive();
 			if (err instanceof SyncCancelled) this.setStatus("idle");
 			else {
 				new Notice(t("m.resetFailed", { error: errMsg(err) }), 8000);
@@ -1541,7 +1807,6 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			}
 			this.log(errMsg(err));
 		} finally {
-			this.syncing = false;
 			this.refreshHealth(true);
 		}
 	}
@@ -1678,8 +1943,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		const api = this.getApiBase();
 		const lines = [
 			`Vault Sync for Git ${this.manifest.version} · Obsidian ${apiVersion} · ${Platform.isMobile ? "mobile" : "desktop"}${Platform.isIosApp ? " iOS" : Platform.isAndroidApp ? " Android" : Platform.isMacOS ? " macOS" : Platform.isWin ? " Windows" : Platform.isLinux ? " Linux" : ""}`,
-			`Host: ${s.provider} (${/^https?:\/\/([^/]+)/.exec(api)?.[1] ?? "?"}) · sign-in: ${this.usingGitHubApp() ? "GitHub App" : this.getToken() ? "token" : "none"}`,
-			`Mode: ${s.mode} · conflicts: ${s.conflictStrategy} · settings folder: ${s.syncConfigDir} · hidden: ${s.syncHidden} · .gitignore: ${s.useGitignore} · LFS: ${s.lfsThresholdMB} MB · encrypted: ${this.isEncrypted()}`,
+			`Host: ${s.provider} (${/^https?:\/\/([^/]+)/.exec(api)?.[1] ?? "?"}) · sign-in: ${this.usingGitHubApp() ? "GitHub App" : this.usingGitLabApp() ? "GitLab app" : this.getToken() ? "token" : "none"}`,
+			`Mode: ${s.mode} · conflicts: ${s.conflictStrategy} · settings folder: ${s.syncConfigDir} · hidden: ${s.syncHidden}${s.syncHiddenNested ? " (nested)" : ""} · .gitignore: ${s.useGitignore} · LFS: ${s.lfsThresholdMB} MB · encrypted: ${this.isEncrypted()}`,
 			`Triggers: startup ${s.syncOnStartup}, edits ${s.syncOnChange} (${s.changeDebounceSec}s), every ${s.intervalMin} min, resume ${s.syncOnResume}, background ${s.syncOnBackground}, open ${s.syncOnOpen} · paused: ${this.isPaused()} · battery saver: ${this.batterySaver()}`,
 			`Shared folders: ${s.sharedFolders.length} · mirror: ${s.mirror?.enabled ? s.mirror.provider : "off"}`,
 			`State: head ${this.state.head?.slice(0, 7) ?? "none"} · ${Object.keys(this.state.base).length} files · last sync ${this.state.lastSync ? new Date(this.state.lastSync).toISOString() : "never"} · on demand ${Object.keys(this.state.remoteOnly ?? {}).length}`,
@@ -1716,6 +1981,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (await this.app.vault.adapter.exists(path)) current = asText(path, await this.io.read(path));
 			new FileVersionModal(this.app, path, commit, asText(path, data), data.byteLength, current, async (asCopy) => {
 				const target = asCopy ? restoredCopyPath(path, commit.sha) : path;
+				if (!asCopy && (await this.app.vault.adapter.exists(path))) {
+					// Replacing different current contents: ask first (restoring as a copy keeps both).
+					const now = await this.io.read(path).catch(() => null);
+					const a = now ? new Uint8Array(now) : null;
+					const b = new Uint8Array(data);
+					const same = !!a && a.length === b.length && a.every((x, i) => x === b[i]);
+					if (!same && !(await confirmPlan(this.app, t("u.restoreThis"), t("m.restoreOverBody", { path, date: new Date(commit.date).toLocaleString() }), [], t("u.restoreThis"), true))) return;
+				}
 				try {
 					// VaultIO recreates missing folders and handles hidden (config) paths.
 					await this.io.write(target, data);

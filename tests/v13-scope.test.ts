@@ -122,3 +122,41 @@ test("a failed disk listing aborts the sync instead of deleting hidden files", a
 	app.vault.adapter.list = list;
 	assert.ok(gh.headFiles().has(".editorconfig"), "nothing deleted");
 });
+
+test("nested .gitignore rules apply only inside their folder", async () => {
+	const { scopeGitignore } = await import("../src/glob.ts");
+	assert.deepEqual(scopeGitignore("Notes/sub", ["# c", "", "*.tmp", "build/", "/only-here.md", "a/b.md", "!keep.tmp"]), [
+		"/Notes/sub/**/*.tmp",
+		"/Notes/sub/**/build/",
+		"/Notes/sub/only-here.md",
+		"/Notes/sub/a/b.md",
+		"!/Notes/sub/**/keep.tmp",
+	]);
+	const m = compileGlobs(scopeGitignore("Notes", ["*.tmp", "!keep.tmp"]));
+	assert.equal(m("Notes/x.tmp"), true);
+	assert.equal(m("Notes/deep/y.tmp"), true);
+	assert.equal(m("Other/x.tmp"), false, "outside the folder");
+	assert.equal(m("Notes/keep.tmp"), false);
+});
+
+test("hidden files inside normal folders sync only with the nested option; subfolder .gitignore files sync with .gitignore support", async () => {
+	const gh = new FakeGitHub();
+	const a = device("A", gh, { syncHidden: true, syncHiddenNested: true, useGitignore: true });
+	a.fs.put("Notes/a.md", "a\n");
+	a.fs.put("Notes/.assets/pic.txt", "p\n");
+	a.fs.put("Project/.gitignore", "*.log\n");
+	a.fs.put("Project/.git/HEAD", "ref\n");
+	await a.sync();
+	const remote = gh.headFiles();
+	assert.ok(remote.has("Notes/.assets/pic.txt"), "nested hidden file synced");
+	assert.ok(remote.has("Project/.gitignore"), "subfolder .gitignore synced");
+	assert.ok(!remote.has("Project/.git/HEAD"), "never a .git folder");
+
+	const b = device("B", gh, { syncHidden: true, useGitignore: true }); // nested option off
+	await b.sync();
+	assert.equal(b.fs.text("Project/.gitignore"), "*.log\n", ".gitignore files still come down");
+	assert.ok(!b.fs.files.has("Notes/.assets/pic.txt"), "other nested hidden files don't");
+	b.fs.files.delete("Notes/a.md");
+	await b.sync();
+	assert.ok(gh.headFiles().has("Notes/.assets/pic.txt"), "and B never deletes them");
+});

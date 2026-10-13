@@ -13,6 +13,7 @@ function client(ffOk = true) {
 		createBlob: async () => (calls.blobs++, `b${n++}`),
 		createCommit: async () => (calls.commits++, `c${n++}`),
 		updateRef: async () => ffOk,
+		getRef: async () => "p",
 	});
 	return { gh, calls };
 }

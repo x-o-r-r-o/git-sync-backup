@@ -30,6 +30,6 @@ The directory re-scans every new release. If a release fails review, it is hidde
 - **Manifest:** id has no "obsidian" and doesn't end in "plugin"; the name is Basic Latin; the description starts with a verb, ends with a period, and is under 250 characters; `isDesktopOnly: false` (no Node or Electron APIs); minAppVersion 1.11.4 matches the APIs used.
 - **Files:** LICENSE (MIT). README discloses that an account is needed, the network use (only the Git host you configure), and that there is no telemetry, no ads and no access outside the vault.
 - **Code:**
-  - `eslint-plugin-obsidianmd`: 0 errors. The 9 warnings are the deprecated `display()`/`setWarning()`, which Obsidian versions before 1.13 still require.
+  - `eslint-plugin-obsidianmd`: 0 errors. The 2 warnings are the deprecated `display()`/`setWarning()`, which Obsidian versions before 1.13 still require.
   - No innerHTML, no inline styles, no browser storage, no default hotkeys; command names don't include the plugin name.
   - Uses `requestUrl`, `fileManager.trashFile`, `normalizePath` and `configDir`.

@@ -81,29 +81,38 @@ export class ConflictModal extends Modal {
 		};
 
 		if (info.localText !== null && info.remoteText !== null) {
-			const tabs = contentEl.createDiv({ cls: "vsg-tabs" });
-			const pane = contentEl.createDiv();
-			let build: (() => string) | null = null;
+			const tabs = contentEl.createDiv({ cls: "vsg-tabs", attr: { role: "tablist" } });
+			// The picker is built once and only hidden while the full diff shows, so picks survive switching.
+			const pickPane = contentEl.createDiv();
+			pickPane.createEl("p", { cls: "vsg-muted", text: tr("u.pickHint") });
+			const build = renderHunkPicker(pickPane, info.localText, info.remoteText, { a: L, b: R });
+			const diffPane = contentEl.createDiv();
+			let diffBuilt = false;
+			let current: "pick" | "diff" = "pick";
+			const pickTab = tabs.createEl("button", { text: tr("u.chooseChanges"), attr: { role: "tab" } });
+			const diffTab = tabs.createEl("button", { text: tr("u.fullDiff"), attr: { role: "tab" } });
 			const show = (which: "pick" | "diff") => {
-				pane.empty();
-				tabs.querySelectorAll("button").forEach((b, i) => b.toggleClass("is-active", (i === 0) === (which === "pick")));
-				if (which === "pick") {
-					pane.createEl("p", { cls: "vsg-muted", text: tr("u.pickHint") });
-					build = renderHunkPicker(pane, info.localText!, info.remoteText!, { a: L, b: R });
-				} else {
-					build = null;
-					renderDiff(pane, info.localText!, info.remoteText!, { oldLabel: L, newLabel: R });
+				current = which;
+				if (which === "diff" && !diffBuilt) {
+					renderDiff(diffPane, info.localText!, info.remoteText!, { oldLabel: L, newLabel: R });
+					diffBuilt = true;
+				}
+				pickPane.toggle(which === "pick");
+				diffPane.toggle(which === "diff");
+				for (const [tab, k] of [[pickTab, "pick"], [diffTab, "diff"]] as const) {
+					tab.toggleClass("is-active", k === which);
+					tab.setAttr("aria-selected", String(k === which));
 				}
 			};
-			tabs.createEl("button", { text: tr("u.chooseChanges") }).onClickEvent(() => show("pick"));
-			tabs.createEl("button", { text: tr("u.fullDiff") }).onClickEvent(() => show("diff"));
+			pickTab.onClickEvent(() => show("pick"));
+			diffTab.onClickEvent(() => show("diff"));
 			show("pick");
 			new Setting(contentEl).addButton((b) =>
 				b
 					.setButtonText(tr("u.apply"))
 					.setCta()
 					.onClick(() => {
-						if (build) pick({ custom: build() });
+						if (current === "pick") pick({ custom: build() });
 						else show("pick");
 					}),
 			);
@@ -382,21 +391,24 @@ export class FileVersionModal extends Modal {
 			text: `${new Date(this.commit.date).toLocaleString()} · ${this.commit.message.split("\n")[0]}`,
 			cls: "vsg-commit-sub",
 		});
-		const tabs = this.contentEl.createDiv({ cls: "vsg-tabs" });
+		const tabs = this.contentEl.createDiv({ cls: "vsg-tabs", attr: { role: "tablist" } });
 		const pane = this.contentEl.createDiv();
 		const canDiff = this.text !== null && typeof this.currentText === "string";
 		const show = (which: "diff" | "full") => {
 			pane.empty();
-			tabs.querySelectorAll("button").forEach((b) => b.toggleClass("is-active", b.dataset.k === which));
+			tabs.querySelectorAll("button").forEach((b) => {
+				b.toggleClass("is-active", b.dataset.k === which);
+				b.setAttr("aria-selected", String(b.dataset.k === which));
+			});
 			if (which === "diff" && canDiff) renderDiff(pane, this.currentText as string, this.text!, { oldLabel: tr("u.currentFile"), newLabel: tr("u.thisVersion") });
 			else pane.createEl("pre", { cls: "vsg-version", text: this.text ?? tr("u.binaryFile", { n: this.size }) });
 		};
 		if (canDiff) {
-			const b = tabs.createEl("button", { text: tr("u.compareCurrent") });
+			const b = tabs.createEl("button", { text: tr("u.compareCurrent"), attr: { role: "tab" } });
 			b.dataset.k = "diff";
 			b.onClickEvent(() => show("diff"));
 		}
-		const f = tabs.createEl("button", { text: tr("u.fullVersion") });
+		const f = tabs.createEl("button", { text: tr("u.fullVersion"), attr: { role: "tab" } });
 		f.dataset.k = "full";
 		f.onClickEvent(() => show("full"));
 		show(canDiff ? "diff" : "full");
@@ -478,6 +490,30 @@ export class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
 	}
 	onChooseItem(f: TFolder): void {
 		this.onPick(f);
+	}
+}
+
+export interface RepoChoice {
+	owner: string;
+	name: string;
+	private: boolean;
+	defaultBranch: string;
+}
+
+/** Pick one of the repositories the token (or the signed-in app) can use. */
+export class RepoSuggestModal extends FuzzySuggestModal<RepoChoice> {
+	constructor(app: App, private repos: RepoChoice[], private onPick: (r: RepoChoice) => void) {
+		super(app);
+		this.setPlaceholder(tr("s.repoPick"));
+	}
+	getItems(): RepoChoice[] {
+		return this.repos;
+	}
+	getItemText(r: RepoChoice): string {
+		return `${r.owner}/${r.name}${r.private ? "" : ` (${tr("w.public")})`}`;
+	}
+	onChooseItem(r: RepoChoice): void {
+		this.onPick(r);
 	}
 }
 

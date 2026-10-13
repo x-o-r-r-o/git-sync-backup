@@ -33,6 +33,20 @@ export const obsidianTransport: Transport = async (req) => {
 	return { status: res.status, json, arrayBuffer: res.arrayBuffer, headers: res.headers ?? {} };
 };
 
+/**
+ * True when `url` has the same scheme, host and port as `base` (host compared case-insensitively;
+ * default ports normalised). Used before sending credentials to a URL that a server returned.
+ */
+export function sameOrigin(url: string, base: string): boolean {
+	try {
+		const a = new URL(url);
+		const b = new URL(base);
+		return a.protocol === b.protocol && a.host.toLowerCase() === b.host.toLowerCase();
+	} catch {
+		return false;
+	}
+}
+
 export function header(res: HttpResponse, name: string): string | undefined {
 	const k = Object.keys(res.headers).find((x) => x.toLowerCase() === name.toLowerCase());
 	return k ? res.headers[k] : undefined;

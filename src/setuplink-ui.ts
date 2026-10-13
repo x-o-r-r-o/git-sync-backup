@@ -87,8 +87,9 @@ export class CreateSetupLinkModal extends Modal {
 		contentEl.empty();
 		const p = this.plugin;
 		contentEl.createEl("p", { cls: "vsg-muted", text: t("link.createIntro") });
-		// Signed in with GitHub: the new device signs in itself (its own short-lived tokens).
-		const canIncludeToken = !p.usingGitHubApp() && !!p.getToken();
+		// Signed in with GitHub or GitLab: the new device signs in itself (its own short-lived tokens);
+		// a sign-in token must never travel in a link.
+		const canIncludeToken = !p.usingSignIn() && !!p.getToken();
 		if (canIncludeToken) {
 			new Setting(contentEl)
 				.setName(t("link.includeToken"))
@@ -99,8 +100,8 @@ export class CreateSetupLinkModal extends Modal {
 						this.render();
 					}),
 				);
-		} else if (p.usingGitHubApp()) {
-			contentEl.createEl("p", { cls: "vsg-muted", text: t("link.signInNote") });
+		} else if (p.usingSignIn()) {
+			contentEl.createEl("p", { cls: "vsg-muted", text: t("link.signInNote", { host: p.hostLabel() }) });
 		}
 		const out = contentEl.createDiv({ cls: "vsg-link-out", text: this.includeToken ? t("link.encrypting") : "" });
 		this.build(out).catch((e) => out.setText(errMsg(e)));
@@ -109,7 +110,7 @@ export class CreateSetupLinkModal extends Modal {
 	private async build(out: HTMLElement) {
 		const payload = this.payload();
 		let code = "";
-		if (this.includeToken) {
+		if (this.includeToken && !this.plugin.usingSignIn()) {
 			code = newSetupCode();
 			payload.token = await encryptToken(this.plugin.getToken(), code);
 		}

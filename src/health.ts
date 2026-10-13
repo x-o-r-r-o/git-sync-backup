@@ -46,6 +46,7 @@ export class HealthView extends ItemView {
 	private plugin: VaultSyncPlugin;
 	private remoteInfo: { ahead: boolean | null; budget: string; devices: [string, number][]; versions: Map<string, string>; error?: string } | null = null;
 	private loadingRemote = false;
+	private remoteAgain = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultSyncPlugin) {
 		super(leaf);
@@ -74,8 +75,12 @@ export class HealthView extends ItemView {
 
 	private async loadRemote() {
 		const p = this.plugin;
-		if (this.loadingRemote || !p.isConfigured()) return;
+		if (!p.isConfigured()) return;
+		// A refresh asked for mid-load (e.g. right after a sync) runs once more when this one ends,
+		// so the panel never keeps a result fetched before that sync.
+		if (this.loadingRemote) return void (this.remoteAgain = true);
 		this.loadingRemote = true;
+		this.remoteAgain = false;
 		try {
 			const [head, rl, commits] = await Promise.all([
 				p.gh.getRef(p.settings.branch),
@@ -104,7 +109,40 @@ export class HealthView extends ItemView {
 		} finally {
 			this.loadingRemote = false;
 			this.render();
+			if (this.remoteAgain) {
+				this.remoteAgain = false;
+				void this.loadRemote();
+			}
 		}
+	}
+
+	/** Conflict copies with resolve / compare / open / delete. */
+	private renderConflicts() {
+		const p = this.plugin;
+		const copies = p.conflictCopies();
+		if (copies.length) {
+			const s = this.section(t("health.conflicts", { n: copies.length }), "git-merge");
+			s.createDiv({ cls: "vsg-muted", text: t("health.conflictsHint") });
+			for (const { copy, original } of copies) {
+				const row = s.createDiv({ cls: "vsg-h-row" });
+				row.createDiv({ text: copy.path, cls: "vsg-h-path" });
+				const b = row.createDiv({ cls: "vsg-h-row-actions" });
+				if (original) {
+					this.button(b, t("h.resolve"), async () => {
+						if (p.isSyncing()) return void new Notice(t("notice.busy"));
+						if (await p.resolveConflictCopy(original, copy)) this.refresh();
+					}, true);
+					this.button(b, t("health.compare"), () => p.compareFiles(original, copy));
+				}
+				this.button(b, t("health.open"), () => void this.app.workspace.getLeaf(true).openFile(copy));
+				this.button(b, t("health.deleteCopy"), async () => {
+					if (!(await confirmPlan(this.app, t("health.deleteCopy"), t("h.deleteCopyBody"), [{ title: t("h.conflictCopy"), items: [copy.path] }], t("health.deleteCopy"), true))) return;
+					await p.trashFile(copy);
+					this.refresh();
+				});
+			}
+		}
+
 	}
 
 	private section(title: string, icon: string): HTMLElement {
@@ -179,6 +217,8 @@ export class HealthView extends ItemView {
 		if (!p.isConfigured()) {
 			// Nothing to show until a host and repository are set up.
 			el.createDiv({ cls: "vsg-muted", text: t("h.setupHint") });
+			// Conflict copies are local files: they can be resolved without a repository.
+			this.renderConflicts();
 			return;
 		}
 
@@ -233,30 +273,7 @@ export class HealthView extends ItemView {
 			}
 		}
 
-		// ---- conflict copies ----
-		const copies = p.conflictCopies();
-		if (copies.length) {
-			const s = this.section(t("health.conflicts", { n: copies.length }), "git-merge");
-			s.createDiv({ cls: "vsg-muted", text: t("health.conflictsHint") });
-			for (const { copy, original } of copies) {
-				const row = s.createDiv({ cls: "vsg-h-row" });
-				row.createDiv({ text: copy.path, cls: "vsg-h-path" });
-				const b = row.createDiv({ cls: "vsg-h-row-actions" });
-				if (original) {
-					this.button(b, t("h.resolve"), async () => {
-						if (p.isSyncing()) return void new Notice(t("notice.busy"));
-						if (await p.resolveConflictCopy(original, copy)) this.refresh();
-					}, true);
-					this.button(b, t("health.compare"), () => p.compareFiles(original, copy));
-				}
-				this.button(b, t("health.open"), () => void this.app.workspace.getLeaf(true).openFile(copy));
-				this.button(b, t("health.deleteCopy"), async () => {
-					if (!(await confirmPlan(this.app, t("health.deleteCopy"), t("h.deleteCopyBody"), [{ title: t("h.conflictCopy"), items: [copy.path] }], t("health.deleteCopy"), true))) return;
-					await p.trashFile(copy);
-					this.refresh();
-				});
-			}
-		}
+		this.renderConflicts();
 
 		// ---- on demand ----
 		const onDemand = p.remoteOnlyFiles();

@@ -82,6 +82,15 @@ function sameLines(x: string[], y: string[]): boolean {
 	return true;
 }
 
+// Lines that look like conflict markers. If a side already contains one, emitting our own markers
+// around it would produce a block that can't be parsed back reliably (and "keep this side" could drop
+// lines), so such conflicts are left to the caller's keep-both path instead.
+const MARKER_LIKE = /^(<{7} |={7}\r?$|>{7} |\|{7})/m;
+
+export function hasMarkerLikeLines(text: string): boolean {
+	return MARKER_LIKE.test(text);
+}
+
 function pushBlock(out: string[], lines: string[]) {
 	for (const l of lines) out.push(l);
 	const last = out[out.length - 1];
@@ -90,7 +99,8 @@ function pushBlock(out: string[], lines: string[]) {
 
 /**
  * Merge `local` and `remote`, both derived from `base`.
- * Returns null if the files are too large/different to merge in reasonable memory.
+ * Returns null if the files are too large/different to merge in reasonable memory, or if the merge
+ * would need conflict markers while a side already contains marker-like lines (callers then keep both).
  */
 export function merge3(base: string, local: string, remote: string, labels: MergeLabels): MergeResult | null {
 	if (local === remote) return { clean: true, conflicts: 0, text: local };
@@ -106,6 +116,7 @@ export function merge3(base: string, local: string, remote: string, labels: Merg
 
 	const out: string[] = [];
 	let conflicts = 0;
+	let markerLike: boolean | null = null;
 	let i = 0;
 	let a = 0;
 	let b = 0;
@@ -134,6 +145,8 @@ export function merge3(base: string, local: string, remote: string, labels: Merg
 		else if (sameLines(bC, oC)) out.push(...aC);
 		else if (sameLines(aC, bC)) out.push(...aC);
 		else {
+			if (markerLike === null) markerLike = hasMarkerLikeLines(local) || hasMarkerLikeLines(remote);
+			if (markerLike) return null;
 			conflicts++;
 			const lastOut = out[out.length - 1];
 			if (lastOut !== undefined && !lastOut.endsWith("\n")) out[out.length - 1] = lastOut + "\n";

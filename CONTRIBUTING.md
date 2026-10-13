@@ -31,9 +31,17 @@ The live suite runs against the real GitHub API in a repository you are happy to
 VSG_LIVE_TOKEN=$(gh auth token) VSG_LIVE_REPO=owner/throwaway-repo npm run test:live
 ```
 
+Every host can be tested the same way with `tests/live/hosts.live.test.ts`. It works on a new throwaway branch and never deletes anything:
+
+```bash
+VSG_LIVE_KIND=gitlab VSG_LIVE_TOKEN=… VSG_LIVE_REPO=me/throwaway npm run test:hosts
+```
+
+`VSG_LIVE_KIND` is `github`, `gitlab`, `gitea` or `bitbucket`; set `VSG_LIVE_API` for self-hosted servers (e.g. `https://codeberg.org/api/v1`) and `VSG_LIVE_PR=1` to include the pull request test.
+
 ## Rules for changes
 
-- **Desktop and mobile.** The bundle may only `require("obsidian")`. No Node or Electron APIs, no native modules, no runtime dependencies. Use `requestUrl`, WebCrypto and the vault adapter.
+- **Desktop and mobile.** The bundle may only `require("obsidian")` and the `@codemirror/*` packages Obsidian provides. No Node or Electron APIs, no native modules, no runtime dependencies. Use `requestUrl`, WebCrypto and the vault adapter.
 - **Never lose data.** Edits beat deletions, deleted files go to the trash, and anything ambiguous keeps both versions. Changes to sync decisions (`src/plan.ts`, `src/sync.ts`) need tests.
 - **Pass lint and tests.** `npm run lint` must report 0 errors and `npm test` must pass.
 - **Lockfile.** Commit `package-lock.json` whenever dependencies change, and check that `npm ci` succeeds.

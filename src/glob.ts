@@ -55,3 +55,24 @@ export function compileGlobs(lines: string[]): (path: string) => boolean {
 		return hit;
 	};
 }
+
+/**
+ * Rewrites the lines of a .gitignore found in folder `dir` so they only apply inside it, as git does:
+ * a pattern with a slash (other than a trailing one) is relative to that folder, one without matches
+ * at any depth below it. Comments and blank lines are dropped; "!" re-includes are kept.
+ */
+export function scopeGitignore(dir: string, lines: string[]): string[] {
+	const base = dir.replace(/^\/+|\/+$/g, "");
+	if (!base) return lines;
+	const out: string[] = [];
+	for (const raw of lines) {
+		const line = raw.trim();
+		if (!line || line.startsWith("#")) continue;
+		const neg = line.startsWith("!") ? "!" : "";
+		let p = neg ? line.slice(1) : line;
+		if (p.startsWith("\\!") || p.startsWith("\\#")) p = p.slice(1);
+		const anchored = p.replace(/\/+$/, "").includes("/");
+		out.push(anchored ? `${neg}/${base}/${p.replace(/^\/+/, "")}` : `${neg}/${base}/**/${p}`);
+	}
+	return out;
+}

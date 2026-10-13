@@ -1,6 +1,6 @@
 # Vault Sync for Git
 
-**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Gitea, Bitbucket, Gitee or Azure DevOps.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
+**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Gitea or Bitbucket.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
 
 Your vault lives in a repository you own, on the host you choose. Every device syncs through that repository, which also keeps a full history of every change. You can switch hosts at any time in the setup wizard or settings.
 
@@ -10,8 +10,6 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 | **GitLab** (gitlab.com and self-managed) | Beta | Atomic multi-file commits with per-file locking. |
 | **Gitea / Forgejo** (including **Codeberg** and self-hosted servers) | Beta | Atomic multi-file commits with per-file locking. Needs Gitea or Forgejo 1.20+. |
 | **Bitbucket Cloud** | Beta | Multi-file commits checked against the expected parent. The first sync downloads each file once to index it. |
-| **Azure DevOps** (Services and Server) | Beta | Atomic multi-file pushes checked against the expected commit. |
-| **Gitee** | Beta | One commit per changed file (Gitee's API has no multi-file commits), each checked against the file's last version. |
 
 ## Highlights
 
@@ -19,7 +17,7 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 - **Real merging.** Two devices editing different parts of a note are merged line by line. Canvases and frontmatter merge by structure, so tags added on two devices are combined. When the same lines change, both versions are kept, or you pick change by change.
 - **Safe by default.** Edits always win over deletions, deleted files go to the trash, a delete guard stops accidental mass deletions, and a file you are editing during a sync is never overwritten.
 - **Backups built in.** Every sync is one commit. Restore a single file, a folder or the whole vault to any earlier point, recover deleted files and take snapshot tags.
-- **Private by design.** Optional end-to-end encryption means the host only ever stores unreadable data, including file names. Sign in with GitHub instead of pasting a token, and credentials stay in Obsidian's secure storage.
+- **Private by design.** Optional end-to-end encryption means the host only ever stores unreadable data, including file names. Sign in with GitHub or GitLab instead of pasting a token, and credentials stay in Obsidian's secure storage.
 - **See before you sync.** Visual diffs, a review step with checkboxes, and a status panel that shows what's pending and how to fix problems.
 - **Fits every device.** Each device can sync only the folders it needs, and big attachments can stay in the repository and be downloaded on demand. Choose which parts of the settings folder sync, down to single plugins. Renames travel as renames, even when the file was also edited.
 - **A new device in seconds.** Scan a QR code or open a setup link from a device that already syncs. The plugin warns when another sync tool (Obsidian Sync, iCloud, Obsidian Git, …) is active on the same vault.
@@ -48,9 +46,13 @@ On github.com you don't need a token:
 
 Access renews automatically. Signing in is per device and can be undone with **Sign out**. On GitHub Enterprise, an administrator can register their own GitHub App and enter its client ID in settings (see [docs/AUTH.md](docs/AUTH.md)).
 
+### Sign in with GitLab
+
+On gitlab.com you don't need a token either: choose GitLab as the host, select **Sign in**, then **Copy and open GitLab**, and approve (the code is filled in). Access lasts two hours at a time and renews automatically; signing in is per device and can be undone with **Sign out**. On a self-managed GitLab server (17.9+), create a non-confidential OAuth application with **Device authorization grant** ticked and the `api` scope (Edit profile → Applications, see [docs/AUTH.md](docs/AUTH.md)) and enter its Application ID in settings (*GitLab application ID*).
+
 ### With an access token
 
-For GitLab, Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on GitHub:
+For Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on GitHub or GitLab:
 
 1. Create a **private** repository on your host, or use **Create private repository** in the settings.
 2. Create an access token (the wizard and settings link straight to the right page):
@@ -59,7 +61,7 @@ For GitLab, Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on G
    |---|---|
    | GitHub | [Fine-grained token](https://github.com/settings/personal-access-tokens/new): *Only select repositories* → your vault repository, **Contents: Read and write**. Add **Administration: Read and write** only if you want the plugin to create the repository. |
    | GitLab | Personal access token with the `api` scope. A project access token (role Developer, scope `api`) limits access to the one project. |
-   | Gitea / Forgejo / Codeberg | Settings → Applications: a token with **repository: Read and Write** and **user: Read**. |
+   | Gitea / Forgejo / Codeberg | Settings → Applications: a token with **repository: Read and Write** and **user: Read** (**user: Read and Write** if you want the plugin to create the repository). |
    | Bitbucket | Repository access token with **Repositories: Read and Write**. To pick or create repositories in the wizard, use an Atlassian API token with Bitbucket scopes, entered as `email:token`. |
 
 3. In Obsidian, open Settings → Vault Sync for Git, choose the host, paste the token, set owner and repository, then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
@@ -71,7 +73,7 @@ Repeat on each device with the same repository. An existing vault on a second de
 
 On a device that already syncs, choose **Add another device** (status panel, settings, or the command palette). It shows a QR code and a link with the host, repository, branch and your sync choices. Install the plugin on the new device, then scan the code with its camera or open the link there. The new device shows exactly what the link will change and asks before applying it.
 
-- Signed in with GitHub: the new device signs in itself.
+- Signed in with GitHub or GitLab: the new device signs in itself; the sign-in token is never put in a link.
 - With a token: optionally include it. It is encrypted with a one-time code that is shown next to the QR code and never included in the link; type it on the new device.
 - Only open setup links you created yourself.
 
@@ -95,8 +97,8 @@ The token is stored only on the device, in Obsidian's secure storage. It is neve
 - **Modes:** two-way sync, backup only (upload, never changes local files) or pull only (read-only copy).
 - **Scope:** gitignore-style exclude patterns (`*`, `**`, `?`, `/` to anchor, `!` to re-include; the last matching pattern wins; brackets are literal) and a maximum file size. Files outside scope are never touched on either side.
 - **Settings folder, part by part:** turn on settings-folder sync, then choose appearance and themes, CSS snippets, hotkeys, core settings, which plugins are on, plugin code and plugin settings separately. **Choose per plugin** sets single plugins to code and settings, code only, settings only, or this device only, which is useful for plugins that store device-specific paths. Your exclude patterns still have the last word.
-- **Hidden files** (optional): files and folders at the top of the vault whose names start with a dot, such as `.github/` or `.editorconfig`. Never `.git`, `.trash` or the settings folder.
-- **`.gitignore`** (optional): files listed in the vault's `.gitignore` are not synced, and the `.gitignore` itself syncs to every device.
+- **Hidden files** (optional): files and folders at the top of the vault whose names start with a dot, such as `.github/` or `.editorconfig`. Turn on **Hidden files inside folders** to also include ones inside your notes folders (for example `Notes/.assets/`). Never `.git`, `.trash` or the settings folder.
+- **`.gitignore`** (optional): files listed in the vault's `.gitignore` files are not synced (a `.gitignore` inside a folder applies to that folder, as in Git), and the `.gitignore` files themselves sync to every device.
 - **Sync current file now** (command) syncs only the open note; everything else waits for the next sync. **Sync when opening a note** (optional) fetches its latest version first, at most every 30 seconds.
 - **Renames and moves** are detected, also when the file was edited at the same time. Nothing is downloaded again, open tabs and bookmarks follow the file, and moving a whole folder doesn't trip the delete guard.
 - **Line endings:** a change that is only CRLF ↔ LF is ignored (on by default).
@@ -108,6 +110,7 @@ When a file changed on both sides, choose what happens: **merge automatically** 
 
 - Markdown merges line by line. Frontmatter merges key by key, and lists such as `tags` and `aliases` merge as sets: adding tag A on your phone and tag B on your laptop gives you both.
 - `.canvas` and JSON files merge card by card and setting by setting.
+- **Conflict markers in the editor:** when a note contains `<<<<<<<` / `=======` / `>>>>>>>` blocks (from *merge with markers*, or anywhere else), each block gets **Keep this device**, **Keep repository** and **Keep both** buttons right in the note.
 - With **Ask me each time**, a side-by-side dialog lets you keep this device's version, the repository's version, or both, for each changed block.
 - A conflict copy can be **resolved** later from the status panel: pick change by change, the result goes into the note, and the copy goes to the trash.
 - Two conflicts on the same note never overwrite each other's copies.
@@ -160,6 +163,7 @@ Settings → *Shared folders*. Sync one folder with its own repository, for exam
 
 - The folder maps to the root of the shared repository, so collaborators can use it as a normal vault or repository, or to a folder inside it (for example `docs/`), leaving the rest of the repository alone.
 - **Conflicts as pull requests** (optional, per shared folder): when two people change the same lines, this device's version goes to a new branch with a pull request (merge request on GitLab) for the team to review, instead of a conflict copy. If the pull request can't be opened, it falls back to a conflict copy.
+- **GitHub-friendly Markdown** (optional, per shared folder): notes are stored so they read well on GitHub (wikilinks become normal links, callouts become GitHub alerts, `==highlights==` become `<mark>`), while your vault keeps the exact Obsidian text. A small hidden comment after each converted spot lets the original come back exactly; if a collaborator edits that spot on GitHub, their edit wins.
 - Right-click a folder → **Share this folder with a repository…** to start.
 - Each shared folder has its own state, can use its own host and token, and syncs after the main vault. Its status appears in the status panel.
 - The main repository never touches shared folders.
@@ -233,21 +237,22 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 ## Requirements
 
 - Obsidian 1.11.4 or newer, on desktop (Windows, macOS, Linux) or mobile (iOS, Android).
-- An account with a supported Git host, and an access token (or Sign in with GitHub on github.com).
+- An account with a supported Git host, and an access token (or Sign in on github.com or gitlab.com).
 
 ## Network use, accounts and privacy
 
 This section covers the disclosures Obsidian's developer policies require.
 
-- **Account required.** You need an account with a Git host (GitHub, GitLab, Bitbucket, Gitee, Azure DevOps, or a Gitea / Forgejo / Codeberg server) and an access token (or Sign in with GitHub). The plugin itself is free; no payment.
+- **Account required.** You need an account with a Git host (GitHub, GitLab, Bitbucket, or a Gitea / Forgejo / Codeberg server) and an access token (or Sign in with GitHub or GitLab). The plugin itself is free; no payment.
 - **Network use.** The plugin only connects to the Git host **you configure**, to read and write your repository:
-  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), your Gitea / Forgejo / Codeberg server, `api.bitbucket.org`, `gitee.com`, or `dev.azure.com` (or your Azure DevOps Server)
+  - `api.github.com` (or your GitHub Enterprise server), `gitlab.com` (or your GitLab server), your Gitea / Forgejo / Codeberg server, or `api.bitbucket.org`
   - the backup mirror's host, if you set up a mirror
-  - with *Install plugin code from official releases* on: `raw.githubusercontent.com` (Obsidian's community plugin list, read only when a plugin turned on elsewhere is missing or outdated here) and `github.com` (the plugin's release files, only after you confirm an install)
+  - with *Install plugin code from official releases* on: `raw.githubusercontent.com` (Obsidian's community plugin list, read only when a plugin turned on elsewhere is missing or outdated here) and `github.com` (the plugin's release files, only after you confirm an install, which GitHub serves from its file storage, `*.githubusercontent.com`)
   - with Sign in with GitHub, also `github.com/login/device/code` and `github.com/login/oauth/access_token` to sign in and renew access
+  - with Sign in with GitLab, also `/oauth/authorize_device` and `/oauth/token` on `gitlab.com` (or your GitLab server) to sign in and renew access
   - the same host's Git LFS endpoint, if you turn on large file storage
-  - for GitHub LFS, the file-storage address GitHub returns for each upload or download
-- **No telemetry, no ads, no third-party services.** Nothing is sent anywhere except your own repository host. The author runs no servers.
+  - for Git LFS on any host, the file-storage address the LFS server returns for each upload or download
+- **No telemetry, no ads, no third-party services.** Nothing is sent anywhere except the hosts listed above. The author runs no servers.
 - **Files.** The plugin lists and reads the files in your vault to sync them, and writes only inside your vault, including the vault's settings folder if you turn on settings sync. It keeps its own state in its plugin folder.
 - **Your data stays in your repository.** With end-to-end encryption on, the host only stores encrypted content and encrypted file names.
 
@@ -256,6 +261,7 @@ This section covers the disclosures Obsidian's developer policies require.
 - The token, API URL and device name are stored per device and never synced. A pasted token is bound to the host and API URL it was entered for, so a changed `data.json`, a setup link or switching hosts can't send it anywhere else.
 - Use a token limited to the vault repository. If it leaks, the damage is limited to that one repository.
 - **Sign in with GitHub** uses the *Vault Sync for Git* GitHub App with only *Contents: read and write* on the repositories you choose. Its access token lasts 8 hours and is renewed on the device; no client secret exists in the plugin, and the author never sees your tokens or data. Revoke it any time in GitHub → Settings → Applications.
+- **Sign in with GitLab** uses GitLab's `api` scope, which GitLab doesn't let apps narrow further: the token can reach every project your account can. Its access token lasts 2 hours and is renewed on the device. Revoke it in GitLab → Edit profile → Applications. To limit access to one project, use a project access token instead.
 - For pasted GitHub tokens, the status panel warns two weeks before the token expires, and a notice appears in the last week.
 - With **settings-folder sync** on, plugin code (`.obsidian/plugins/*/main.js`) syncs too. Anyone who can push to the repository can then run code on your devices. Keep the repository private and don't give others write access, or turn on *Install plugin code from official releases* so code only ever comes from the plugin's official release, after you confirm.
 - Remote paths are validated (no `..`, no absolute paths, no empty segments) before anything is written.
@@ -276,20 +282,19 @@ This section covers the disclosures Obsidian's developer policies require.
 - **GitLab:** beta. Atomic multi-file commits with per-file locking (`last_commit_id`), so concurrent edits from two devices are merged, never overwritten. GitLab's file listing has no sizes, so the plugin looks each new file's size up once and remembers it on the device.
 - **Gitea / Forgejo (1.20+), Codeberg:** beta. Atomic multi-file commits with per-file locking. Very large uploads are split into several commits. The server's API refuses files above its blob limit (10 MB by default); such files are reported instead of synced, so use Git LFS for them.
 - **Bitbucket Cloud:** beta. Commits carry the expected parent, so a concurrent push is detected. Bitbucket's API has no file hashes, so the plugin keeps a hash index of the repository on each device (in its plugin folder, never synced); after the first sync only changed files are fetched.
-- **Azure DevOps:** beta. Owner is `organization/project`. Every sync is one atomic push checked against the expected commit (very large uploads are split into several pushes). Use a personal access token with *Code: Read & write*.
-- **Gitee:** beta. Gitee's API writes one file per commit, so a sync of several files makes several commits (still checked against each file's last version; another device's push in between is detected). Gitee refuses large files through its API.
 - Snapshots are tags on every host. The API budget is shown for GitHub only.
 
 ## Limits
 
 - GitHub rejects files over 100 MB (the default limit here is 50 MB). Use Git LFS or exclude patterns for large media.
 - Plugin code synced through the settings folder needs an Obsidian restart on the other device to load.
-- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. Only hidden files at the top of the vault are synced, not hidden folders inside normal folders.
+- Files Obsidian doesn't index (the settings folder, hidden files, `.gitignore`) are checked every few minutes (at most every 5 minutes, and on every full scan), rather than right after each change. Hidden files inside normal folders are only synced with *Hidden files inside folders* on.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
-- Sign in with GitHub works on github.com. The other hosts use access tokens.
-- GitHub is tested against the real API on every release. GitLab, Gitea, Bitbucket, Gitee and Azure DevOps are tested against simulated servers, which is why they are marked beta. Reports from real servers and phones are welcome.
+- Sign in works on github.com and gitlab.com, and on GitHub Enterprise or self-managed GitLab with your own app. The other hosts use access tokens.
+- GitHub-friendly Markdown doesn't rewrite links relative to the note's folder, and doesn't convert callouts nested inside other quotes.
+- GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0. Hosts other than GitHub are still marked beta until they have more real-world use. Reports from real servers and phones are welcome.
 - Conflicts as pull requests are available for shared folders. Empty folders aren't kept while end-to-end encryption is on.
-- On Windows, a note renamed elsewhere to a name Windows can't store (such as `a:b.md`) is kept under its old name here. If it was also edited at the same time, the old copy goes to the trash; the edited note stays in the repository under its new name.
+- On Windows, a note renamed elsewhere to a name Windows can't store (such as `a:b.md`) is kept under its old name here, and the status panel lists the name to fix.
 
 ## Development
 
@@ -310,7 +315,9 @@ Main source files:
 | `src/merge.ts`, `src/smartmerge.ts` | Line merge (diff3) and structure-aware merge for JSON, canvas and frontmatter |
 | `src/remote.ts`, `src/hosts.ts` | Host interface and registry |
 | `src/github.ts`, `src/gitlab.ts`, `src/gitea.ts`, `src/bitbucket.ts` | Host clients on Obsidian's `requestUrl` |
-| `src/codec.ts`, `src/crypto.ts`, `src/lfs.ts` | Shared-folder mapping, encryption and Git LFS layers |
+| `src/ghapp.ts`, `src/gitlabapp.ts`, `src/ghapp-ui.ts` | Sign in with GitHub / GitLab (device flow) |
+| `src/codec.ts`, `src/crypto.ts`, `src/lfs.ts`, `src/ghformat.ts` | Shared-folder mapping, encryption, Git LFS and GitHub-friendly Markdown layers |
+| `src/conflict-editor.ts` | Keep/keep-both buttons on conflict markers in the editor |
 | `src/main.ts`, `src/settings-tab.ts`, `src/wizard.ts`, `src/health.ts`, `src/ui.ts` | Plugin, settings, setup wizard, status panel and dialogs |
 | `src/locales/` | Translations |
 

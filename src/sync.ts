@@ -8,10 +8,10 @@ import { MARKER_PATH } from "./crypto.ts";
 /** Repository file listing the vault's empty folders (git can't store empty folders). */
 export const FOLDERS_PATH = ".vault-sync/folders.json";
 import { NotFastForward } from "./remote.ts";
-import type { Remote, TreeEntry, Upsert } from "./remote.ts";
+import type { BlobHint, Remote, TreeEntry, Upsert } from "./remote.ts";
 import { compileGlobs } from "./glob.ts";
 import { VaultIO } from "./io.ts";
-import { lcsMatch, merge3, splitLines } from "./merge.ts";
+import { merge3 } from "./merge.ts";
 import { decide, detectRenames, detectSimilarRenames } from "./plan.ts";
 import { smartMerge } from "./smartmerge.ts";
 import type { Decision, SyncMode } from "./plan.ts";
@@ -139,11 +139,11 @@ export class SyncCancelled extends Error {}
  * a hidden file inside a normal folder would look deleted on the next sync), and must not be .git,
  * .trash or an Obsidian settings folder (this device's, or another one such as ".obsidian-mobile").
  */
-function hiddenSyncable(p: string, cfg: string): boolean {
-	if (!p.startsWith(".")) return false;
-	const top = p.split("/")[0];
-	if (top === ".git" || top === ".trash" || top === ".vault-sync" || top === cfg || /^\.obsidian/i.test(top)) return false;
-	return !p.split("/").includes(".git");
+function hiddenSyncable(p: string, cfg: string, nested = false): boolean {
+	if (!p.startsWith(".") && !nested) return false;
+	// Never Git internals, trash, this plugin's metadata or a vault settings folder, at any depth
+	// (nested vaults keep plugin settings with API keys there).
+	return !p.split("/").some((seg) => seg === ".git" || seg === ".trash" || seg === ".vault-sync" || seg === cfg || /^\.obsidian/i.test(seg));
 }
 class StaleRemote extends Error {}
 class EditedDuringSync extends Error {
@@ -157,6 +157,8 @@ interface RemoteEntry {
 	mode: string;
 	/** Path in the repository (differs from the vault path when a codec maps paths). */
 	raw: string;
+	/** Stored size from the listing (for an LFS file: the pointer's size). */
+	size?: number;
 }
 
 interface Upload {
@@ -268,8 +270,11 @@ export class SyncEngine {
 		}
 	}
 
+	/** Repository path and commit of each remote blob seen in the last listing (sha → hint). */
+	private blobHints = new Map<string, BlobHint>();
+
 	private async verifiedBlob(sha: string, path: string): Promise<ArrayBuffer> {
-		const data = await this.gh.getBlob(sha);
+		const data = await this.gh.getBlob(sha, this.blobHints.get(sha));
 		if (/^[0-9a-f]{40}$/i.test(sha) && (await gitBlobSha(data)) !== sha.toLowerCase()) {
 			throw new Error(`${path} couldn't be downloaded completely from ${this.gh.label} (got ${data.byteLength} bytes). The server may limit the size of files it sends through its API.`);
 		}
@@ -310,8 +315,9 @@ export class SyncEngine {
 			if (included && !included(p) && !p.startsWith(cfg + "/")) return false;
 			if (!isHiddenPath(p)) return true;
 			if (p.startsWith(cfg + "/")) return this.s.syncConfigDir && !isHiddenPath(p.slice(cfg.length + 1));
-			if (p === ".gitignore" && this.s.useGitignore) return true;
-			return this.s.syncHidden && hiddenSyncable(p, cfg);
+			// .gitignore files (the vault's and its subfolders') sync when .gitignore support is on.
+			if ((p === ".gitignore" || p.endsWith("/.gitignore")) && this.s.useGitignore && hiddenSyncable(p, cfg, true)) return true;
+			return this.s.syncHidden && hiddenSyncable(p, cfg, this.s.syncHiddenNested);
 		};
 	}
 
@@ -321,7 +327,7 @@ export class SyncEngine {
 		const ctx = await this.gather(false, {}, true, { mode });
 		for (const [from, to] of ctx.caseRenames) this.rekey(ctx, from, to);
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
+		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas, { cache: ctx.cacheNext, remote: ctx.remote });
 		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, ctx.skipped, () => {});
 		return { decisions, skipped: ctx.skipped, localShas: ctx.localShas, remoteShas: ctx.remoteShas, base: ctx.base };
 	}
@@ -417,6 +423,7 @@ export class SyncEngine {
 			this.s.syncConfigDir,
 			this.s.syncConfigDir ? configPatterns(this.s.configSync) : [],
 			this.s.syncHidden,
+			this.s.syncHiddenNested,
 			this.s.useGitignore ? (this.host.gitignorePatterns?.() ?? []) : false,
 			this.s.maxFileSizeMB,
 			ds?.include ?? [],
@@ -427,32 +434,49 @@ export class SyncEngine {
 		]);
 	}
 
-	/** Renamed-and-edited files: pair leftover delete + add decisions by content similarity. */
-	private async similarRenames(decisions: Decision[], base: Record<string, string>, local: Map<string, string>, remote: Map<string, string>): Promise<Decision[]> {
+	/**
+	 * Renamed-and-edited files: pair leftover delete + add decisions by content similarity. Only text
+	 * files are read, and only when their known size (local scan, remote listing) is small: a deleted
+	 * video next to a new note must never download the video.
+	 */
+	private async similarRenames(
+		decisions: Decision[],
+		base: Record<string, string>,
+		local: Map<string, string>,
+		remote: Map<string, string>,
+		sizes: { cache: SyncState["cache"]; remote: Map<string, RemoteEntry> | null },
+	): Promise<Decision[]> {
 		const texts = new Map<string, string | null>();
-		const MAX = 512 * 1024;
+		const MAX = 2 * 1024 * 1024;
+		// asText answers null for an empty buffer only when the extension isn't a text type.
+		const textType = (p: string) => asText(p, new ArrayBuffer(0)) !== null;
+		const known = (path: string) => {
+			const all = [sizes.cache[path]?.s, sizes.remote?.get(path)?.size, this.host.state.cache[path]?.s].filter((x): x is number => typeof x === "number");
+			return all.length ? Math.max(...all) : undefined;
+		};
 		return detectSimilarRenames(decisions, base, local, remote, {
 			text: async (side, path, sha) => {
 				const key = `${side}:${path}:${sha}`;
 				if (texts.has(key)) return texts.get(key)!;
-				let data: ArrayBuffer | null = null;
-				try {
-					data = side === "local" ? await this.io.read(path) : await this.blob(path, sha);
-				} catch {
-					data = null;
+				let t: string | null = null;
+				const size = known(path);
+				if (textType(path) && !(size !== undefined && size > MAX)) {
+					try {
+						let data: ArrayBuffer | null;
+						if (side === "local") data = await this.io.read(path);
+						else {
+							const raw = await this.verifiedBlob(sha, path);
+							// A large-file (LFS) pointer is tiny; the file behind it may not be.
+							const ptr = parsePointer(raw);
+							data = ptr && ptr.size > MAX ? null : await this.codec.decode(path, raw);
+						}
+						t = data && data.byteLength <= MAX ? asText(path, data) : null;
+					} catch {
+						t = null;
+					}
 				}
-				const t = data && data.byteLength <= MAX ? asText(path, data) : null;
 				texts.set(key, t);
 				return t;
-			},
-			similarity: (a, b) => {
-				const A = splitLines(a);
-				const B = splitLines(b);
-				if (!A.length && !B.length) return 1;
-				const m = lcsMatch(A, B);
-				if (!m) return 0;
-				const matches = m.reduce((n, x) => n + (x >= 0 ? 1 : 0), 0);
-				return (2 * matches) / (A.length + B.length);
 			},
 		});
 	}
@@ -708,6 +732,9 @@ export class SyncEngine {
 		if (walkConfig) {
 			if (this.s.syncConfigDir) files.push(...(await this.io.listConfig(baseScope)));
 			if (this.s.syncHidden || this.s.useGitignore) files.push(...(await this.io.listHidden(baseScope)));
+			// Inside normal folders: everything hidden (opt-in), or just .gitignore files.
+			if (this.s.syncHidden && this.s.syncHiddenNested) files.push(...(await this.io.listNestedHidden(baseScope)));
+			else if (this.s.useGitignore) files.push(...(await this.io.listNestedHidden(baseScope, new Set([".gitignore"]))));
 		}
 		const localShas = new Map<string, string>();
 		const cacheNext: SyncState["cache"] = {};
@@ -809,7 +836,12 @@ export class SyncEngine {
 		let markerSha: string | null = null;
 		let foldersSha: string | null = null;
 		const winSkipped = new Set<string>();
+		// Folder + extension of each skipped name: a note renamed (and edited) into it shares both.
+		const winSkippedSpots = new Set<string>();
+		const winBad: string[] = [];
+		const spot = (p: string) => `${p.slice(0, Math.max(0, p.lastIndexOf("/")))}|${/\.[^./]*$/.exec(p)?.[0] ?? ""}`;
 		this.metaShas = new Map();
+		this.blobHints = new Map();
 		// Local files renamed on another device by letter case only: [local path, new remote path].
 		const caseRenames: [string, string][] = [];
 		if (head) {
@@ -842,6 +874,8 @@ export class SyncEngine {
 					// Windows can't create this name; writing it would fail on every sync.
 					skip(e.path, "name not allowed on Windows; rename it on another device");
 					winSkipped.add(e.sha);
+					winSkippedSpots.add(spot(e.path));
+					winBad.push(e.path);
 					continue;
 				}
 				if ((e.size ?? 0) > maxBytes) {
@@ -879,7 +913,9 @@ export class SyncEngine {
 					continue;
 				}
 				seenLower.set(lower, e.path);
-				remote.set(e.path, { sha: e.sha, mode: e.mode, raw: raw.path });
+				remote.set(e.path, { sha: e.sha, mode: e.mode, raw: raw.path, size: e.size });
+				// Where the blob lives, for hosts that can't send big files through their blob API (Gitea).
+				if (head) this.blobHints.set(e.sha, { path: raw.path, ref: head });
 				remoteShas.set(e.path, e.sha);
 			}
 		}
@@ -888,11 +924,22 @@ export class SyncEngine {
 		else if (this.host.checkEncryption) await this.host.checkEncryption(head ? markerSha : null);
 		// Renamed elsewhere to a name Windows can't store: the old name looks deleted remotely. Keep the
 		// note here (skip its old path too) instead of trashing it.
+		// Renamed and edited at once: same folder and type as a name that is NEW in this sync (a name
+		// seen before can't explain a later deletion). Such notes stay kept while that name exists.
+		const seen = new Set(state.winSeen ?? []);
+		const newSpots = new Set(winBad.filter((p) => !seen.has(p)).map(spot));
+		const winKept: Record<string, string> = {};
 		if (winSkipped.size) {
 			for (const [p, sha] of Object.entries(base)) {
-				if (!remoteShas.has(p) && winSkipped.has(sha) && !skipPaths.has(p)) skip(p, "renamed elsewhere to a name Windows can't store; kept here");
+				if (remoteShas.has(p) || skipPaths.has(p)) continue;
+				if (winSkipped.has(sha)) skip(p, "renamed elsewhere to a name Windows can't store; kept here");
+				else if (newSpots.has(spot(p)) || (state.winKept?.[p] && winSkippedSpots.has(spot(p)))) {
+					skip(p, "may have been renamed elsewhere to a name Windows can't store; kept here");
+					winKept[p] = spot(p);
+				}
 			}
 		}
+		const win = head ? { seen: winBad, kept: winKept } : undefined;
 		if (opts.only) {
 			// "Sync current file": every other path keeps its baseline and is left for a later sync.
 			for (const p of new Set([...localShas.keys(), ...remoteShas.keys(), ...Object.keys(base)])) if (!opts.only.has(p)) skipPaths.add(p);
@@ -902,7 +949,7 @@ export class SyncEngine {
 			remoteShas.delete(p);
 			remote.delete(p);
 		}
-		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames, foldersSha };
+		return { scope, skipPaths, skipped, localShas, cacheNext, head, treeSha, remote, remoteShas, upToDate: false, base, eolSame, covered, remoteOnly, scopeSig, unknownLocal, caseRenames, foldersSha, win };
 	}
 
 	private async initRemote(): Promise<string> {
@@ -948,6 +995,7 @@ export class SyncEngine {
 		this.checkAlive();
 		report.skipped = ctx.skipped;
 		const cacheNext = ctx.cacheNext;
+		const maxBytes = this.s.maxFileSizeMB * 1024 * 1024;
 
 		if (ctx.upToDate) {
 			report.upToDate = true;
@@ -960,7 +1008,8 @@ export class SyncEngine {
 		}
 
 		const remote = ctx.remote ?? new Map<string, RemoteEntry>();
-		state.dirty = false;
+		// The next value of state.dirty; only stored with the rest of the state once this sync succeeded.
+		let dirtyNext = false;
 		// Some remote changes are deliberately left for later (push mode, "sync current file", deferred
 		// in review, delete guard): the next sync must compare fully instead of taking the fast path.
 		let behind = ctx.unknownLocal || !!opts.only || !!opts.defer?.size;
@@ -992,15 +1041,25 @@ export class SyncEngine {
 		}
 
 		const plan = decide(ctx.base, ctx.localShas, ctx.remoteShas, mode, ctx.scope);
-		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas);
+		let decisions = await this.similarRenames(detectRenames(plan.decisions, ctx.base, ctx.localShas, ctx.remoteShas), ctx.base, ctx.localShas, ctx.remoteShas, { cache: cacheNext, remote });
 
-		// Paths skipped for size/case keep their old base so they are not seen as deleted later.
+		// Paths skipped for size/case keep their old base so they are not seen as deleted later. The base
+		// of THIS comparison: after a rewritten history it is empty, and an old entry kept here would make
+		// the file look deleted remotely on the next sync.
 		const next: Record<string, string> = { ...plan.settled };
-		for (const p of ctx.skipPaths) if (state.base[p]) next[p] = state.base[p];
+		const keepBase = (p: string) => {
+			if (ctx.base[p]) next[p] = ctx.base[p];
+			else delete next[p];
+		};
+		for (const p of ctx.skipPaths) if (ctx.base[p]) next[p] = ctx.base[p];
 		decisions = await this.keepMovedOutOfScope(decisions, ctx.base, report.skipped, (p) => {
 			next[p] = ctx.base[p];
 			(state.keptMoved ??= {})[p] = ctx.base[p];
 		});
+		if ("win" in ctx && ctx.win) {
+			state.winSeen = ctx.win.seen.length ? ctx.win.seen : undefined;
+			state.winKept = Object.keys(ctx.win.kept).length ? ctx.win.kept : undefined;
+		}
 		// Forget kept files that came back into scope, changed, or left the repository.
 		for (const p of Object.keys(state.keptMoved ?? {})) {
 			if (ctx.localShas.has(p) || !ctx.base[p] || ctx.remoteShas.get(p) !== state.keptMoved![p]) delete state.keptMoved![p];
@@ -1019,7 +1078,7 @@ export class SyncEngine {
 			if (choice === "skip") {
 				report.guardKept = [...delLocal, ...delRemote];
 				for (const d of decisions) {
-					if ((d.kind === "delete-local" || d.kind === "delete-remote") && state.base[d.path]) next[d.path] = state.base[d.path];
+					if (d.kind === "delete-local" || d.kind === "delete-remote") keepBase(d.path);
 				}
 				decisions = decisions.filter((d) => d.kind !== "delete-local" && d.kind !== "delete-remote");
 				behind = true;
@@ -1057,21 +1116,21 @@ export class SyncEngine {
 			if (e instanceof EditedDuringSync) {
 				editedDuringSync = true;
 				report.skipped.push(`${path} (edited during sync, will sync next time)`);
-				if (state.base[path]) next[path] = state.base[path];
-				else delete next[path];
+				keepBase(path);
 				return;
 			}
 			report.errors.push(`${path}: ${errMsg(e)}`);
 			host.log(`Error on ${path}: ${errMsg(e)}`);
-			if (state.base[path]) next[path] = state.base[path];
-			else delete next[path];
+			keepBase(path);
 		};
 
 		// ---- apply simple decisions (parallel) ----
 		const simple = decisions.filter((d) => d.kind !== "conflict" && d.kind !== "rename-merge");
 		let done = 0;
 		const downloads = simple.filter((d) => d.kind === "download" || d.kind === "adopt-remote-edit").length;
-		await pool(simple, 4, async (d) => {
+		// Empty folders are pruned once all parallel writes are done: pruning inside the pool could trash a
+		// folder another download is writing into at that moment.
+		await this.io.deferPruning(() => pool(simple, 4, async (d) => {
 			try {
 				switch (d.kind) {
 					case "move-local": {
@@ -1082,11 +1141,12 @@ export class SyncEngine {
 							await this.io.write(d.path, data);
 							await recordWrite(d.path, d.sha, data);
 						} else {
+							// Renamed and edited remotely: fetch the new content first, so a failed download
+							// leaves the file untouched under its old name instead of renamed with old content.
+							const data = d.replace ? await this.blob(d.path, d.sha) : null;
 							await this.assertUnchanged(d.from);
 							await this.io.rename(d.from, d.path);
-							if (d.replace) {
-								// Renamed and edited remotely: after the rename, take the new content.
-								const data = await this.blob(d.path, d.sha);
+							if (data) {
 								await this.io.write(d.path, data);
 								await recordWrite(d.path, d.sha, data);
 							} else {
@@ -1118,12 +1178,18 @@ export class SyncEngine {
 						const raw = await this.verifiedBlob(d.sha, d.path);
 						// A large-file (LFS) pointer looks tiny in the listing; its real size decides.
 						const ptr = parsePointer(raw);
+						if (ptr && maxBytes > 0 && ptr.size > maxBytes) {
+							// Same as a too-large file in the listing: skipped, its baseline left as it was.
+							report.skipped.push(`${d.path} (remote file larger than ${this.s.maxFileSizeMB} MB)`);
+							ctx.skipPaths.add(d.path);
+							keepBase(d.path);
+							break;
+						}
 						const limit = this.downloadLimit(d.path);
 						if (ptr && limit && ptr.size > limit) {
 							report.skipped.push(`${d.path} (larger than this device's download limit; available on demand)`);
 							if (!(await this.io.stat(d.path))) ctx.remoteOnly[d.path] = { sha: d.sha, size: ptr.size };
-							if (state.base[d.path]) next[d.path] = state.base[d.path];
-							else delete next[d.path];
+							keepBase(d.path);
 							break;
 						}
 						const data = await this.codec.decode(d.path, raw);
@@ -1155,8 +1221,11 @@ export class SyncEngine {
 				}
 			} catch (e) {
 				fail(d.path, e);
+				// A rename that didn't happen leaves the old path as it was: keep its baseline too, or the
+				// untouched old file would read as new here next time and be uploaded again.
+				if ((d.kind === "move-local" || d.kind === "adopt-remote-edit") && ctx.base[d.from]) next[d.from] = ctx.base[d.from];
 			}
-		});
+		}));
 
 		// ---- conflicts (sequential, may prompt) ----
 		for (const d of decisions) {
@@ -1166,7 +1235,7 @@ export class SyncEngine {
 				else await this.renameMerge(d, device, next, cacheNext, report, remoteDeletes, renames, queueUpload, recordWrite);
 			} catch (e) {
 				fail(d.path, e);
-				if (d.kind === "rename-merge" && state.base[d.from]) next[d.from] = state.base[d.from];
+				if (d.kind === "rename-merge" && ctx.base[d.from]) next[d.from] = ctx.base[d.from];
 			}
 		}
 
@@ -1192,7 +1261,7 @@ export class SyncEngine {
 			const pushed = await this.push(ctx.head, ctx.treeSha, uploads, remoteDeletes, remote, device, renames, folderUpsert);
 			newHead = pushed.sha;
 			// If the host merged us onto a newer head, our baseline is incomplete: compare fully next time.
-			if (!pushed.fastForward) state.dirty = true;
+			if (!pushed.fastForward) dirtyNext = true;
 			report.commit = newHead;
 			const renamedTargets = new Set(renames.map((r) => r.split(" → ")[1]));
 			const renamedSources = new Set(renames.map((r) => r.split(" → ")[0]));
@@ -1234,7 +1303,7 @@ export class SyncEngine {
 		state.baseNorm = baseNorm;
 		state.cache = cacheNext;
 		state.lastSync = Date.now();
-		state.dirty = state.dirty || behind || editedDuringSync || report.errors.length > 0;
+		state.dirty = dirtyNext || behind || editedDuringSync || report.errors.length > 0;
 		await host.saveState();
 		host.markLocalChangesSynced?.(ctx.covered);
 		return report;
@@ -1265,13 +1334,15 @@ export class SyncEngine {
 		if (res?.clean) {
 			const merged = encodeText(res.text);
 			const sha = await this.codec.storedSha(d.path, merged);
-			if (d.side === "remote") {
-				await this.io.remove(d.from);
-				delete cacheNext[d.from];
-			}
+			// Write the merged file first; the old one is only removed once its content is safe elsewhere.
 			await this.assertUnchanged(d.path);
 			await this.io.write(d.path, merged);
 			await recordWrite(d.path, sha, merged);
+			if (d.side === "remote") {
+				await this.assertUnchanged(d.from);
+				await this.io.remove(d.from);
+				delete cacheNext[d.from];
+			}
 			await queueUpload(d.path, merged, sha);
 			report.merged.push(d.path);
 		} else {
@@ -1279,18 +1350,22 @@ export class SyncEngine {
 			const copy = await this.freeCopyPath(d.path, d.side === "remote" ? device : this.gh.label);
 			const keep = d.side === "remote" ? remoteData : localData;
 			const other = d.side === "remote" ? localData : remoteData;
-			if (d.side === "remote") {
-				await this.io.remove(d.from);
-				delete cacheNext[d.from];
-			}
+			await this.assertUnchanged(d.path);
 			await this.io.write(d.path, keep);
-			await recordWrite(d.path, await this.codec.storedSha(d.path, keep), keep);
-			await queueUpload(d.path, keep);
+			const keepSha = await this.codec.storedSha(d.path, keep);
+			await recordWrite(d.path, keepSha, keep);
 			await this.io.write(copy, other);
 			// Recorded like any scanned file: settings-folder/hidden copies are only listed from the cache
 			// between disk walks, and an unrecorded copy would look deleted there.
 			const copySha = await this.codec.storedSha(copy, other);
 			await recordWrite(copy, copySha, other);
+			// Both versions are written: only now may the old file go.
+			if (d.side === "remote") {
+				await this.assertUnchanged(d.from);
+				await this.io.remove(d.from);
+				delete cacheNext[d.from];
+			}
+			await queueUpload(d.path, keep, keepSha);
 			await queueUpload(copy, other, copySha);
 			report.conflictCopies.push(copy);
 		}
@@ -1328,7 +1403,8 @@ export class SyncEngine {
 			// the note is only replaced once that branch holds it (see sendConflictsAsPullRequest).
 			if (uploadCopy && this.gh.createPullRequest && this.host.conflictsAsPullRequest?.()) {
 				this.prConflicts.push({ path: d.path, local: localData, remote: remoteData, remoteSha: d.remote });
-				if (host.state.base[d.path]) next[d.path] = host.state.base[d.path];
+				// The base of this comparison (empty after a rewritten history: then no baseline is kept).
+				if (d.base) next[d.path] = d.base;
 				return;
 			}
 			const copy = await this.freeCopyPath(d.path, device);
@@ -1345,10 +1421,11 @@ export class SyncEngine {
 		if (mode === "pull") return keepBoth(false);
 
 		// First sync with an existing vault on both sides: the setup wizard may say which side wins.
-		// "The repository wins": the local version was never uploaded, so move it to the trash first.
+		// "The repository wins": the local version was never uploaded, so move it to the trash first,
+		// always somewhere recoverable (never a permanent delete, whatever the deletion preference says).
 		const replaceWithRemote = async () => {
 			await this.assertUnchanged(d.path);
-			await this.io.remove(d.path);
+			await this.io.removeRecoverable(d.path);
 			await writeRemote();
 		};
 		if (!d.base && this.opts.firstSyncPrefer === "remote") return void (await replaceWithRemote());
@@ -1479,7 +1556,7 @@ export class SyncEngine {
 			message: this.commitMessage(uploads, deletes, device, renames),
 			upserts,
 			deletes: rawDeletes,
-			// Metadata files too: hosts that create-or-update per file (GitLab, Gitea, Gitee, Azure) must update them.
+			// Metadata files too: hosts that create-or-update per file (GitLab, Gitea) must update them.
 			existing: new Map([...[...remote.values()].map((e): [string, string] => [e.raw, e.sha]), ...this.metaShas]),
 			progress: (done, total) => this.host.progress?.(t("p.uploading", { done, total })),
 		});
@@ -1603,19 +1680,23 @@ export class SyncEngine {
 			const n = await this.normHash(p, data, sha);
 			if (st) cacheNext[p] = n ? { m: st.mtime, s: st.size, h: sha, n } : { m: st.mtime, s: st.size, h: sha };
 		};
-		await pool(plan.overwrite, 4, async (p) => {
-			await this.io.remove(p);
-			await write(p);
+		// Overwritten and removed files hold local work that isn't in the repository: they always go to a
+		// recoverable trash, never a permanent delete. Empty folders are pruned after all writes finished.
+		await this.io.deferPruning(async () => {
+			await pool(plan.overwrite, 4, async (p) => {
+				await this.io.removeRecoverable(p);
+				await write(p);
+			});
+			await pool(plan.download, 4, write);
+			for (const p of plan.remove) {
+				await this.io.removeRecoverable(p);
+				delete cacheNext[p];
+			}
 		});
-		await pool(plan.download, 4, write);
-		for (const p of plan.remove) {
-			await this.io.remove(p);
-			delete cacheNext[p];
-		}
 
 		const base: Record<string, string> = {};
 		for (const [p, sha] of remoteShas) base[p] = sha;
-		for (const p of ctx.skipPaths) if (state.base[p]) base[p] = state.base[p];
+		for (const p of ctx.skipPaths) if (ctx.base[p]) base[p] = ctx.base[p];
 		state.head = head;
 		state.base = base;
 		state.baseNorm = {};
@@ -1658,9 +1739,10 @@ export class SyncEngine {
 		else throw new Error(t("ow.emptyBranch"));
 		// The repository now equals this device: that is the new baseline.
 		const base: Record<string, string> = {};
-		for (const [p, sha] of ctx.remoteShas) if (!plan.remove.includes(p)) base[p] = sha;
+		const removed = new Set(plan.remove);
+		for (const [p, sha] of ctx.remoteShas) if (!removed.has(p)) base[p] = sha;
 		for (const u of uploads) base[u.path] = u.sha;
-		for (const p of ctx.skipPaths) if (state.base[p]) base[p] = state.base[p];
+		for (const p of ctx.skipPaths) if (ctx.base[p]) base[p] = ctx.base[p];
 		state.head = newHead;
 		state.base = base;
 		state.cache = ctx.cacheNext;

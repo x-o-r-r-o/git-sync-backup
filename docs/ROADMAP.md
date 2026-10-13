@@ -89,11 +89,13 @@ From the 1.2 review list, shipped in 1.3: granular settings-folder sync (1), set
 
 Also in 1.3, from researching 29 other plugins: Azure DevOps and Gitee hosts, backup mirror, conflicts as pull requests (shared folders), shared folder to a repository subfolder, plugin installs from official releases, make repository match this device, branch picker, .gitattributes LFS rules, empty folders, pause and battery saver, remote-change indicator, open/copy on host, folder menu actions, diagnostics, commit author, plugin-version warning, Windows-name checks, review filters.
 
+## Status after 1.4.0 (2026-10-13)
+
+Shipped in 1.4: inline conflict resolution in the editor (3), GitHub-friendly Markdown for shared folders (4), hidden files inside folders and nested `.gitignore` files (5), Sign in with GitLab (6). Also: Windows rename-plus-edit protection, a live test suite that runs against every host, and a proofreading pass over the translations.
+
+Removed in 1.4: the Gitee and Azure DevOps hosts added in 1.3. They could not be verified against real servers; settings that use them pause sync with a notice until another host is chosen, and files are left untouched.
+
 ## Next
 
-1. Real-server verification of GitLab, Gitea, Bitbucket, Gitee and Azure DevOps, and real-phone testing (iOS, Android), before dropping "beta".
-2. Native-speaker review of the machine-assisted translations.
-3. Inline conflict resolution in the editor (accept this device / repository / both above each block).
-4. GitHub rendering pass for shared folders (wikilinks, callouts, embeds readable on GitHub), opt-in.
-5. Hidden folders inside normal folders; nested ignore files.
-6. GitLab sign-in without a token (device flow, needs a registered OAuth app).
+1. More real-world use of GitLab, Gitea and Bitbucket (all three passed the live suite `tests/live/hosts.live.test.ts` against real servers for 1.4), and real-phone testing (iOS, Android), before dropping "beta".
+2. Native-speaker review of the translations.

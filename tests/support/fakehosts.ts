@@ -273,7 +273,7 @@ function parseMultipart(body: ArrayBuffer, contentType: string): { name: string;
 }
 
 /** Fake Bitbucket Cloud at https://bb.test/2.0, repo me/vault. No blob hashes exposed, like the real API. */
-export function bitbucketTransport(repo: FakeRepo) {
+export function bitbucketTransport(repo: FakeRepo, opts: { noLocation?: boolean } = {}) {
 	const calls = { raw: 0 };
 	const transport = async (req: HttpRequest): Promise<HttpResponse> => {
 		const u = new URL(req.url);
@@ -323,8 +323,8 @@ export function bitbucketTransport(repo: FakeRepo) {
 					ops.push({ op: files.has(fp) ? "update" : "create", path: fp, content: Buffer.from(p.value).toString("base64") });
 				}
 			}
-			await repo.apply(branch, field("message"), ops);
-			return { status: 201, json: null, arrayBuffer: new ArrayBuffer(0), headers: {} };
+			const created = await repo.apply(branch, field("message"), ops);
+			return { status: 201, json: null, arrayBuffer: new ArrayBuffer(0), headers: opts.noLocation ? {} : { Location: `https://bb.test/2.0${R}/commit/${created}` } };
 		}
 		if ((m = /^\/repositories\/me\/vault\/src\/(\w+)\/(.*)$/.exec(path))) {
 			const c = repo.commits.get(m[1]);

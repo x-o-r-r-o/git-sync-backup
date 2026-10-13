@@ -7,9 +7,10 @@ import { errMsg } from "./util.ts";
 import { HOSTS } from "./hosts.ts";
 import type { HostKind } from "./hosts.ts";
 import { SharedFolderModal } from "./shared-ui.ts";
-import { destructive } from "./ui.ts";
+import { confirmPlan, destructive, RepoSuggestModal } from "./ui.ts";
 import { t } from "./i18n.ts";
-import { GitHubSignInModal } from "./ghapp-ui.ts";
+import { DeviceSignInModal } from "./ghapp-ui.ts";
+import { GITLAB_APP } from "./gitlabapp.ts";
 import type { PluginSyncMode } from "./scope-config.ts";
 
 /** Runs `fn` when the field is committed (blur or Enter) instead of on every keystroke. */
@@ -126,6 +127,11 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		else this.display();
 	}
 
+	/** Redraws the tab when it is on screen (e.g. after data.json changed on disk); does nothing otherwise. */
+	refreshIfOpen() {
+		if (this.containerEl.isShown()) this.refresh();
+	}
+
 	private groups(): Group[] {
 		const p = this.plugin;
 		const s = p.settings;
@@ -148,10 +154,10 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					opts.after?.();
 				});
 			});
-		/** GitHub refuses files over 100 MB without large file storage. */
-		const maxSizeCap = () => (s.lfsThresholdMB > 0 ? 2000 : 100);
+		/** GitHub refuses files over 100 MB without large file storage; other hosts (or LFS) allow up to 2000 MB here. */
+		const maxSizeCap = () => ((s.provider ?? "github") === "github" && !(s.lfsThresholdMB > 0) ? 100 : 2000);
 
-		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges" | "keepEmptyFolders";
+		type ToggleKey = "syncOnStartup" | "syncOnChange" | "syncOnResume" | "syncOnBackground" | "syncConfigDir" | "reviewBeforeManualSync" | "ignoreLineEndingChanges" | "deleteGuardEnabled" | "dailySnapshot" | "syncHidden" | "useGitignore" | "syncOnOpen" | "explorerBadges" | "keepEmptyFolders" | "syncHiddenNested";
 		const toggle = (key: ToggleKey, reschedule = false, redraw = false) => (st: Setting): unknown =>
 			st.addToggle((c) =>
 				c.setValue(s[key]).onChange(async (v) => {
@@ -196,26 +202,29 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				if (first.link) f.createEl("a", { text: first.link.label, href: first.link.href });
 			});
 
-		// GitHub: sign in with the GitHub App when one is available, else (or instead) paste a token.
-		const usingApp = p.usingGitHubApp();
+		// GitHub / GitLab: sign in with the host's app when one is available, else (or instead) paste a token.
+		// Signed in only while the tokens exist and belong to this server (else offer sign-in / a token again).
+		const usingApp = p.signedInNow();
 		const auth: Item[] = [];
+		const signInKind = s.provider === "github" && p.githubApp() ? "github" : s.provider === "gitlab" && p.gitlabApp() ? "gitlab" : null;
 		if (usingApp) {
 			auth.push({
-				name: t("app.signedIn"),
-				desc: t("app.signedInDesc"),
+				name: s.provider === "gitlab" ? t("app.signedInGitLab") : t("app.signedIn"),
+				desc: s.provider === "gitlab" ? t("app.signedInDescGitLab") : t("app.signedInDesc"),
 				render: (st) =>
 					st.addButton((b) =>
 						b.setButtonText(t("app.signOut")).onClick(() => {
-							p.signOutApp();
+							if (s.provider === "gitlab") p.signOutGitLab();
+							else p.signOutApp();
 							this.refresh();
 						}),
 					),
 			});
-		} else if (s.provider === "github" && p.githubApp()) {
+		} else if (signInKind) {
 			auth.push({
-				name: t("app.signIn"),
-				desc: t("app.signInDesc"),
-				render: (st) => st.addButton((b) => b.setButtonText(t("app.signInBtn")).setCta().onClick(() => new GitHubSignInModal(this.app, p, () => this.refresh()).open())),
+				name: signInKind === "gitlab" ? t("app.signInGitLab") : t("app.signIn"),
+				desc: signInKind === "gitlab" ? t("app.signInDescGitLab") : t("app.signInDesc"),
+				render: (st) => st.addButton((b) => b.setButtonText(t("app.signInBtn")).setCta().onClick(() => new DeviceSignInModal(this.app, p.signInFlow(signInKind), () => this.refresh()).open())),
 			});
 		}
 		if (!usingApp) {
@@ -258,6 +267,20 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						},
 					]
 				: [];
+		// GitLab sign-in needs an OAuth application: the built-in one (gitlab.com, when registered) or your own.
+		if (s.provider === "gitlab" && (!GITLAB_APP.clientId || !/^https:\/\/gitlab\.com\/api\/v4\/?$/i.test(p.getApiBase()))) {
+			enterpriseApp.push({
+				name: t("app.glClientId"),
+				desc: t("app.glClientIdDesc"),
+				render: (st) =>
+					st.addText((c) =>
+						onCommit(c.setValue(p.gitlabApp()?.clientId ?? ""), async (v) => {
+							p.setCustomGitLabApp(v.trim());
+							this.refresh();
+						}),
+					),
+			});
+		}
 
 		return [
 			{
@@ -288,7 +311,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					...auth,
 					{
 						name: t("s.owner"),
-						desc: s.provider === "gitlab" ? t("s.ownerDescGitlab") : s.provider === "bitbucket" ? t("s.ownerDescBitbucket") : s.provider === "azure" ? t("s.ownerDescAzure") : t("s.ownerDesc"),
+						desc: s.provider === "gitlab" ? t("s.ownerDescGitlab") : s.provider === "bitbucket" ? t("s.ownerDescBitbucket") : t("s.ownerDesc"),
 						render: (st) =>
 							st.addText((c) =>
 								onCommit(c.setPlaceholder(t("s.ownerPlaceholder")).setValue(s.owner), async (v) => {
@@ -301,12 +324,38 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						name: t("s.repo"),
 						desc: t("s.repoDesc"),
 						render: (st) =>
-							st.addText((c) =>
-								onCommit(c.setPlaceholder(t("s.repoPlaceholder")).setValue(s.repo), async (v) => {
-									s.repo = v.trim();
-									await save();
-								}),
-							),
+							st
+								.addText((c) =>
+									onCommit(c.setPlaceholder(t("s.repoPlaceholder")).setValue(s.repo), async (v) => {
+										s.repo = v.trim();
+										await save();
+									}),
+								)
+								.addButton((b) =>
+									// Pick from the repositories this account (or the signed-in app) can use.
+									b.setButtonText(t("s.branchChoose")).onClick(async () => {
+										if (!p.getToken()) return void new Notice(t("m.needToken"));
+										b.setDisabled(true);
+										try {
+											const repos = await p.gh.listRepos();
+											if (!repos.length) return void new Notice(p.usingGitHubApp() ? t("app.noRepos") : t("w.noMatch"));
+											new RepoSuggestModal(this.app, repos, (r) =>
+												void (async () => {
+													if (!r.private && !(await confirmPlan(this.app, t("w.publicTitle"), t("w.publicBody", { repo: `${r.owner}/${r.name}` }), [], t("w.useAnyway"), true))) return;
+													s.owner = r.owner;
+													s.repo = r.name;
+													s.branch = r.defaultBranch || "main";
+													await save();
+													this.refresh();
+												})(),
+											).open();
+										} catch (e) {
+											new Notice(t("w.listFailed", { error: errMsg(e) }), 10000);
+										} finally {
+											b.setDisabled(false);
+										}
+									}),
+								),
 					},
 					{
 						name: t("s.branch"),
@@ -430,16 +479,24 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					{
 						name: t("s.delay"),
 						desc: t("s.delayDesc"),
-						render: (st) =>
-							st.addSlider((sl) =>
+						render: (st) => {
+							// Obsidian 1.13+ shows the value next to the slider; older versions show nothing, so
+							// the description carries it there.
+							const showValue = () => {
+								if (!requireApiVersion("1.13.0")) st.setDesc(`${t("s.delayDesc")} ${t("s.delayNow", { n: s.changeDebounceSec })}`);
+							};
+							showValue();
+							return st.addSlider((sl) =>
 								sl.setLimits(5, 300, 5)
 									.setValue(s.changeDebounceSec)
 									.onChange(async (v) => {
 										s.changeDebounceSec = v;
+										showValue();
 										await save();
 										p.rescheduleTriggers();
 									}),
-							),
+							);
+						},
 					},
 					{
 						name: t("s.interval"),
@@ -458,7 +515,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				items: [
 					{ name: t("s.configDir", { dir: this.app.vault.configDir }), desc: `${t("s.configDirDesc")} ${t("s.configDirWarn")}`, render: toggle("syncConfigDir", false, true) },
 					...cfgItems,
-					{ name: t("s.hidden"), desc: t("s.hiddenDesc"), render: toggle("syncHidden") },
+					{ name: t("s.hidden"), desc: t("s.hiddenDesc"), render: toggle("syncHidden", false, true) },
+					...(s.syncHidden ? [{ name: t("s.hiddenNested"), desc: t("s.hiddenNestedDesc"), render: toggle("syncHiddenNested") }] : []),
 					{ name: t("s.gitignore"), desc: t("s.gitignoreDesc"), render: toggle("useGitignore") },
 					{ name: t("s.emptyFolders"), desc: t("s.emptyFoldersDesc"), render: toggle("keepEmptyFolders") },
 					{
@@ -533,7 +591,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					...(s.sharedFolders ?? []).map(
 						(f): Item => ({
 							name: `${f.folder} ↔ ${f.owner}/${f.repo}`,
-							desc: t("s.sharedRowDesc", { host: HOSTS[f.provider]?.label ?? f.provider, branch: f.branch }),
+							desc: t("s.sharedRowDesc", { host: HOSTS[f.provider]?.label ?? f.provider, branch: f.branch }) + (f.githubFormat ? ` · ${t("sh.ghFormat")}` : ""),
 							render: (st) =>
 								st
 									.addToggle((c) =>
@@ -578,7 +636,11 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					},
 					{
 						name: t("s.pause"),
-						desc: p.isPaused() ? t("s.pauseDescOn") : t("s.pauseDesc"),
+						desc: !p.isPaused()
+							? t("s.pauseDesc")
+							: Number.isFinite(p.pausedUntil())
+								? t("s.pauseDescUntil", { time: new Date(p.pausedUntil()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) })
+								: t("s.pauseDescOn"),
 						render: (st) =>
 							p.isPaused()
 								? st.addButton((b) =>
@@ -664,6 +726,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				items: [
 					{
 						name: t("s.strategy"),
+						desc: t("s.strategyDesc"),
 						render: (st) =>
 							st.addDropdown((d) =>
 								d
@@ -739,6 +802,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 							st
 								.addText((c) => {
 									c.setPlaceholder(t("s.authorName"));
+									c.inputEl.setAttr("aria-label", t("s.authorName"));
 									onCommit(c.setValue(s.authorName ?? ""), async (v) => {
 										s.authorName = v.trim();
 										await save();
@@ -747,6 +811,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 								.addText((c) => {
 									c.inputEl.type = "email";
 									c.setPlaceholder(t("s.authorEmail"));
+									c.inputEl.setAttr("aria-label", t("s.authorEmail"));
 									onCommit(c.setValue(s.authorEmail ?? ""), async (v) => {
 										s.authorEmail = v.trim();
 										await save();
@@ -777,8 +842,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 						render: (st) =>
 							st.addButton((b) =>
 								b.setButtonText(t("s.resetBtn")).onClick(async () => {
-									await p.resetState();
-									new Notice(t("s.resetDone"));
+									if (p.isSyncing()) return void new Notice(t("notice.busy"));
+									if (!(await confirmPlan(this.app, t("s.resetState"), t("s.resetConfirm"), [], t("s.resetBtn"), true))) return;
+									if (await p.resetState()) new Notice(t("s.resetDone"));
 								}),
 							),
 					},
@@ -910,7 +976,7 @@ class BranchModal extends Modal {
 	async onOpen() {
 		const { contentEl } = this;
 		const p = this.plugin;
-		this.titleEl.setText(t("s.branchChoose"));
+		this.titleEl.setText(t("s.branchPick"));
 		contentEl.createEl("p", { cls: "vsg-muted", text: t("s.branchIntro") });
 		const status = contentEl.createDiv({ cls: "vsg-muted", text: t("w.loadingRepos") });
 		let newName = "";

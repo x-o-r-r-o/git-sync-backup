@@ -4,7 +4,7 @@
 import { b64encode, header, httpRequest, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
-import { NotFastForward } from "./remote.ts";
+import { NotFastForward, RemoteError } from "./remote.ts";
 import type { CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { gitBlobSha, pool } from "./util.ts";
 
@@ -75,19 +75,28 @@ export class GitLab implements Remote {
 	}
 
 	async request(method: string, path: string, body?: unknown, opts: { accept?: string; okStatuses?: number[] } = {}): Promise<HttpResponse> {
+		const send = (c: HostConfig) =>
+			httpRequest(
+				this.transport,
+				{
+					url: this.base + path,
+					method,
+					// Pasted personal tokens use PRIVATE-TOKEN; sign-in (OAuth) tokens use Bearer.
+					headers: { ...(c.bearer ? { Authorization: `Bearer ${c.token}` } : { "PRIVATE-TOKEN": c.token }), Accept: opts.accept ?? "application/json" },
+					body: body !== undefined ? JSON.stringify(body) : undefined,
+					contentType: body !== undefined ? "application/json" : undefined,
+				},
+				{ okStatuses: opts.okStatuses, hostLabel: this.label },
+			);
 		const c = this.cfg();
 		if (!c.token) throw new Error("No token set. Add one in the plugin settings.");
-		return httpRequest(
-			this.transport,
-			{
-				url: this.base + path,
-				method,
-				headers: { "PRIVATE-TOKEN": c.token, Accept: opts.accept ?? "application/json" },
-				body: body !== undefined ? JSON.stringify(body) : undefined,
-				contentType: body !== undefined ? "application/json" : undefined,
-			},
-			{ okStatuses: opts.okStatuses, hostLabel: this.label },
-		);
+		try {
+			return await send(c);
+		} catch (e) {
+			// A sign-in token that expired: renew it once and retry.
+			if (e instanceof RemoteError && e.status === 401 && c.onUnauthorized && (await c.onUnauthorized(c.token))) return send(this.cfg());
+			throw e;
+		}
 	}
 	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
 		return (await this.request(method, path, body)).json as T;
@@ -172,13 +181,52 @@ export class GitLab implements Remote {
 			// A 404 is only "empty repository" on the first page; later it would silently truncate the
 			// listing, and missing entries would look like remote deletions.
 			const res = await this.request("GET", url, undefined, { okStatuses: page === 0 ? [404] : [] });
-			if (res.status === 404) break;
+			if (res.status === 404) {
+				if (await this.isEmptyTree(ref, res)) break;
+				throw new RemoteError(`GitLab could not list the files of ${ref} (HTTP 404)`, 404);
+			}
 			for (const e of (res.json as GlTreeItem[] | null) ?? []) out.push({ path: e.path, mode: e.mode, type: e.type, sha: e.id });
-			const link = Object.entries(res.headers).find(([k]) => k.toLowerCase() === "link")?.[1] ?? "";
-			const next = /<([^>]+)>;\s*rel="next"/.exec(link)?.[1];
-			url = next ? next.replace(this.base, "") : "";
+			const next = /<([^>]+)>;\s*rel="next"/.exec(header(res, "link") ?? "")?.[1];
+			url = next ? this.relativeLink(next) : "";
 		}
 		return out;
+	}
+	/**
+	 * A 404 on the first tree page means an empty tree only when GitLab says so ("Tree Not Found") and
+	 * the commit itself exists. Anything else (unknown commit, a proxy's 404) must not read as "the
+	 * repository has no files": that would make every remote file look deleted.
+	 */
+	private async isEmptyTree(ref: string, res: HttpResponse): Promise<boolean> {
+		const m = (res.json as { message?: unknown } | null)?.message;
+		const msg = typeof m === "string" ? m : "";
+		if (!/tree not found/i.test(msg)) return false;
+		const c = await this.request("GET", `${this.project}/repository/commits/${encodeURIComponent(ref)}`, undefined, { okStatuses: [404] });
+		return c.status < 300;
+	}
+	/**
+	 * Path and query of a pagination link, relative to the API base. The link's own origin is ignored
+	 * (behind a proxy GitLab may report http:// or another host name), so requests and the token always
+	 * go to the configured server; the link only supplies the path under the API root.
+	 */
+	private relativeLink(next: string): string {
+		let u: URL;
+		let b: URL;
+		try {
+			u = new URL(next, this.base + "/");
+			b = new URL(this.base + "/");
+		} catch {
+			throw new Error("GitLab returned an invalid pagination link");
+		}
+		const basePath = b.pathname.replace(/\/+$/, "");
+		const lower = u.pathname.toLowerCase();
+		let rest: string | null = null;
+		if (basePath && lower.startsWith(basePath.toLowerCase() + "/")) rest = u.pathname.slice(basePath.length);
+		else {
+			const i = lower.indexOf("/api/v4/");
+			if (i >= 0) rest = u.pathname.slice(i + "/api/v4".length);
+		}
+		if (rest === null || !rest.startsWith("/projects/")) throw new Error("GitLab returned an unexpected pagination link");
+		return rest + u.search;
 	}
 	async getBlob(sha: string): Promise<ArrayBuffer> {
 		return (await this.request("GET", `${this.project}/repository/blobs/${sha}/raw`, undefined, { accept: "*/*" })).arrayBuffer;

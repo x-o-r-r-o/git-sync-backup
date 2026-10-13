@@ -25,14 +25,18 @@ export class MirrorHost implements SyncHost {
 	private plugin: VaultSyncPlugin;
 	private remote: Remote;
 
-	constructor(plugin: VaultSyncPlugin, target: MirrorTarget) {
+	constructor(plugin: VaultSyncPlugin, target: MirrorTarget, remote?: Remote) {
 		this.plugin = plugin;
 		this.target = target;
 		const def = { id: "mirror", provider: target.provider };
-		this.remote = makeRemote(
+		this.remote = remote ?? makeRemote(
 			target.provider,
 			// Its own token, else the main one, but only for the same host.
-			() => ({ token: plugin.mirrorToken(def) || (target.provider === plugin.settings.provider ? plugin.getToken() : ""), apiBase: plugin.getApiBaseFor(target.provider), owner: target.owner, repo: target.repo }),
+			() => {
+				const own = plugin.mirrorToken(def);
+				const auth = own ? { token: own, bearer: false, onUnauthorized: () => Promise.resolve(false) } : plugin.borrowedAuth(target.provider);
+				return { ...auth, apiBase: plugin.getApiBaseFor(target.provider), owner: target.owner, repo: target.repo };
+			},
 			plugin.blobCacheStore(`mirror-${target.owner}-${target.repo}`),
 		);
 		this.engine = new SyncEngine(this);
@@ -92,7 +96,10 @@ export class MirrorHost implements SyncHost {
 	}
 	codec(): Codec {
 		const enc = this.plugin.encryptionLayer();
-		const lfs = new LfsLayer(this.remote, (this.plugin.settings.lfsThresholdMB ?? 0) * 1024 * 1024);
+		// The same `filter=lfs` patterns (.gitattributes) as the main repository's codec, so files tracked
+		// there are stored the same way in the mirror.
+		const patterns = this.plugin.codec().layers.find((l): l is LfsLayer => l instanceof LfsLayer)?.trackedPatterns ?? [];
+		const lfs = new LfsLayer(this.remote, (this.plugin.settings.lfsThresholdMB ?? 0) * 1024 * 1024, undefined, patterns);
 		return new Codec(enc ? [enc, lfs] : [lfs]);
 	}
 	checkEncryption = (markerSha: string | null): Promise<string | null> =>

@@ -8,7 +8,7 @@
 // Commits use POST /src (multipart): many files in one commit, with `parents` set to the commit we
 // based our changes on so a concurrent push from another device is rejected instead of overwritten.
 
-import { buildMultipart, compareByWalking, httpRequest, obsidianTransport } from "./http.ts";
+import { buildMultipart, compareByWalking, header, httpRequest, obsidianTransport, sameOrigin } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
@@ -75,6 +75,22 @@ interface BbCommit {
 	parents?: { hash: string }[];
 }
 
+/** Scheme and host of a URL, for messages (never the path or query). */
+function safeOrigin(url: string): string {
+	try {
+		return new URL(url).origin;
+	} catch {
+		return "invalid URL";
+	}
+}
+
+/** Commit hash from the Location header of POST /src (…/commit/<hash>), or null. */
+function commitFromLocation(location: string | undefined): string | null {
+	if (!location) return null;
+	const m = /\/commit\/([0-9a-f]{7,64})\/?(?:[?#].*)?$/i.exec(location.trim());
+	return m ? m[1] : null;
+}
+
 export class Bitbucket implements Remote {
 	readonly kind = "bitbucket" as const;
 	readonly label = "Bitbucket";
@@ -133,7 +149,10 @@ export class Bitbucket implements Remote {
 
 	async request(method: string, path: string, body?: unknown, opts: { accept?: string; okStatuses?: number[] } = {}): Promise<HttpResponse> {
 		if (!this.cfg().token) throw new Error("No token set. Add one in the plugin settings.");
-		const url = path.startsWith("http") ? path : this.base + path;
+		// Absolute URLs come from the server (pagination `next`): the token only goes to the API's own origin.
+		const absolute = /^[a-z][a-z0-9+.-]*:/i.test(path);
+		if (absolute && !sameOrigin(path, this.base)) throw new Error(`Bitbucket returned a link to another server (${safeOrigin(path)}); refusing to send the token there.`);
+		const url = absolute ? path : this.base + path;
 		return httpRequest(
 			this.transport,
 			{
@@ -293,7 +312,13 @@ export class Bitbucket implements Remote {
 				});
 				await pool([...changed], 4, async (p) => {
 					const e = attrs.get(p);
-					await this.hashInto(commit, p, e ? modeOf(e) : "100644", e?.commit?.hash, next, blobs);
+					// Not a file in its folder's listing at `commit`: deleted, or replaced by a folder (whose
+					// files diffstat reports separately). Fetching it would hash a folder listing as content.
+					if (!e) {
+						delete next[p];
+						return;
+					}
+					await this.hashInto(commit, p, modeOf(e), e.commit?.hash, next, blobs);
 				});
 				files = next;
 			} catch {
@@ -335,7 +360,6 @@ export class Bitbucket implements Remote {
 		const stored = new Map<string, { sha: string; size: number; mode?: string }>();
 
 		let parent = req.parent;
-		let fastForward = true;
 		let part = 0;
 		type FilePart = { name: string; value: ArrayBuffer; filename: string; attributes?: string };
 		const send = async (fileParts: FilePart[], deletes: string[], last: boolean) => {
@@ -357,11 +381,13 @@ export class Bitbucket implements Remote {
 				if (/parent|tip|head|conflict|outdated/i.test(m)) throw new NotFastForward();
 				throw new Error(`Bitbucket refused the commit: ${m || "HTTP 400"}`);
 			}
-			const head = await this.getRef(req.branch);
-			if (!head || head === parent) throw new Error("Bitbucket did not create the commit");
-			const info = await this.json<BbCommit>("GET", `${this.repoPath}/commit/${head}`);
-			if (info.parents?.[0]?.hash !== parent) fastForward = false;
-			parent = head;
+			// The new commit is named in the Location header. Re-reading the branch head instead could pick up
+			// another device's commit made right after ours and adopt it as our own, hiding its changes.
+			const created = commitFromLocation(header(res, "location")) ?? (await this.getRef(req.branch));
+			if (!created || created === parent) throw new Error("Bitbucket did not create the commit");
+			const info = await this.json<BbCommit>("GET", `${this.repoPath}/commit/${created}`);
+			if (info.parents?.[0]?.hash !== parent) throw new NotFastForward();
+			parent = created;
 		};
 
 		let batch: FilePart[] = [];
@@ -384,7 +410,7 @@ export class Bitbucket implements Remote {
 		await send(batch, req.deletes, true);
 
 		// Keep the hash cache current so the next sync doesn't re-download what we just uploaded.
-		if (files && fastForward) {
+		if (files) {
 			for (const p of req.deletes) delete files[p];
 			for (const [p, f] of stored) {
 				files[p] = f;
@@ -392,7 +418,7 @@ export class Bitbucket implements Remote {
 			}
 			await this.saveCache({ commit: parent, files, blobs });
 		}
-		return { sha: parent, fastForward };
+		return { sha: parent, fastForward: true };
 	}
 
 	/** All branches (GET /repositories/{workspace}/{repo}/refs/branches), up to 2000. */

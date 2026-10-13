@@ -146,6 +146,10 @@ export class GitHub implements Remote {
 		}
 		await flush();
 		const sha = await this.createCommit(req.message, tree, [req.parent], req.author);
+		// The PATCH below only refuses non-fast-forwards. If the branch was force-pushed back to an older
+		// commit while we were uploading (a rollback), our commit would still fast-forward from there and
+		// silently undo it. Only move the branch from exactly the commit we built on.
+		if ((await this.getRef(req.branch)) !== req.parent) throw new NotFastForward();
 		if (!(await this.updateRef(req.branch, sha))) throw new NotFastForward();
 		return { sha, fastForward: true, blobShas };
 	}

@@ -523,3 +523,40 @@ test("empty folders: a push-only device keeps other devices' folders; a name Win
 	assert.match(gh.headFiles().get(".vault-sync/folders.json") ?? "", /"Mine"/, "its own folders still uploaded");
 	assert.equal((await win.sync()).upToDate, true, "and the quick path works again");
 });
+
+test("Windows: renamed and edited elsewhere to a name Windows can't store: the old note is kept, not trashed", async () => {
+	const gh = new FakeGitHub();
+	const mac = device("Mac", gh);
+	const win = device("Win", gh);
+	win.host.windows = true;
+	mac.fs.put("Notes/Meeting.md", "notes\n");
+	await mac.sync();
+	await win.sync();
+	mac.fs.files.delete("Notes/Meeting.md");
+	mac.fs.put("Notes/Meeting: notes.md", "notes, edited\n");
+	await mac.sync();
+	const r = await win.sync();
+	assert.deepEqual(r.deletedLocal, []);
+	assert.equal(win.fs.text("Notes/Meeting.md"), "notes\n");
+});
+
+test("Windows: a name seen before doesn't block later deletions in its folder; the kept note stays kept", async () => {
+	const gh = new FakeGitHub();
+	const mac = device("Mac", gh);
+	const win = device("Win", gh);
+	win.host.windows = true;
+	mac.fs.put("Notes/Meeting.md", "notes\n");
+	mac.fs.put("Notes/Other.md", "other\n");
+	await mac.sync();
+	await win.sync();
+	mac.fs.files.delete("Notes/Meeting.md");
+	mac.fs.put("Notes/Meeting: notes.md", "notes, edited\n");
+	await mac.sync();
+	await win.sync();
+	// Later, an unrelated note in the same folder is deleted elsewhere: Windows follows.
+	mac.fs.files.delete("Notes/Other.md");
+	await mac.sync();
+	const r = await win.sync();
+	assert.deepEqual(r.deletedLocal, ["Notes/Other.md"]);
+	assert.equal(win.fs.text("Notes/Meeting.md"), "notes\n", "the possibly renamed note is still kept");
+});

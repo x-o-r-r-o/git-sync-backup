@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0 (2026-10-13)
+
+**New**
+- **Resolve conflicts right in the note.** Every `<<<<<<<` / `=======` / `>>>>>>>` block gets **Keep this device**, **Keep repository** and **Keep both** buttons in the editor. The two sides are tinted and the marker lines show as small labels, so Markdown no longer turns them into headings or quotes.
+- **Sign in with GitLab** on gitlab.com without a token (device flow; access renews automatically). Self-managed GitLab can use its own OAuth application (*GitLab application ID* in settings).
+- **GitHub-friendly Markdown** for shared folders (optional): wikilinks become links, callouts become GitHub alerts, highlights become `<mark>` in the repository, while the vault keeps the exact Obsidian text.
+- **Hidden files inside folders** (optional, e.g. `Notes/.assets/`), and **`.gitignore` files inside folders** apply to their folder, as in Git.
+
+**Improved**
+- **Choosing a repository after Sign in with GitHub:** the wizard shows the repositories the app can use first; *Add repositories on GitHub* is a secondary step, and the list refreshes by itself when you come back (newly added repositories are marked *New* and listed first). Settings also gained a **Choose** button next to *Repository* that lists your repositories on any host.
+- Conflict copies are listed in the status panel even before sync is set up.
+
+**Fixed**
+- On Windows, a note renamed elsewhere to a name Windows can't store *and* edited here is kept with the edit instead of being skipped silently.
+- Review before release: a shared folder or mirror on the same GitLab as a signed-in vault now uses the sign-in token correctly; sign-out, pasting a token or closing the sign-in dialog can't be undone by a renewal finishing later; a failed renewal no longer blocks later ones until restart; a `.gitignore` that can't be read keeps the previous rules (instead of none), and edits to `.gitignore` files inside folders apply on the next sync; nested settings folders (`.obsidian`), trash and `.git` are never synced as hidden files; a folder holding only hidden synced files is no longer treated as empty; the Windows rename check no longer blocks deletions in that folder on later syncs; the editor buttons don't rescan big notes on every keystroke.
+- A setup link made on a device signed in with GitLab no longer offers to include the short-lived sign-in token (the new device signs in itself).
+- **Full audit before release (about 40 fixes):**
+  - Sync engine: a new note made from the same template as a deleted note (for example a daily note) is no longer mistaken for a rename that moves the other device's edits into it; after a force-push, files skipped in a sync are no longer trashed later; deleted binary or large-file-storage files are never downloaded just to check for renames; large-file-storage files over the size limit are skipped on download; a conflict whose text itself contains a `=======` line keeps both versions instead of marking it; replaced local content always goes to a recoverable trash, even with Obsidian's *permanently delete* setting; empty-folder cleanup can no longer race a download into the same folder; a folder that can't be listed is never removed.
+  - Hosts: Bitbucket can no longer adopt another device's commit as its own during a large push; GitLab paging works behind proxies whose address differs; Gitea/Forgejo files over the server's blob limit download through the file API; very large Gitea trees report an error instead of a partial list; a GitHub branch moved backwards mid-sync is detected; Bitbucket never sends the token to another address; changing the API URL to a different server no longer carries a pasted token along; setup links with `.` or `..` as owner or repository are refused.
+  - Settings and screens: settings changed on another device no longer make edits in an open settings tab silently not save; battery saver also skips sync on open and on leaving the app; the status-bar count updates as you edit; the paused icon is accurate and the pause row says until when; *Reset sync state* and *Restore this version* ask first; picks in the conflict dialog survive switching to the full diff; bigger conflict buttons on phones; the file size limit is 2000 MB on every host except GitHub without large file storage (100 MB); the conflict-strategy dropdown is no longer cut off; the branch picker has a proper title.
+- Translations: proofreading pass over German, Spanish, French, Japanese, Korean and Portuguese.
+
+**Removed**
+- **Gitee and Azure DevOps hosts.** They couldn't be verified against real servers. Settings that use them pause sync with a notice until you choose another host (a backup mirror on them is turned off, a shared folder on them is skipped); your files are untouched.
+
+**Development**
+- Live test suite for every host (`tests/live/hosts.live.test.ts`; `VSG_LIVE_KIND`, `VSG_LIVE_TOKEN`, `VSG_LIVE_REPO`), working on a throwaway branch.
+- The bundle may now also use the `@codemirror/*` packages Obsidian provides (for the editor buttons).
+
 ## 1.3.0 (2026-10-12)
 
 **New**

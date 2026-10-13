@@ -161,12 +161,48 @@ function push(m: Map<string, string[]>, k: string, v: string) {
 export interface SimilarityInput {
 	/** Text of each candidate file, or null if unknown/binary/too big. */
 	text: (side: "base" | "local" | "remote", path: string, sha: string) => Promise<string | null>;
-	similarity: (a: string, b: string) => number;
+	similarity?: (a: string, b: string) => number;
+	/** Minimum similarity to pair a delete with an add when the other side left the old file alone. */
 	threshold?: number;
+	/**
+	 * Minimum similarity when the other side EDITED the old file: pairing then merges those edits into
+	 * the new file and removes the old path, so it needs strong evidence. Below it, nothing is paired and
+	 * the edited old file is kept (an edit beats a deletion), so nothing can end up in the wrong note.
+	 */
+	strictThreshold?: number;
 	maxCandidates?: number;
 }
 
 const ext = (p: string) => (p.includes(".") ? p.slice(p.lastIndexOf(".")).toLowerCase() : "");
+
+/** Fewer distinct shared lines than this is never evidence of a rename (tiny notes, bare templates). */
+export const MIN_SHARED_LINES = 3;
+
+// Lines that carry no content of their own: blank, or only markup/punctuation ("---", "```", "-", "#").
+const NOISE_LINE = /^[\s\-*_=`~#>|.:+[\]]*$/;
+
+function contentLines(text: string): Set<string> {
+	const out = new Set<string>();
+	for (const raw of text.split("\n")) {
+		const l = raw.replace(/\s+$/, "");
+		if (!NOISE_LINE.test(l)) out.add(l);
+	}
+	return out;
+}
+
+/**
+ * How much two texts share, 0..1: the Jaccard index of their distinct content lines (blank and
+ * markup-only lines ignored). Returns 0 when fewer than MIN_SHARED_LINES distinct lines are shared, so
+ * two notes made from the same short template never look like one renamed note.
+ */
+export function lineSimilarity(a: string, b: string): number {
+	const A = contentLines(a);
+	const B = contentLines(b);
+	let shared = 0;
+	for (const l of A) if (B.has(l)) shared++;
+	if (shared < MIN_SHARED_LINES) return 0;
+	return shared / (A.size + B.size - shared);
+}
 
 /**
  * Second pass after detectRenames: pairs the remaining delete + add decisions whose contents are
@@ -179,7 +215,9 @@ export async function detectSimilarRenames(
 	remote: Map<string, string>,
 	io: SimilarityInput,
 ): Promise<Decision[]> {
-	const threshold = io.threshold ?? 0.5;
+	const threshold = io.threshold ?? 0.4;
+	const strict = Math.max(threshold, io.strictThreshold ?? 0.8);
+	const similarity = io.similarity ?? lineSimilarity;
 	const max = io.maxCandidates ?? 30;
 	// Renamed on GitHub: old path gone remotely, a new path appeared remotely.
 	const remoteOld = decisions.filter((d) => (d.kind === "delete-local" || d.kind === "upload") && base[d.path] && !remote.has(d.path) && !("renamedFrom" in d && d.renamedFrom));
@@ -193,6 +231,8 @@ export async function detectSimilarRenames(
 		if (!olds.length || !news.length || olds.length > max || news.length > max) return;
 		const used = new Set<string>();
 		for (const o of olds) {
+			// Nothing to compare with: don't even read the old file.
+			if (!news.some((n) => !used.has(n.path) && ext(n.path) === ext(o.path))) continue;
 			const baseText = await io.text("base", o.path, base[o.path]);
 			if (baseText === null) continue;
 			let best: { d: Decision; score: number } | null = null;
@@ -201,13 +241,18 @@ export async function detectSimilarRenames(
 				const sha = newSide === "remote" ? remote.get(n.path)! : local.get(n.path)!;
 				const t = await io.text(newSide, n.path, sha);
 				if (t === null) continue;
-				const score = io.similarity(baseText, t);
+				const score = similarity(baseText, t);
 				if (score >= threshold && (!best || score > best.score)) best = { d: n, score };
 			}
 			if (!best) continue;
+			const from = o.path;
+			// The side that did NOT rename still has the old path: did it edit it?
+			const otherEdited = newSide === "remote" ? local.get(from) !== base[from] : remote.get(from) !== base[from];
+			// Pairing would merge those edits into another file and remove the old one: only on strong
+			// evidence. Otherwise leave both alone (the edited old file is kept, the new one synced as new).
+			if (otherEdited && best.score < strict) continue;
 			used.add(best.d.path);
 			const to = best.d.path;
-			const from = o.path;
 			if (newSide === "remote") {
 				const lOld = local.get(from)!;
 				const rNew = remote.get(to)!;

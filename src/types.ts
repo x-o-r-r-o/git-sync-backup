@@ -12,7 +12,7 @@ export type NoticeLevel = "auto" | "all" | "changes" | "errors" | "silent";
 // Stored in data.json. Safe to sync between devices: no secrets in here.
 // The token, API base URL and device name live in device-local storage instead, so a
 // synced data.json can never redirect a device's token to another server.
-export type Provider = "github" | "gitlab" | "gitea" | "bitbucket" | "gitee" | "azure";
+export type Provider = "github" | "gitlab" | "gitea" | "bitbucket";
 
 export interface VaultSyncSettings {
 	provider: Provider;
@@ -33,6 +33,8 @@ export interface VaultSyncSettings {
 	configSync: ConfigSync;
 	/** Sync hidden files and folders at the top of the vault (e.g. .github/, .editorconfig). */
 	syncHidden: boolean;
+	/** Also hidden files and folders inside normal folders (e.g. Notes/.assets/). Lists every folder on disk. */
+	syncHiddenNested: boolean;
 	/** Also exclude what the vault's .gitignore lists (and sync the .gitignore itself). */
 	useGitignore: boolean;
 	excludePatterns: string;
@@ -67,6 +69,11 @@ export interface VaultSyncSettings {
 	wizardShown: boolean;
 	/** Folders synced to their own repositories (e.g. a team folder). No secrets in here. */
 	sharedFolders: SharedFolder[];
+	/**
+	 * Set when data.json named a host that is no longer supported (Gitee, Azure DevOps): what it pointed
+	 * at. Sync stays paused until the user enters a repository again (see removed-hosts.ts).
+	 */
+	removedHost?: { provider: string; owner: string; repo: string; branch: string };
 }
 
 export interface MirrorTarget {
@@ -84,6 +91,8 @@ export interface SharedFolder {
 	subdir?: string;
 	/** On a conflict: keep both versions (copy), or push this device's version to a branch and open a pull request. */
 	conflicts?: "copy" | "pr";
+	/** Store notes in GitHub-friendly Markdown (wikilinks as links, callouts as alerts); the vault keeps the exact text. */
+	githubFormat?: boolean;
 	provider: Provider;
 	owner: string;
 	repo: string;
@@ -108,6 +117,7 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	syncConfigDir: false,
 	configSync: DEFAULT_CONFIG_SYNC,
 	syncHidden: false,
+	syncHiddenNested: false,
 	useGitignore: false,
 	excludePatterns: [
 		"# One pattern per line, gitignore style",
@@ -169,6 +179,10 @@ export interface SyncState {
 	 * path → blob sha. Their repository copy is kept, without rescanning on every sync.
 	 */
 	keptMoved?: Record<string, string>;
+	/** Windows: repository names this device can't store, as of the last sync. */
+	winSeen?: string[];
+	/** Windows: notes kept because they may have been renamed (and edited) into such a name: path → its spot. */
+	winKept?: Record<string, string>;
 	/** Empty folders as of the last sync (three-way base for .vault-sync/folders.json). */
 	baseFolders?: string[];
 	/** Remote files this device chose not to download (over its size limit), available on demand. */

@@ -10,7 +10,7 @@ import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { errMsg } from "./util.ts";
 import { t as tr } from "./i18n.ts";
-import { GitHubSignInModal } from "./ghapp-ui.ts";
+import { DeviceSignInModal } from "./ghapp-ui.ts";
 import { installUrl } from "./ghapp.ts";
 
 type Step = "connect" | "repo" | "vault" | "syncing" | "done";
@@ -35,11 +35,13 @@ export class SetupWizard extends Modal {
 	}
 	onClose() {
 		this.cancelled = true;
+		this.stopRepoWatch();
 		this.contentEl.empty();
 		this.plugin.onProgress = null;
 	}
 
 	private go(step: Step) {
+		if (step !== "repo") this.stopRepoWatch();
 		this.step = step;
 		this.render();
 	}
@@ -136,17 +138,18 @@ export class SetupWizard extends Modal {
 				.addButton((b) => b.setButtonText(tr("w.continue")).setCta().onClick(() => done()));
 		}
 
-		const app = p.settings.provider === "github" ? p.githubApp() : null;
-		if (app) {
+		const kind = p.settings.provider === "github" && p.githubApp() ? "github" : p.settings.provider === "gitlab" && p.gitlabApp() ? "gitlab" : null;
+		const app = kind !== null;
+		if (kind) {
 			const box = this.contentEl.createDiv({ cls: "vsg-wz-token" });
-			box.createEl("h4", { text: tr("app.signIn") });
+			box.createEl("h4", { text: kind === "gitlab" ? tr("app.signInGitLab") : tr("app.signIn") });
 			new Setting(box)
-				.setDesc(tr("app.signInDesc"))
+				.setDesc(kind === "gitlab" ? tr("app.signInDescGitLab") : tr("app.signInDesc"))
 				.addButton((b) =>
 					b
 						.setButtonText(tr("app.signInBtn"))
 						.setCta()
-						.onClick(() => new GitHubSignInModal(this.app, p, (ok) => void (ok && done())).open()),
+						.onClick(() => new DeviceSignInModal(this.app, p.signInFlow(kind), (ok) => void (ok && done())).open()),
 				);
 		}
 
@@ -175,77 +178,157 @@ export class SetupWizard extends Modal {
 	}
 
 	// ---------- 2. repository ----------
+	/** While the user grants repositories on GitHub: reload the list when Obsidian gets focus again, and every few seconds. */
+	private reloadRepos: (() => Promise<void>) | null = null;
+	private watchTimer: number | null = null;
+	private readonly onFocus = () => void this.reloadRepos?.();
+	private startRepoWatch() {
+		this.stopRepoWatch();
+		window.addEventListener("focus", this.onFocus);
+		const until = Date.now() + 3 * 60_000;
+		this.watchTimer = window.setInterval(() => {
+			if (Date.now() > until) this.stopRepoWatch();
+			else void this.reloadRepos?.();
+		}, 4000);
+	}
+	private stopRepoWatch() {
+		window.removeEventListener("focus", this.onFocus);
+		if (this.watchTimer !== null) window.clearInterval(this.watchTimer);
+		this.watchTimer = null;
+	}
+
 	private async renderRepo() {
 		const p = this.plugin;
 		const gen = this.generation;
+		// Opened from a setup link (straight to step 3) and then "Back": the account name isn't known yet.
+		if (!this.login) {
+			try {
+				this.login = (await p.gh.getUser()).login;
+			} catch {
+				this.login = p.settings.owner;
+			}
+			if (gen !== this.generation) return;
+		}
 		this.header(2, tr("w.repoTitle"), tr("w.repoSub", { user: this.login }));
 		const pick = async (owner: string, name: string, branch: string) => {
+			this.stopRepoWatch();
 			p.settings.owner = owner;
 			p.settings.repo = name;
 			p.settings.branch = branch || "main";
 			await p.saveSettings();
 			this.go("vault");
 		};
+		const signedInApp = p.usingGitHubApp();
 
 		let newName = this.app.vault.getName().replace(/[^A-Za-z0-9._-]+/g, "-");
-		// Signed in with the GitHub App: it can only see repositories it was granted, and can't create any.
-		if (p.usingGitHubApp()) {
-			const app = p.githubApp();
-			const web = p.githubWeb();
-			const st = new Setting(this.contentEl).setName(tr("app.chooseRepos")).setDesc(tr("app.chooseReposDesc"));
-			if (app?.slug) st.addButton((b) => b.setButtonText(tr("app.chooseRepos")).setCta().onClick(() => window.open(installUrl(web, app.slug))));
-			st.addButton((b) => b.setButtonText(tr("app.createOnGitHub")).onClick(() => window.open(`${web}/new`)));
-			st.addButton((b) => b.setButtonText(tr("app.refresh")).onClick(() => this.render()));
-		} else new Setting(this.contentEl)
-			.setName(tr("w.createNew"))
-			.addText((t) => t.setValue(newName).onChange((v) => (newName = v.trim())))
-			.addButton((b) =>
-				b
-					.setButtonText(tr("w.create"))
-					.setCta()
-					.onClick(async () => {
-						// The new repository belongs to the signed-in account; put the old owner back if it fails.
-						const previousOwner = p.settings.owner;
-						try {
-							p.settings.owner = this.login;
-							await p.gh.createRepo(newName);
-							await pick(this.login, newName, "main");
-						} catch (e) {
-							p.settings.owner = previousOwner;
-							new Notice(tr("w.createFailed", { error: errMsg(e) }), 10000);
-						}
-					}),
-			);
+		if (!signedInApp)
+			new Setting(this.contentEl)
+				.setName(tr("w.createNew"))
+				.addText((t) => t.setValue(newName).onChange((v) => (newName = v.trim())))
+				.addButton((b) =>
+					b
+						.setButtonText(tr("w.create"))
+						.setCta()
+						.onClick(async () => {
+							if (!this.login) return void new Notice(tr("w.createFailed", { error: "unknown account" }), 10000);
+							// The new repository belongs to the signed-in account; put the old owner back if it fails.
+							const previousOwner = p.settings.owner;
+							try {
+								p.settings.owner = this.login;
+								await p.gh.createRepo(newName);
+								await pick(this.login, newName, "main");
+							} catch (e) {
+								p.settings.owner = previousOwner;
+								new Notice(tr("w.createFailed", { error: errMsg(e) }), 10000);
+							}
+						}),
+				);
 
-		this.contentEl.createEl("h4", { text: tr("w.useExisting") });
+		// Signed in with the GitHub App: the list shows the repositories the app may use; more are added on GitHub.
+		this.contentEl.createEl("h4", { text: signedInApp ? tr("app.reposTitle") : tr("w.useExisting") });
 		const search = this.contentEl.createEl("input", { type: "search", placeholder: tr("w.filter"), cls: "vsg-wz-search" });
 		const listEl = this.contentEl.createDiv({ cls: "vsg-wz-repos" });
 		listEl.setText(tr("w.loadingRepos"));
-		new Setting(this.contentEl).addButton((b) => b.setButtonText(tr("w.back")).onClick(() => this.go("connect")));
-		try {
-			const repos = await p.gh.listRepos();
-			if (gen !== this.generation) return; // the wizard moved on while the list was loading
-			const draw = () => {
-				listEl.empty();
-				const q = search.value.toLowerCase();
-				const shown = repos.filter((r) => `${r.owner}/${r.name}`.toLowerCase().includes(q)).slice(0, 100);
-				if (!shown.length) listEl.createDiv({ cls: "vsg-muted", text: tr("w.noMatch") });
-				for (const r of shown) {
-					const row = listEl.createDiv({ cls: "vsg-wz-repo" });
-					row.createSpan({ text: `${r.owner}/${r.name}` });
-					row.createSpan({ text: r.private ? tr("w.private") : tr("w.public"), cls: r.private ? "vsg-badge" : "vsg-badge vsg-badge-warn" });
-					row.onClickEvent(async () => {
-						if (!r.private && !(await confirmPlan(this.app, tr("w.publicTitle"), tr("w.publicBody", { repo: `${r.owner}/${r.name}` }), [], tr("w.useAnyway"), true))) return;
-						void pick(r.owner, r.name, r.defaultBranch);
-					});
-				}
+
+		let watchNote: HTMLElement | null = null;
+		if (signedInApp) {
+			const app = p.githubApp();
+			const web = p.githubWeb();
+			const st = new Setting(this.contentEl).setName(tr("app.chooseRepos")).setDesc(tr("app.chooseReposDesc"));
+			const away = (url: string) => {
+				window.open(url);
+				this.startRepoWatch();
+				watchNote?.setText(tr("app.watching"));
 			};
-			search.oninput = draw;
-			draw();
-			if (!Platform.isMobile) search.focus();
-		} catch (e) {
-			if (gen === this.generation) listEl.setText(tr("w.listFailed", { error: errMsg(e) }));
+			if (app?.slug) st.addButton((b) => b.setButtonText(tr("app.addRepos")).onClick(() => away(installUrl(web, app.slug))));
+			st.addButton((b) => b.setButtonText(tr("app.createOnGitHub")).onClick(() => away(`${web}/new`)));
+			st.addButton((b) => b.setButtonText(tr("app.refresh")).onClick(() => void this.reloadRepos?.()));
+			watchNote = this.contentEl.createDiv({ cls: "vsg-muted" });
 		}
+		new Setting(this.contentEl).addButton((b) =>
+			b.setButtonText(tr("w.back")).onClick(() => {
+				this.stopRepoWatch();
+				this.go("connect");
+			}),
+		);
+
+		type Repo = Awaited<ReturnType<typeof p.gh.listRepos>>[number];
+		let repos: Repo[] = [];
+		let known: Set<string> | null = null;
+		const fresh = new Set<string>();
+		const key = (r: Repo) => `${r.owner}/${r.name}`;
+		const draw = () => {
+			listEl.empty();
+			const q = search.value.toLowerCase();
+			// Newly granted repositories first, then the most recently updated.
+			const sorted = [...repos].sort((a, b) => Number(fresh.has(key(b))) - Number(fresh.has(key(a))));
+			const shown = sorted.filter((r) => key(r).toLowerCase().includes(q)).slice(0, 100);
+			if (!shown.length) listEl.createDiv({ cls: "vsg-muted", text: repos.length || q ? tr("w.noMatch") : signedInApp ? tr("app.noRepos") : tr("w.noMatch") });
+			for (const r of shown) {
+				const row = listEl.createDiv({ cls: "vsg-wz-repo" });
+				row.setAttr("role", "button");
+				row.setAttr("tabindex", "0");
+				row.createSpan({ text: key(r) });
+				if (fresh.has(key(r))) row.createSpan({ text: tr("app.newRepo"), cls: "vsg-badge vsg-badge-new" });
+				row.createSpan({ text: r.private ? tr("w.private") : tr("w.public"), cls: r.private ? "vsg-badge" : "vsg-badge vsg-badge-warn" });
+				const choose = async () => {
+					if (!r.private && !(await confirmPlan(this.app, tr("w.publicTitle"), tr("w.publicBody", { repo: key(r) }), [], tr("w.useAnyway"), true))) return;
+					void pick(r.owner, r.name, r.defaultBranch);
+				};
+				row.onClickEvent(() => void choose());
+				row.addEventListener("keydown", (e) => {
+					if (e.key === "Enter" || e.key === " ") {
+						e.preventDefault();
+						void choose();
+					}
+				});
+			}
+		};
+		search.oninput = draw;
+		let loading = false;
+		this.reloadRepos = async () => {
+			if (loading || gen !== this.generation || this.cancelled) return;
+			loading = true;
+			try {
+				const list = await p.gh.listRepos();
+				if (gen !== this.generation) return; // the wizard moved on while the list was loading
+				if (known) for (const r of list) if (!known.has(key(r))) fresh.add(key(r));
+				known = new Set(list.map(key));
+				repos = list;
+				draw();
+				if (fresh.size && this.watchTimer !== null) {
+					// The new repository arrived: stop polling and say so.
+					this.stopRepoWatch();
+					watchNote?.setText(tr("app.newArrived"));
+				}
+			} catch (e) {
+				if (gen === this.generation && !repos.length) listEl.setText(tr("w.listFailed", { error: errMsg(e) }));
+			} finally {
+				loading = false;
+			}
+		};
+		await this.reloadRepos();
+		if (gen === this.generation && !Platform.isMobile) search.focus();
 	}
 
 	// ---------- 3. this vault ----------

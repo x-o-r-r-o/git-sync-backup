@@ -9,6 +9,12 @@ export interface TreeEntry {
 	size?: number;
 }
 
+/** Where a blob can be found: a repository path at a commit (or branch). */
+export interface BlobHint {
+	path: string;
+	ref: string;
+}
+
 export interface CommitInfo {
 	sha: string;
 	message: string;
@@ -69,7 +75,7 @@ export class RemoteError extends Error {
 }
 
 export interface Remote {
-	readonly kind: "github" | "gitea" | "gitlab" | "bitbucket" | "gitee" | "azure";
+	readonly kind: "github" | "gitea" | "gitlab" | "bitbucket";
 	readonly label: string;
 
 	getUser(): Promise<{ login: string }>;
@@ -83,7 +89,12 @@ export interface Remote {
 	getCommitTree(sha: string): Promise<string>;
 	/** Full file list of a tree. */
 	listTree(treeSha: string): Promise<TreeEntry[]>;
-	getBlob(sha: string): Promise<ArrayBuffer>;
+	/**
+	 * Blob content by sha. `hint` (optional) says where the blob lives (repository path at commit
+	 * `ref`); hosts whose blob endpoint has a size cap (Gitea) use it to fetch large files another way,
+	 * and throw a clear error without it rather than return empty bytes.
+	 */
+	getBlob(sha: string, hint?: BlobHint): Promise<ArrayBuffer>;
 	/** First commit in an empty repository. */
 	putFile(path: string, message: string, base64: string, branch: string): Promise<void>;
 	/** Atomic multi-file commit on top of `parent`. Throws NotFastForward if the host refuses. */

@@ -5,10 +5,10 @@
 import { b64, deriveMaster, unb64 } from "./crypto.ts";
 import { normalizeConfigSync } from "./scope-config.ts";
 import type { ConfigSync } from "./scope-config.ts";
+import { PROVIDERS } from "./removed-hosts.ts";
+import type { Provider } from "./types.ts";
 
 export const SETUP_ACTION = "vault-sync-git";
-const PROVIDERS = ["github", "gitlab", "gitea", "bitbucket", "gitee", "azure"] as const;
-type Provider = (typeof PROVIDERS)[number];
 
 export interface SetupPayload {
 	v: 1;
@@ -81,6 +81,8 @@ export function parseSetupPayload(s: string | undefined): SetupPayload | null {
 	const repo = str(raw.repo);
 	const branch = str(raw.branch);
 	if (!owner || !repo || !branch || /[\s?#]/.test(owner + repo)) return null;
+	// "." / ".." / empty segments would change the API URL path (owner may be "group/subgroup").
+	if ([...owner.split("/"), ...repo.split("/")].some((seg) => seg === "" || seg === "." || seg === "..")) return null;
 	const out: SetupPayload = { v: 1, provider: raw.provider as Provider, owner, repo, branch };
 	const api = str(raw.api, 500);
 	if (api) {

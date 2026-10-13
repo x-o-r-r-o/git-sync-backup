@@ -1,12 +1,14 @@
-# Authentication (2026-10-12)
+# Authentication
 
-**Status (1.2.0): Sign in with GitHub is live** (GitHub App + device flow, `src/ghapp.ts`). The plugin's app is [Vault Sync for Git](https://github.com/apps/vault-sync-for-git) (client ID `Iv23lilDQAJBENeFs5Ei`, *Contents: read and write* only). On GitHub Enterprise a device can enter its own app's client ID in settings. Token entry stays available everywhere. Verified against the real API: sign-in, token refresh (both tokens rotate) and the full live sync suite running on the app's token.
+How the plugin authenticates: Sign in with GitHub (since 1.2), Sign in with GitLab (since 1.4), or a pasted access token on every host. The sections below the GitHub status also keep the original evaluation for reference.
 
-## Today
+**Sign in with GitHub** (GitHub App + device flow, `src/ghapp.ts`). The plugin's app is [Vault Sync for Git](https://github.com/apps/vault-sync-for-git) (client ID `Iv23lilDQAJBENeFs5Ei`, *Contents: read and write* only). On GitHub Enterprise a device can enter its own app's client ID in settings. Token entry stays available everywhere. Verified against the real API: sign-in, token refresh (both tokens rotate) and the full live sync suite running on the app's token.
 
-You paste a **personal access token**. The setup wizard and settings link to GitHub's **prefilled fine-grained token page**, which uses GitHub's template URL (Aug 2025) to fill in the name, a 366-day expiry and `contents=write`. You only have to pick the repository.
+## Pasted tokens
 
-The token is kept in **Obsidian's SecretStorage** (1.11.4+) and never in `data.json`. Older Obsidian versions fall back to device-local storage. A classic `repo` token is offered as a simpler alternative.
+You can always paste a **personal access token**. The setup wizard and settings link to GitHub's **prefilled fine-grained token page**, which uses GitHub's template URL (Aug 2025) to fill in the name, a 366-day expiry and `contents=write`. You only have to pick the repository.
+
+The token is kept in **Obsidian's SecretStorage** (1.11.4+) and never in `data.json`. A classic `repo` token is offered as a simpler alternative.
 
 ## Options evaluated
 
@@ -70,3 +72,24 @@ One-time step for the plugin author (or a GitHub Enterprise admin for their serv
 ## Listing repositories
 
 `GET /user/repos` with an app token lists every repository the *user* can see, not the ones the app may write to. With a `ghu_` token the plugin lists `GET /user/installations` and each installation's repositories instead, so the wizard only offers repositories that will actually sync.
+
+## Sign in with GitLab
+
+Same device flow (GitLab 17.9+, RFC 8628), in `src/gitlabapp.ts`:
+
+1. `POST <server>/oauth/authorize_device` with `client_id` and `scope=api` returns a user code and `verification_uri_complete`.
+2. The dialog shows the code and opens the approval page with the code filled in.
+3. The plugin polls `POST <server>/oauth/token` (`grant_type=urn:ietf:params:oauth:grant-type:device_code`), honouring `interval` and `slow_down`.
+4. Access tokens last two hours. Before a sync, and on a 401, the plugin refreshes with the rotating refresh token (`grant_type=refresh_token`); only one refresh runs at a time.
+5. API calls use `Authorization: Bearer` instead of `PRIVATE-TOKEN`.
+
+Tokens are stored in Obsidian's secret storage on the device and are bound to the server address and Application ID they were issued for; they are never sent to another server.
+
+### Registering the GitLab application
+
+On gitlab.com the plugin author registered the *Vault Sync for Git* application; its Application ID is `GITLAB_APP` in `src/gitlabapp.ts` (public, not a secret). On a self-managed server, a user or administrator does the same and pastes the ID into *GitLab application ID* in settings:
+
+1. Avatar → Edit profile → Applications (or Group / Admin area → Applications) → **Add new application**.
+2. Name: *Vault Sync for Git*. Redirect URI: any https URL (required by the form, unused by the device flow).
+3. **Confidential: unticked.** **Device authorization grant: ticked** (without it GitLab answers `access_denied`). Scopes: **api** only.
+4. Save and copy the **Application ID**. The secret is not used.
