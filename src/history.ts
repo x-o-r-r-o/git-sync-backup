@@ -110,6 +110,64 @@ export function parentPathOf(f: HistoryFile): string {
 	return f.previous ?? f.path;
 }
 
+// ---------------- History across renames ----------------
+
+/** A commit in a file's history, with the file's vault path at that commit (older names after a rename). */
+export interface PathCommit extends CommitInfo {
+	path: string;
+}
+
+export interface RenameSource {
+	/** Commits that changed this vault path, newest first, at most `limit`. */
+	list(path: string, limit: number): Promise<CommitInfo[]>;
+	/** Changed files of a commit as vault paths (renames carry their old path when the host reports it). */
+	files(sha: string): Promise<HistoryFile[]>;
+}
+
+/** Most names a file's history is followed through. */
+export const MAX_RENAMES = 10;
+
+/** Old name of `path` from a sync commit's file list ("- old → new"), for hosts that saw a delete plus an add. */
+export function renamedFromMessage(message: string, path: string): string | null {
+	for (const line of message.split("\n")) {
+		const m = /^- (.+) → (.+)$/.exec(line.trim());
+		if (m && m[2] === path && m[1] !== path) return m[1];
+	}
+	return null;
+}
+
+/**
+ * The newest `limit` commits of a file, following it back through renames: when the history of the
+ * current name ends (fewer than asked for), the oldest of those commits is checked for a rename to
+ * this name and the old name's history continues the list. Each commit carries the file's path at
+ * that commit, so its version is read under the right name.
+ */
+export async function followRenames(path: string, limit: number, src: RenameSource): Promise<PathCommit[]> {
+	const out: PathCommit[] = [];
+	const seen = new Set<string>();
+	const names = new Set<string>([path]);
+	let cur = path;
+	for (let hop = 0; hop <= MAX_RENAMES && out.length < limit; hop++) {
+		// An older name's history also lists the rename commit itself (already shown): ask for one more.
+		const want = limit - out.length + (hop > 0 ? 1 : 0);
+		const list = await src.list(cur, want);
+		for (const c of list) {
+			if (seen.has(c.sha) || out.length >= limit) continue;
+			seen.add(c.sha);
+			out.push({ ...c, path: cur });
+		}
+		// A full page: the current name may have older commits, so there is nothing to follow yet.
+		if (list.length >= want || !list.length) break;
+		const oldest = list[list.length - 1];
+		const files = await src.files(oldest.sha).catch(() => [] as HistoryFile[]);
+		const previous = files.find((f) => f.path === cur && f.status === "renamed")?.previous ?? renamedFromMessage(oldest.message, cur);
+		if (!previous || names.has(previous)) break;
+		names.add(previous);
+		cur = previous;
+	}
+	return out;
+}
+
 // ---------------- Use the repository version ----------------
 
 /** What the vault needs for a recoverable replace (VaultIO provides it). */

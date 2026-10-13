@@ -141,8 +141,8 @@ Still to test: iPhone and iPad.
 ## Next (after the Android tests)
 
 1. **iPhone / iPad** on a real device.
-2. **Follow renames back through history**: a file's history and *who last changed this line* continue past a rename.
-3. **Host-side line authoring** for shared folders (no encryption there): ask the host for the file's history instead of walking 30 versions.
+2. ✅ **Follow renames back through history** (unreleased): a file's history and *who last changed this line* continue past renames, with encryption too.
+3. ✅ **Line authoring for shared folders** (unreleased), from the shared folder's own repository. It walks the file's versions like the vault's own repository does: GitHub has no blame endpoint in its REST API and Gitea and Bitbucket have none at all, so a host-side blame would only cover GitLab.
 4. **Drop "beta"** for GitLab, Gitea / Forgejo and Bitbucket once real-world reports confirm the live-suite results.
 5. **Native-speaker review** of the seven translations.
 

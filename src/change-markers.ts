@@ -29,6 +29,9 @@ const RECOMPUTE_MS = 400;
 const RETRY_MS = 60_000;
 const COMMITS_TTL_MS = 5 * 60_000;
 
+/** A commit of a file's history; `path` is the file's name at that commit (older names after a rename). */
+export type NamedCommit = CommitInfo & { path?: string };
+
 export interface ChangeSource {
 	app: App;
 	enabled(): boolean;
@@ -37,13 +40,14 @@ export interface ChangeSource {
 	/** Whether "who last changed this line" can look through this file's history. */
 	hasHistory(path: string): boolean;
 	/** Commits that changed a file, newest first. */
-	listCommits(path: string, limit: number): Promise<CommitInfo[]>;
+	/** Newest first; `path` on a commit is the file's name then (older names after a rename). */
+	listCommits(path: string, limit: number): Promise<NamedCommit[]>;
 	/** A file's content at a commit, decoded on this device (null = not in that commit). */
 	readVersion(path: string, sha: string): Promise<ArrayBuffer | null>;
 	/** Opens one version of a file in the version modal. */
-	openVersion(path: string, commit: CommitInfo): void;
+	openVersion(path: string, commit: NamedCommit): void;
 	/** False (after telling the user what to do) when history can't be read yet, e.g. encryption locked. */
-	canBrowse(): Promise<boolean>;
+	canBrowse(path: string): Promise<boolean>;
 	log(msg: string): void;
 }
 
@@ -140,7 +144,7 @@ export class ChangeMarkers {
 	private failed = new Map<string, number>();
 	private inflight = new Map<string, Promise<string | null>>();
 	private versions = new Lru<string | null>(40);
-	private commits = new Map<string, { at: number; list: CommitInfo[] }>();
+	private commits = new Map<string, { at: number; list: NamedCommit[] }>();
 	readonly views = new Set<MarkerView>();
 	private popover: { el: HTMLElement; close: () => void } | null = null;
 	private readonly plugin: ViewPlugin<MarkerView>;
@@ -378,7 +382,7 @@ export class ChangeMarkers {
 
 	// ---- line authoring ----
 
-	private async commitsFor(path: string): Promise<CommitInfo[]> {
+	private async commitsFor(path: string): Promise<NamedCommit[]> {
 		const c = this.commits.get(path);
 		if (c && Date.now() - c.at < COMMITS_TTL_MS) return c.list;
 		const list = await this.src.listCommits(path, HISTORY_LIMIT);
@@ -400,12 +404,12 @@ export class ChangeMarkers {
 	 * not from newer remote commits made since. When `head` didn't change this file, from the newest
 	 * version whose text is `base`. Unchanged when neither is found.
 	 */
-	private async fromLastSync(path: string, commits: CommitInfo[], head: string, base: string): Promise<CommitInfo[]> {
+	private async fromLastSync(path: string, commits: NamedCommit[], head: string, base: string): Promise<NamedCommit[]> {
 		const at = commits.findIndex((c) => c.sha === head);
 		if (at >= 0) return commits.slice(at);
 		const want = base.replace(/\r\n/g, "\n");
 		for (let k = 0; k < Math.min(commits.length, 10); k++) {
-			const v = await this.versionText(path, commits[k].sha);
+			const v = await this.versionText(commits[k].path ?? path, commits[k].sha);
 			if (v !== null && v.replace(/\r\n/g, "\n") === want) return commits.slice(k);
 		}
 		return commits;
@@ -417,14 +421,14 @@ export class ChangeMarkers {
 	 */
 	async whoChanged(path: string, text: string, line: number, fromHead: string | null = null) {
 		if (text.length > MAX_BYTES) return void new Notice(t("la.tooBig"));
-		if (!(await this.src.canBrowse())) return;
+		if (!(await this.src.canBrowse(path))) return;
 		const busy = new Notice(t("la.looking"), 0);
 		try {
 			let commits = (await this.commitsFor(path)).slice(0, HISTORY_LIMIT);
 			// Whether the listed history reaches the file's first version (before skipping newer commits).
 			const complete = commits.length < HISTORY_LIMIT;
 			if (fromHead) commits = await this.fromLastSync(path, commits, fromHead, text);
-			const r = await traceLine(text, line, commits.length, (k) => this.versionText(path, commits[k].sha), complete);
+			const r = await traceLine(text, line, commits.length, (k) => this.versionText(commits[k].path ?? path, commits[k].sha), complete);
 			busy.hide();
 			new LineAuthorModal(this.src.app, path, r, commits, (c) => this.src.openVersion(path, c)).open();
 		} catch (e) {
@@ -506,8 +510,8 @@ class LineAuthorModal extends Modal {
 		app: App,
 		private path: string,
 		private r: LineTrace,
-		private commits: CommitInfo[],
-		private open_: (c: CommitInfo) => void,
+		private commits: NamedCommit[],
+		private open_: (c: NamedCommit) => void,
 	) {
 		super(app);
 	}

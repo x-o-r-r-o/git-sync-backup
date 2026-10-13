@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**New**
+- **History follows renames.** *Version history* and *Who last changed this line* continue past a rename (also through several renames and with end-to-end encryption): versions from before it show the file's old name, and open, compare and restore correctly.
+- **Who last changed this line in shared folders**, read from the shared folder's own repository (it was only available for the vault's repository).
+
+**Fixed**
+- **GitHub: older versions of some binary files came back altered.** GitHub's file endpoint took certain binary data for UTF-16 text and converted it (an encrypted 60-byte file came back as 90 bytes). Encrypted files then failed to open from history; an unencrypted binary file restored from history could have been written with the wrong bytes. Older versions are now read from the stored blob, byte for byte. GitLab, Codeberg and Bitbucket were checked live and were not affected.
+
 **Fixed (found testing on an Android phone)**
 - *End-to-end encryption: turn on or unlock* no longer asks for the passphrase on a device that already has the key. It shows that encryption is on, with *Remove unencrypted copies…*, *Lock this device* and *Close*.
 - The *Download* box under an embed of a file that isn't on the device now goes away once the file is downloaded (it stayed until the note was reopened), and its button can't be pressed twice.

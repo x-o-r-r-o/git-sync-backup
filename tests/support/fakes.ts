@@ -270,6 +270,43 @@ export class FakeGitHub {
 		const e = this.trees.get(this.commits.get(ref)!.tree)!.get(path);
 		return e ? toAB(this.blobs.get(e.sha)!) : null;
 	}
+	/** First-parent history of `branch`, newest first; with `path`, only commits that changed it. */
+	async listCommits(branch: string, path?: string, perPage = 30, page = 1) {
+		const out: { sha: string; message: string; date: string; author: string }[] = [];
+		for (let c = this.refs.get(branch); c; c = this.commits.get(c)?.parents[0]) {
+			const info = this.commits.get(c)!;
+			if (path !== undefined) {
+				const now = this.trees.get(info.tree)!.get(path)?.sha;
+				const p = info.parents[0];
+				const before = p ? this.trees.get(this.commits.get(p)!.tree)!.get(path)?.sha : undefined;
+				if (now === before) continue;
+			}
+			out.push({ sha: c, message: info.message, date: new Date(2026, 0, 1, 0, 0, Number(c.slice(1))).toISOString(), author: "test" });
+		}
+		return out.slice((page - 1) * perPage, page * perPage);
+	}
+	/** Changed files vs the first parent; a deleted and an added path with the same blob is a rename (like GitHub). */
+	async getCommitFiles(sha: string) {
+		const info = this.commits.get(sha)!;
+		const parent = info.parents[0] ?? null;
+		const now = this.trees.get(info.tree)!;
+		const before = parent ? this.trees.get(this.commits.get(parent)!.tree)! : new Map<string, { sha: string; mode: string }>();
+		const files: { filename: string; status: string; previous?: string }[] = [];
+		const removed = [...before].filter(([p]) => !now.has(p));
+		for (const [p, e] of now) {
+			const old = before.get(p);
+			if (old?.sha === e.sha) continue;
+			if (old) {
+				files.push({ filename: p, status: "modified" });
+				continue;
+			}
+			const from = removed.findIndex(([, r]) => r.sha === e.sha);
+			if (from >= 0) files.push({ filename: p, status: "renamed", previous: removed.splice(from, 1)[0][0] });
+			else files.push({ filename: p, status: "added" });
+		}
+		for (const [p] of removed) files.push({ filename: p, status: "removed" });
+		return { parent, files };
+	}
 	rawFiles(): Map<string, Uint8Array> {
 		const t = this.trees.get(this.commits.get(this.refs.get("main")!)!.tree)!;
 		return new Map([...t].map(([p, e]) => [p, this.blobs.get(e.sha)!]));

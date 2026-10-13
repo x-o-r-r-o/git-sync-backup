@@ -5,7 +5,8 @@ import type { BlobCache, BlobCacheStore } from "./bitbucket.ts";
 import { HEALTH_VIEW, HealthView } from "./health.ts";
 import { HISTORY_VIEW, HistoryView } from "./history-view.ts";
 import type { HistoryHost } from "./history-view.ts";
-import { decodeCommitFiles, HISTORY_PAGE, parentPathOf, replaceWithRepositoryVersion } from "./history.ts";
+import { decodeCommitFiles, followRenames, HISTORY_PAGE, parentPathOf, replaceWithRepositoryVersion } from "./history.ts";
+import type { PathCommit } from "./history.ts";
 import { nestedHiddenIndex, VaultIO, keepSelfEnabled } from "./io.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { VaultSyncSettingTab } from "./settings-tab.ts";
@@ -2293,37 +2294,61 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 
 	/** Change markers and line history. A file in a shared folder takes its base from that folder's sync. */
 	private createChangeMarkers(): ChangeMarkers {
-		const sharedOf = (path: string) => this.sharedHostsCached().find((h) => path.startsWith(h.def.folder.replace(/\/+$/, "") + "/")) ?? null;
+		const sharedOf = (path: string) => this.sharedHostOf(path);
 		return new ChangeMarkers({
 			app: this.app,
 			// Without a repository there is no last-synced version, so nothing is marked.
 			enabled: () => this.settings.changeMarkers,
 			hostFor: (path) => sharedOf(path) ?? this,
-			// Line history reads the vault's repository (versions open in the vault's version modal).
-			hasHistory: (path) => this.isConfigured() && !sharedOf(path),
-			listCommits: async (path, limit) => this.gh.listCommits(this.settings.branch, await this.engine.remotePathOf(path), limit),
-			readVersion: (path, sha) => this.engine.readRemoteFile(path, sha),
-			openVersion: (path, commit) => void this.openVersion(path, commit),
-			canBrowse: async () => !(await this.needsUnlock()),
+			// Line history reads the repository the file syncs with: a shared folder's, else the vault's.
+			hasHistory: (path) => !!sharedOf(path) || this.isConfigured(),
+			listCommits: (path, limit) => this.fileCommits(path, limit),
+			readVersion: (path, sha) => (sharedOf(path)?.engine ?? this.engine).readRemoteFile(path, sha),
+			openVersion: (path, commit) => void this.openVersion(path, commit, { path: commit.path, engine: sharedOf(path)?.engine }),
+			canBrowse: async (path) => !!sharedOf(path) || !(await this.needsUnlock()),
 			log: (m) => this.log(m),
 		});
 	}
 
+	/**
+	 * A file's newest `limit` commits in the repository it syncs with (a shared folder's, else the
+	 * vault's), followed back through renames; each carries the file's name at that commit.
+	 */
+	async fileCommits(path: string, limit: number): Promise<PathCommit[]> {
+		const shared = this.sharedHostOf(path);
+		const h = shared ?? { gh: this.gh, settings: this.settings, engine: this.engine };
+		return followRenames(path, limit, {
+			list: async (p, n) => h.gh.listCommits(h.settings.branch, await h.engine.remotePathOf(p), Math.min(n, 100)),
+			files: async (sha) => decodeCommitFiles((await h.gh.getCommitFiles(sha)).files, (raw) => h.engine.vaultPathOf(raw)),
+		});
+	}
+
+	/** The shared folder a vault path belongs to, if any. */
+	private sharedHostOf(path: string): SharedFolderHost | null {
+		return this.sharedHostsCached().find((h) => path.startsWith(h.def.folder.replace(/\/+$/, "") + "/")) ?? null;
+	}
+
 	private async showFileHistory(file: TFile) {
-		if (await this.needsUnlock()) return;
+		// Shared folders are never encrypted: only the vault's own repository may need unlocking.
+		if (!this.sharedHostOf(file.path) && (await this.needsUnlock())) return;
 		new CommitListModal(this.app, t("m.history", { path: file.path }), async () => {
-			const commits = await this.gh.listCommits(this.settings.branch, await this.engine.remotePathOf(file.path), 50);
+			const commits = await this.fileCommits(file.path, 50);
 			return commits.map((c) => ({
 				label: c.message.split("\n")[0],
-				sub: `${new Date(c.date).toLocaleString()} · ${c.author} · ${c.sha.slice(0, 7)}`,
-				run: () => void this.openVersion(file.path, c),
+				// Versions from before a rename say which name the file had then.
+				sub: `${new Date(c.date).toLocaleString()} · ${c.author} · ${c.sha.slice(0, 7)}${c.path !== file.path ? ` · ${c.path}` : ""}`,
+				run: () => void this.openVersion(file.path, c, { path: c.path, engine: this.sharedHostOf(file.path)?.engine }),
 			}));
 		}).open();
 	}
 
-	private async openVersion(path: string, commit: { sha: string; message: string; date: string }) {
+	/**
+	 * Shows a file's version at `commit`; restoring writes it to `path`. `from` reads it elsewhere: under
+	 * the file's older name (history across a rename) and/or from a shared folder's repository.
+	 */
+	private async openVersion(path: string, commit: { sha: string; message: string; date: string }, from: { path?: string; engine?: SyncEngine } = {}) {
 		try {
-			const data = await this.engine.readRemoteFile(path, commit.sha);
+			const data = await (from.engine ?? this.engine).readRemoteFile(from.path ?? path, commit.sha);
 			if (!data) return void new Notice(t("m.notInVersion"));
 			let current: string | null | undefined;
 			if (await this.app.vault.adapter.exists(path)) current = asText(path, await this.io.read(path));

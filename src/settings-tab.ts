@@ -140,7 +140,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 	 * an open tab is left alone so nothing jumps while someone types in it.
 	 */
 	refreshIfHidden() {
-		if (!this.containerEl.isShown() && requireApiVersion("1.13.0")) this.update();
+		if (this.containerEl.isShown()) return;
+		if (requireApiVersion("1.13.0")) this.update();
 	}
 
 	private groups(): Group[] {

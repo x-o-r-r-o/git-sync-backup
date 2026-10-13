@@ -480,13 +480,19 @@ export class GitHub implements Remote {
 	}
 
 	/** File content at a commit, or null if it did not exist there. */
+	/**
+	 * A file's bytes at `ref`. The contents endpoint is only asked for the blob sha: its raw (and
+	 * base64) content is transcoded when GitHub takes binary data for UTF-16 text (seen with encrypted
+	 * files: 60 bytes came back as 90), while the blob endpoint returns the stored bytes exactly.
+	 */
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
-		const res = await this.request(
-			"GET",
-			`${this.repoPath}/contents/${encPath(path)}?ref=${encodeURIComponent(ref)}`,
-			undefined,
-			{ accept: "application/vnd.github.raw+json", okStatuses: [404] },
-		);
-		return res.status === 404 ? null : res.arrayBuffer;
+		const res = await this.request("GET", `${this.repoPath}/contents/${encPath(path)}?ref=${encodeURIComponent(ref)}`, undefined, {
+			accept: "application/vnd.github.object+json",
+			okStatuses: [404],
+		});
+		if (res.status === 404) return null;
+		const e = res.json as { type?: string; sha?: string } | null;
+		if (!e || e.type !== "file" || !e.sha) return null;
+		return this.getBlob(e.sha);
 	}
 }

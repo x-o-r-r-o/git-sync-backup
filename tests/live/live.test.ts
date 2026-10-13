@@ -300,3 +300,32 @@ test("live: end-to-end encrypted sync between two devices", { skip: !live }, asy
 	await a.sync();
 	assert.equal(a.fs.text("Private/Secret plan.md"), "launch on friday\nbring snacks\n");
 });
+
+test("live: file history follows a rename back to the old name (plain and encrypted)", { skip: !live }, async () => {
+	const { Codec } = await import("../../src/codec.ts");
+	const { createEncryption, EncryptionLayer } = await import("../../src/crypto.ts");
+	const { decodeCommitFiles, followRenames } = await import("../../src/history.ts");
+	const { master } = await createEncryption("live rename passphrase 1");
+	const layer = await EncryptionLayer.fromMaster(master);
+	for (const encrypted of [false, true]) {
+		const branch = await freshBranch(encrypted ? "rename-history-enc" : "rename-history");
+		const { a } = pair(branch);
+		if (encrypted) a.host.codec = () => new Codec([layer]);
+		a.fs.put("Notes/Old.md", "one\ntwo\n");
+		await a.sync();
+		a.fs.put("Notes/Old.md", "one\ntwo edited\n");
+		await a.sync();
+		a.fs.files.set("Notes/New.md", a.fs.files.get("Notes/Old.md")!);
+		a.fs.files.delete("Notes/Old.md");
+		assert.equal((await a.sync()).renamed.length, 1);
+		a.fs.put("Notes/New.md", "one\ntwo edited\nthree\n");
+		await a.sync();
+		const list = await followRenames("Notes/New.md", 30, {
+			list: async (p, n) => gh.listCommits(branch, await a.engine.remotePathOf(p), n),
+			files: async (sha) => decodeCommitFiles((await gh.getCommitFiles(sha)).files, (raw) => a.engine.vaultPathOf(raw)),
+		});
+		assert.deepEqual(list.map((c) => c.path), ["Notes/New.md", "Notes/New.md", "Notes/Old.md", "Notes/Old.md"], `encrypted=${encrypted}`);
+		const oldest = await a.engine.readRemoteFile(list[3].path, list[3].sha);
+		assert.equal(new TextDecoder().decode(oldest!), "one\ntwo\n");
+	}
+});

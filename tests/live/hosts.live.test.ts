@@ -323,6 +323,20 @@ test("live host: history APIs (listCommits path filter, getFileAt, getCommitFile
 	assert.ok(latest.length >= 3);
 });
 
+test("live host: getFileAt returns binary versions byte-exact (no text transcoding)", { ...T, skip: !live }, async () => {
+	// GitHub's contents endpoint returned these 60 bytes (an encrypted test note) as 90: it took them
+	// for UTF-16 text and converted them to UTF-8.
+	const p = `${dir("binary")}/blob.bin`;
+	const bytes = new Uint8Array(Buffer.from("565347318b1fc156d504e4a183f53e35a9e7d0cd7bed6ae5dfa1607caf147ae9aac8eddc28bd7a1783d76422a0ce64fa4dfc19db6492f7d73fd3efee", "hex"));
+	const { a } = pair();
+	a.fs.files.set(p, { data: bytes, mtime: 1 });
+	const r = await a.sync();
+	assert.ok(r.commit);
+	const got = await retry(() => R().getFileAt(p, r.commit!));
+	assert.ok(got, "found");
+	assert.deepEqual(new Uint8Array(got!), bytes);
+});
+
 test("live host: listBranches and webUrl return sane values", { ...T, skip: !live }, async () => {
 	const head = (await retry(() => R().getRef(branch)))!;
 	if (R().listBranches) {
