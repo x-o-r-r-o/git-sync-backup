@@ -6,7 +6,7 @@ import { HEALTH_VIEW, HealthView } from "./health.ts";
 import { HISTORY_VIEW, HistoryView } from "./history-view.ts";
 import type { HistoryHost } from "./history-view.ts";
 import { decodeCommitFiles, HISTORY_PAGE, parentPathOf, replaceWithRepositoryVersion } from "./history.ts";
-import { nestedHiddenIndex, VaultIO } from "./io.ts";
+import { nestedHiddenIndex, VaultIO, keepSelfEnabled } from "./io.ts";
 import type { Decision, SyncMode } from "./plan.ts";
 import { VaultSyncSettingTab } from "./settings-tab.ts";
 import { SyncCancelled, SyncEngine } from "./sync.ts";
@@ -275,6 +275,26 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.badges = null;
 		this.changeMarkers?.destroy();
 		this.onChangeDebounced?.cancel();
+	}
+	/**
+	 * Obsidian may not have rewritten community-plugins.json yet when this plugin starts (for example
+	 * right after it was turned back on), so the file can say it is off while it runs. Fix the file
+	 * before syncing, so that stale list is never uploaded and never turns sync off on other devices.
+	 */
+	private async repairSelfEnabled() {
+		if (!this.settings.syncConfigDir) return;
+		const path = `${this.app.vault.configDir}/community-plugins.json`;
+		try {
+			const a = this.app.vault.adapter;
+			if (!(await a.exists(path))) return;
+			const fixed = keepSelfEnabled(path, this.app.vault.configDir, new TextEncoder().encode(await a.read(path)).buffer);
+			if (fixed) {
+				await a.writeBinary(path, fixed);
+				this.log("community-plugins.json didn't list this plugin while it runs; added it back before syncing.");
+			}
+		} catch (e) {
+			this.log(`Couldn't check community-plugins.json: ${errMsg(e)}`);
+		}
 	}
 	isUnloaded(): boolean {
 		return this.unloaded;
@@ -1539,6 +1559,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		// Battery saver keeps only startup, returning to Obsidian and manual syncs.
 		if (this.batterySaver() && (trigger === "change" || trigger === "interval" || trigger === "open" || trigger === "background")) return;
 		if (this.usingSignIn() && navigator.onLine) await this.ensureFreshToken();
+		await this.repairSelfEnabled();
 		const problem = this.configProblem();
 		if (problem) {
 			if (trigger === "manual" || trigger === "close") new Notice(problem);

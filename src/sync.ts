@@ -784,7 +784,16 @@ export class SyncEngine {
 		const full = covered.full || !state.lastFullScan || now - state.lastFullScan > this.s.fullScanMinutes * 60_000;
 		// Files Obsidian doesn't index (settings folder, hidden files) are found by walking the disk.
 		const walksDisk = this.s.syncConfigDir || this.s.syncHidden || this.s.useGitignore;
-		const configDue = walksDisk && (full || now - state.lastConfigScan > CONFIG_SCAN_MS);
+		// A download of community-plugins.json was adjusted to keep this plugin on: re-read it now, so the
+		// repaired list is uploaded instead of waiting for the next settings-folder scan.
+		const selfRepaired = this.io.selfRepaired;
+		this.io.selfRepaired = false;
+		if (selfRepaired) {
+			// The cache describes the downloaded bytes, not the repaired file: forget it so it is re-hashed.
+			delete state.cache[`${this.host.app.vault.configDir}/community-plugins.json`];
+			state.dirty = true;
+		}
+		const configDue = walksDisk && (full || selfRepaired || now - state.lastConfigScan > CONFIG_SCAN_MS);
 		const cfgPrefix = this.host.app.vault.configDir + "/";
 		const onDisk = (p: string) => p.startsWith(cfgPrefix) || isHiddenPath(p);
 

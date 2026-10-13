@@ -6,6 +6,28 @@ import { TFile, TFolder } from "obsidian";
 import type { App, TAbstractFile } from "obsidian";
 import { isHiddenPath, parentDir, pool } from "./util.ts";
 
+/** This plugin's id: a sync must never turn it off on this device (see keepSelfEnabled). */
+export const SELF_PLUGIN_ID = "vault-sync-git";
+
+/**
+ * The list of enabled community plugins with this plugin kept in it. A download of
+ * community-plugins.json written while this plugin runs must never switch it off here: one device
+ * turning it off (or a stale list) would otherwise spread and stop sync on every device.
+ * Returns null when nothing needs to change (not that file, not a JSON list, or already listed).
+ */
+export function keepSelfEnabled(path: string, configDir: string, data: ArrayBuffer): ArrayBuffer | null {
+	if (path !== `${configDir}/community-plugins.json`) return null;
+	let list: unknown;
+	try {
+		list = JSON.parse(new TextDecoder().decode(data));
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(list) || list.includes(SELF_PLUGIN_ID)) return null;
+	const u = new TextEncoder().encode(JSON.stringify([...(list as unknown[]), SELF_PLUGIN_ID], null, 2));
+	return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength);
+}
+
 export interface LocalFileInfo {
 	path: string;
 	mtime: number;
@@ -203,7 +225,15 @@ export class VaultIO {
 		}
 	}
 
+	/** Set when a write kept this plugin enabled: the file then differs from the download and must be re-read. */
+	selfRepaired = false;
+
 	async write(path: string, data: ArrayBuffer): Promise<void> {
+		const kept = keepSelfEnabled(path, this.app.vault.configDir, data);
+		if (kept) {
+			data = kept;
+			this.selfRepaired = true;
+		}
 		await this.ensureDir(parentDir(path));
 		const f = this.tfile(path);
 		if (f) {
