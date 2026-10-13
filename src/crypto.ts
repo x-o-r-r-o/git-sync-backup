@@ -62,6 +62,16 @@ export interface EncryptionMeta {
 	check: string;
 }
 
+/**
+ * True when this device's key belongs to the repository: same salt and check as the repository's
+ * marker, or no marker yet (this device publishes it on its next sync). False without a key.
+ */
+export function keyMatches(local: EncryptionMeta | null, remote: EncryptionMeta | null): boolean {
+	if (!local) return false;
+	if (!remote) return true;
+	return local.salt === remote.salt && local.check === remote.check;
+}
+
 export function b64(bytes: Uint8Array): string {
 	let s = "";
 	for (const b of bytes) s += String.fromCharCode(b);

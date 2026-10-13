@@ -240,7 +240,7 @@ Counts are numbers of files in the main repository's sync; `error` is set when t
 | Back up only (upload changes) | Upload without changing local files (a file the repository also changed keeps its repository version as a conflict copy next to it) |
 | Open sync status panel | State, pending changes, conflicts and devices |
 | Run setup wizard | Connect a host and repository |
-| End-to-end encryption: turn on or unlock | Set or enter the passphrase |
+| End-to-end encryption: turn on or unlock | Set or enter the passphrase; on a device that already has the key, shows that encryption is on, with *Lock this device* |
 | Download files that aren't on this device | Attachments on demand |
 | Free up space on this device | Remove local copies this device doesn't need |
 | Timeline: restore vault or folder to an earlier point | Point-in-time restore |
@@ -326,7 +326,7 @@ This section covers the disclosures Obsidian's developer policies require.
 - A case-only rename (for example `Note.md` → `note.md`) takes two syncs to settle on case-insensitive devices; the file sits in the trash in between.
 - Sign in works on github.com and gitlab.com, and on GitHub Enterprise or self-managed GitLab with your own app. The other hosts use access tokens.
 - GitHub-friendly Markdown doesn't rewrite links relative to the note's folder, and doesn't convert callouts nested inside other quotes.
-- GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0, but stay marked beta until they have more real-world use. Phones haven't been tested on real devices yet. Reports from real servers and phones are welcome.
+- GitHub is tested against the real API on every release. GitLab (gitlab.com), Gitea / Forgejo (Codeberg) and Bitbucket Cloud passed the same live suite against the real servers for 1.4.0, but stay marked beta until they have more real-world use. Android has been tested on a real phone (Obsidian 1.14.4, Android 13): setup and sign-in, two-way sync, conflicts by touch, change markers, history, battery saver, end-to-end encryption and attachments on demand. iPhone and iPad haven't been tested on a real device yet. Reports from real servers and phones are welcome.
 - Conflicts as pull requests are available for shared folders. Empty folders aren't kept while end-to-end encryption is on.
 - Closing a desktop window starts a last upload of pending edits, but a closing window can't wait for network requests, so a large or slow upload may not finish; the edits then simply sync next time. Use **Sync and close Obsidian** to be sure.
 - With the vault in a folder of the repository, empty folders aren't kept, and the vault's end-to-end encryption marker lives in its folder (`<folder>/.vault-sync/encryption.json`). The setup wizard's file count covers the whole repository.

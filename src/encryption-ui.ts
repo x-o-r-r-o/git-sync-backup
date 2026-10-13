@@ -1,12 +1,13 @@
 // Turn on / unlock end-to-end encryption.
 
 import { App, Modal, Notice, Setting } from "obsidian";
-import { createEncryption, MARKER_PATH, passphraseStrength, pickMarker, unlockEncryption } from "./crypto.ts";
+import { createEncryption, keyMatches, MARKER_PATH, passphraseStrength, pickMarker, unlockEncryption } from "./crypto.ts";
 import { normalizeSubdir } from "./codec.ts";
 import type { EncryptionMeta } from "./crypto.ts";
 import type VaultSyncPlugin from "./main.ts";
 import { localizeError } from "./errors.ts";
 import { t as tr } from "./i18n.ts";
+import { destructive } from "./ui.ts";
 
 /** This vault's encryption marker in the repository (inside its repository folder when it has one). */
 export async function readRemoteMarker(plugin: VaultSyncPlugin): Promise<EncryptionMeta | null> {
@@ -40,8 +41,33 @@ export class EncryptionModal extends Modal {
 			return;
 		}
 		status.remove();
-		if (meta) this.renderUnlock(meta);
+		if (keyMatches(this.plugin.encryptionRecord()?.meta ?? null, meta)) this.renderOn();
+		else if (meta) this.renderUnlock(meta);
 		else this.renderEnable();
+	}
+
+	/** This device already holds the repository's key (or will publish its marker on the next sync). */
+	private renderOn() {
+		const { contentEl } = this;
+		this.titleEl.setText(tr("s.hEncryption"));
+		contentEl.createEl("p", { text: tr("s.encOn") });
+		contentEl.createEl("p", { text: tr("s.encOnDesc"), cls: "vsg-muted" });
+		new Setting(contentEl)
+			.setClass("vsg-wrap-controls")
+			.addButton((b) =>
+				b.setButtonText(tr("s.encRemovePlain")).onClick(() => {
+					this.close();
+					void this.plugin.removeUnencryptedFiles();
+				}),
+			)
+			.addButton((b) =>
+				destructive(b.setButtonText(tr("s.encLock"))).onClick(async () => {
+						await this.plugin.lockEncryption();
+						this.close();
+						this.done?.();
+					}),
+			)
+			.addButton((b) => b.setButtonText(tr("u.close")).setCta().onClick(() => this.close()));
 	}
 
 	private renderUnlock(meta: EncryptionMeta) {

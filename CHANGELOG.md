@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Fixed (found testing on an Android phone)**
+- *End-to-end encryption: turn on or unlock* no longer asks for the passphrase on a device that already has the key. It shows that encryption is on, with *Remove unencrypted copies…*, *Lock this device* and *Close*.
+- The *Download* box under an embed of a file that isn't on the device now goes away once the file is downloaded (it stayed until the note was reopened), and its button can't be pressed twice.
+- Settings rows with several buttons wrap on phones instead of running off the screen (encryption, files on demand, pause, sign-in).
+- Counts in settings (such as files available on demand) no longer go stale on Obsidian 1.13+ when a page is opened from settings search after a sync.
+
 ## 1.6.2 (2026-10-13)
 
 **Fixed**

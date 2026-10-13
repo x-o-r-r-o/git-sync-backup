@@ -164,7 +164,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				if (!f || embed.nextElementSibling?.hasClass("vsg-ondemand")) return;
 				const box = createDiv({ cls: "vsg-ondemand" });
 				box.createSpan({ text: t("m.embedMissing", { path: f.path, mb: (f.size / 1048576).toFixed(1) }) + " " });
-				box.createEl("button", { text: t("m.download") }).onClickEvent(() => void this.downloadOnDemand([f.path]));
+				const btn = box.createEl("button", { text: t("m.download") });
+				btn.onClickEvent(async () => {
+					btn.disabled = true;
+					await this.downloadOnDemand([f.path]);
+					// Obsidian shows the embed itself once the file exists; the offer goes away.
+					if (this.app.vault.getAbstractFileByPath(f.path)) box.remove();
+					else btn.disabled = false;
+				});
 				embed.after(box);
 			});
 		});
@@ -850,6 +857,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	private setPinned(paths: string[]) {
 		this.localSet("pinned", JSON.stringify([...new Set(paths)]));
+		this.settingTab?.refreshIfHidden();
 	}
 	/** Remote files not downloaded to this device, largest first. */
 	remoteOnlyFiles(): { path: string; size: number }[] {
@@ -1499,6 +1507,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 
 	private refreshHealth(withRemote = false) {
+		this.settingTab?.refreshIfHidden();
 		for (const leaf of this.app.workspace.getLeavesOfType(HEALTH_VIEW)) {
 			const v = leaf.view;
 			if (v instanceof HealthView) v.refresh(withRemote);
@@ -1648,6 +1657,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			emitSyncEvent(this.app, SYNC_DONE_EVENT, event);
 			this.updateStatusExtras();
 			this.changeMarkers?.refresh();
+			this.settingTab?.refreshIfHidden();
 			// Real edits made during the sync stay pending; the sync's own writes do not.
 			for (const p of this.touchedDuringSync) if (!written.has(p)) this.dirty.set(p, ++this.dirtySeq);
 			this.touchedDuringSync.clear();

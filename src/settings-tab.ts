@@ -134,6 +134,15 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		if (this.containerEl.isShown()) this.refresh();
 	}
 
+	/**
+	 * Obsidian 1.13+ keeps the definitions from the last update() and reuses them (e.g. when a search
+	 * result opens a page), so counts in descriptions go stale. Rebuild them while the tab is closed;
+	 * an open tab is left alone so nothing jumps while someone types in it.
+	 */
+	refreshIfHidden() {
+		if (!this.containerEl.isShown() && requireApiVersion("1.13.0")) this.update();
+	}
+
 	private groups(): Group[] {
 		const p = this.plugin;
 		const s = p.settings;
@@ -956,6 +965,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				if (desc) st.setDesc(desc);
 				if (item.cls) st.setClass(item.cls);
 				item.render(st);
+				wrapButtons(st);
 			}
 		}
 	}
@@ -976,6 +986,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					// Obsidian has already applied name and description.
 					if (item.cls) st.setClass(item.cls);
 					item.render(st);
+					wrapButtons(st);
 				},
 			})),
 		});
@@ -1102,4 +1113,9 @@ class BranchModal extends Modal {
 	onClose() {
 		this.contentEl.empty();
 	}
+}
+
+/** Rows with several buttons wrap on narrow screens (phones) instead of running off the edge. */
+function wrapButtons(st: Setting) {
+	if (st.controlEl.querySelectorAll("button").length > 1) st.setClass("vsg-wrap-controls");
 }

@@ -117,3 +117,32 @@ Shipped in 1.6 from the Obsidian Git comparison: change markers in the editor (4
 
 Next after 1.6: the three items above (real phones, dropping "beta", native-speaker review), plus host-side line authoring for shared folders and following renames back through history.
 
+### Android test results (2026-10-13)
+
+Tested on a real phone: OPPO A54, Android 13, Obsidian 1.14.4, plugin 1.6.1 to 1.6.2, vault in app storage, GitHub (`x-o-r-r-o/vault-sync-live-test`).
+
+| Area | Result |
+|---|---|
+| Install, setup wizard, Sign in with GitHub | ✅ |
+| Two-way sync (phone edits reach the Mac and back) | ✅ |
+| Change markers in the editor, touch popover with *Revert* | ✅ |
+| Conflict blocks: *Keep both* by touch | ✅ |
+| Sync history sidebar on a phone screen | ✅ |
+| Battery saver: no sync on edit or in the background, sync on resume | ✅ |
+| End-to-end encryption: contents and names encrypted (`e/…` paths, `VSG1` blobs), edits upload only encrypted files | ✅ |
+| Commit messages of encrypted vaults name no files | ✅ fixed in 1.6.2 |
+| Attachments on demand: download limit, *Free up space*, *Download* under an embed, byte-identical download, no deletion from the repository, limit raised again downloads the file | ✅ |
+| Settings-folder sync never turns the plugin off on other devices | ✅ fixed in 1.6.1 |
+
+Found and fixed while testing: the plugin turning itself off through settings-folder sync (1.6.1), file names in encrypted commit messages (1.6.2), the Unlock dialog on an unlocked device, the *Download* box staying after a download, settings buttons running off a phone screen, and stale counts in settings (unreleased).
+
+Still to test: iPhone and iPad.
+
+## Next (after the Android tests)
+
+1. **iPhone / iPad** on a real device.
+2. **Follow renames back through history**: a file's history and *who last changed this line* continue past a rename.
+3. **Host-side line authoring** for shared folders (no encryption there): ask the host for the file's history instead of walking 30 versions.
+4. **Drop "beta"** for GitLab, Gitea / Forgejo and Bitbucket once real-world reports confirm the live-suite results.
+5. **Native-speaker review** of the seven translations.
+
