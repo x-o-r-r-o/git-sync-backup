@@ -2273,7 +2273,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		const s = this.settings;
 		const api = this.getApiBase();
 		const lines = [
-			`Vault Sync for Git ${this.manifest.version} · Obsidian ${apiVersion} · ${Platform.isMobile ? "mobile" : "desktop"}${Platform.isIosApp ? " iOS" : Platform.isAndroidApp ? " Android" : Platform.isMacOS ? " macOS" : Platform.isWin ? " Windows" : Platform.isLinux ? " Linux" : ""}`,
+			`Git Sync & Backup ${this.manifest.version} · Obsidian ${apiVersion} · ${Platform.isMobile ? "mobile" : "desktop"}${Platform.isIosApp ? " iOS" : Platform.isAndroidApp ? " Android" : Platform.isMacOS ? " macOS" : Platform.isWin ? " Windows" : Platform.isLinux ? " Linux" : ""}`,
 			`Host: ${s.provider} (${/^https?:\/\/([^/]+)/.exec(api)?.[1] ?? "?"}) · sign-in: ${this.usingGitHubApp() ? "GitHub App" : this.usingGitLabApp() ? "GitLab app" : this.getToken() ? "token" : "none"}`,
 			`Mode: ${s.mode} · conflicts: ${s.conflictStrategy} · settings folder: ${s.syncConfigDir} · hidden: ${s.syncHidden}${s.syncHiddenNested ? " (nested)" : ""} · .gitignore: ${s.useGitignore} · LFS: ${s.lfsThresholdMB} MB · encrypted: ${this.isEncrypted()}`,
 			`Triggers: startup ${s.syncOnStartup}, edits ${s.syncOnChange} (${s.changeDebounceSec}s), every ${s.intervalMin} min, resume ${s.syncOnResume}, background ${s.syncOnBackground}, open ${s.syncOnOpen} · paused: ${this.isPaused()} · battery saver: ${this.batterySaver()}`,

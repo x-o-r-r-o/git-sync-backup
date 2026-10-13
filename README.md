@@ -1,6 +1,6 @@
-# Vault Sync for Git
+# Git Sync & Backup
 
-**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Gitea or Bitbucket.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
+**Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Codeberg, Gitea, Forgejo or Bitbucket.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
 
 Your vault lives in a repository you own, on the host you choose. Every device syncs through that repository, which also keeps a full history of every change. You can switch hosts at any time in the setup wizard or settings.
 
@@ -28,9 +28,17 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for how this compares with other sync plugins.
 
+## Screenshots
+
+On a phone (Android, end-to-end encrypted vault):
+
+| Changes since the last sync | Sync history | History across renames | Encryption | Sync status |
+|---|---|---|---|---|
+| <img src="docs/screenshots/mobile-1-change-markers.png" width="160" alt="Lines changed since the last sync marked in the editor, with the old text, Revert and Who changed this?"> | <img src="docs/screenshots/mobile-2-sync-history.png" width="160" alt="Sync history sidebar with a sync expanded to its changed files and restore buttons"> | <img src="docs/screenshots/mobile-3-history-across-renames.png" width="160" alt="Version history of a renamed note, including the version under its old name"> | <img src="docs/screenshots/mobile-4-end-to-end-encryption.png" width="160" alt="End-to-end encryption is on and unlocked on this device"> | <img src="docs/screenshots/mobile-5-sync-status.png" width="160" alt="Status panel: up to date, encrypted, pending changes, devices and tools"> |
+
 ## Install
 
-- **Community plugins:** in Obsidian, open Settings → Community plugins → Browse, search for **Vault Sync for Git**, then install and enable it.
+- **Community plugins:** in Obsidian, open Settings → Community plugins → Browse, search for **Git Sync & Backup**, then install and enable it.
 - **Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<vault>/.obsidian/plugins/vault-sync-git/`, then enable the plugin under Community plugins.
 - **BRAT:** add this repository in the BRAT plugin to get new releases on each device.
 
@@ -42,7 +50,7 @@ The quickest way is the **setup wizard**. It opens on first launch, or run **Run
 
 On github.com you don't need a token:
 
-1. In the wizard (or Settings → Vault Sync for Git), select **Sign in**.
+1. In the wizard (or Settings → Git Sync & Backup), select **Sign in**.
 2. Select **Copy and open GitHub**, paste the code on the page that opens, and approve.
 3. Pick your vault repository from **Repositories the app can use**. If it isn't listed yet, select **Add repositories on GitHub**, choose it there and come back: the list updates by itself, and newly added repositories are marked **New**. The app can only see the repositories you pick, and only their contents.
 
@@ -66,7 +74,7 @@ For Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on GitHub or
    | Gitea / Forgejo / Codeberg | Settings → Applications: a token with **repository: Read and Write** and **user: Read** (**user: Read and Write** if you want the plugin to create the repository). |
    | Bitbucket | Repository access token with **Repositories: Read and Write**. To pick or create repositories in the wizard, use an Atlassian API token with Bitbucket scopes, entered as `email:token`. |
 
-3. In Obsidian, open Settings → Vault Sync for Git, choose the host, paste the token, set owner and repository (or select **Choose** next to *Repository* to pick from your repositories), then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
+3. In Obsidian, open Settings → Git Sync & Backup, choose the host, paste the token, set owner and repository (or select **Choose** next to *Repository* to pick from your repositories), then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
 4. Run **Sync now** (ribbon icon, status bar or command palette).
 
 Repeat on each device with the same repository. An existing vault on a second device is safe: the first sync never deletes anything, and any file that differs is kept in both versions.

@@ -25,7 +25,7 @@ export function emitSyncEvent(app: App, name: string, data: unknown): void {
 	try {
 		app.workspace.trigger(name, data);
 	} catch (e) {
-		console.error(`Vault Sync for Git: a ${name} listener failed`, e);
+		console.error(`Git Sync & Backup: a ${name} listener failed`, e);
 	}
 }
 

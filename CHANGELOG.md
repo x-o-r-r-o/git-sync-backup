@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1 (2026-10-14)
+
+**Changed**
+- **New name: Git Sync & Backup** (was *Vault Sync for Git*). Only the name changed: the plugin id (`vault-sync-git`), settings, sign-ins and synced data stay as they are. The repository moved to [x-o-r-r-o/git-sync-backup](https://github.com/x-o-r-r-o/git-sync-backup); the old address redirects. The GitHub App and GitLab application keep their registered name, *Vault Sync for Git*.
+- The description now lists every supported host: GitHub, GitLab, Codeberg, Gitea, Forgejo and Bitbucket.
+- README: screenshots from an Android phone.
+
 ## 1.7.0 (2026-10-13)
 
 **New**

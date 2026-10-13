@@ -311,7 +311,7 @@ export class GitHub implements Remote {
 			name,
 			private: true,
 			auto_init: false,
-			description: "Obsidian vault (synced by Vault Sync for Git)",
+			description: "Obsidian vault (synced by Git Sync & Backup)",
 		});
 	}
 

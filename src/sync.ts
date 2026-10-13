@@ -1050,7 +1050,7 @@ export class SyncEngine {
 			await this.gh.createRef(`refs/heads/${this.s.branch}`, otherHead);
 			this.host.log(`Created branch ${this.s.branch} from ${repo.default_branch}.`);
 		} else {
-			const content = "# Managed by Vault Sync for Git. Keeps git clients from rewriting line endings.\n* -text\n";
+			const content = "# Managed by Git Sync & Backup. Keeps git clients from rewriting line endings.\n* -text\n";
 			await this.gh.putFile(".gitattributes", "Initialise vault repository", arrayBufferToBase64(encodeText(content)), this.s.branch);
 			this.host.log("Initialised empty repository.");
 		}

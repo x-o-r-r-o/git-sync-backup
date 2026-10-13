@@ -24,14 +24,14 @@ export const GITLAB_APP: GitLabAppConfig = { clientId: "4d7a0de58328956caa65bb4d
 export const GITLAB_SCOPE = "api";
 
 /** How to register the application (shown to the user, e.g. for self-managed GitLab). */
-export const GITLAB_APP_REGISTRATION = `Register a GitLab OAuth application for Vault Sync for Git:
+export const GITLAB_APP_REGISTRATION = `Register a GitLab OAuth application for Git Sync & Backup:
 1. On your GitLab (gitlab.com or self-managed 17.9+), open your avatar > Edit profile > Access > Applications
    (or /-/user_settings/applications). For a group- or instance-owned app use Group settings > Applications
    or Admin area > Applications instead.
 2. Select "Add new application".
-3. Name: Vault Sync for Git
+3. Name: Git Sync & Backup
 4. Redirect URI: the form requires one, but the device flow never uses it. Enter the plugin homepage,
-   e.g. https://github.com/x-o-r-r-o/vault-sync-github (any valid https URL works).
+   e.g. https://github.com/x-o-r-r-o/git-sync-backup (any valid https URL works).
 5. Confidential: UNCHECK it. The plugin runs on your devices and cannot keep a secret; it signs in with the
    Application ID only.
 6. Tick "Device authorization grant" (without it GitLab answers access_denied).
