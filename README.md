@@ -18,13 +18,13 @@ Your vault lives in a repository you own, on the host you choose. Every device s
 - **No Git install.** No `git` binary, no `.git` folder, no native code. The plugin talks to your host's API through Obsidian's own network layer, so it behaves the same on every device.
 - **Real merging.** Two devices editing different parts of a note are merged line by line. Canvases and frontmatter merge by structure, so tags added on two devices are combined. When the same lines change, both versions are kept, or you pick change by change.
 - **Safe by default.** Edits always win over deletions, deleted files go to the trash, a delete guard stops accidental mass deletions, and a file you are editing during a sync is never overwritten.
-- **Backups built in.** Every sync is one commit. Restore a single file, a folder or the whole vault to any earlier point, recover deleted files and take snapshot tags.
+- **Backups built in.** Every sync is one commit. Restore a single file, a folder or the whole vault to any earlier point, recover deleted files and take snapshot tags. A **sync history** sidebar shows every sync with its files and diffs.
 - **Private by design.** Optional end-to-end encryption means the host only ever stores unreadable data, including file names. Sign in with GitHub or GitLab instead of pasting a token, and credentials stay in Obsidian's secure storage.
-- **See before you sync.** Visual diffs, a review step with checkboxes, and a status panel that shows what's pending and how to fix problems.
+- **See before you sync.** Visual diffs, a review step with checkboxes, and a status panel that shows what's pending and how to fix problems. In the editor, lines changed since the last sync are marked in the margin, with one-click revert and *who last changed this line*.
 - **Fits every device.** Each device can sync only the folders it needs, and big attachments can stay in the repository and be downloaded on demand. Choose which parts of the settings folder sync, down to single plugins. Renames travel as renames, even when the file was also edited.
 - **A new device in seconds.** Scan a QR code or open a setup link from a device that already syncs. The plugin warns when another sync tool (Obsidian Sync, iCloud, Obsidian Git, …) is active on the same vault.
 - **Grows with you.** Share a folder with a team through its own repository (conflicts can become pull requests), keep big media in Git LFS, mirror everything to a second repository as a backup, and use the interface in English, Simplified Chinese, German, Spanish, French, Japanese, Korean or Portuguese.
-- **You stay in control.** Pause syncing, save battery on phones, pick the branch, open any note on the host, and make the repository match this device in one forward commit when you need to.
+- **You stay in control.** Pause syncing, save battery on phones, pick the branch, open any note on the host, and make the repository match this device in one forward commit when you need to. Keep notes with `sync: false` on one device, grey out what isn't synced, keep the vault in a folder of a bigger repository, and sync and close in one step.
 
 See [docs/RESEARCH.md](docs/RESEARCH.md) for how this compares with other sync plugins.
 
@@ -142,9 +142,9 @@ When a file changed on both sides, choose what happens: **merge automatically** 
   - conflict copies, with **Resolve** (pick change by change, then the copy goes to the trash), Compare, Open and Delete copy buttons
   - files skipped in the last sync and why, and files kept in the repository only
   - when each device last synced, the API budget (GitHub) and the next scheduled sync
-- **File explorer:** a dot on files edited since the last sync, and a warning on conflict copies (can be turned off).
+- **File explorer:** a dot on files edited since the last sync, a warning on conflict copies, and files that aren't synced shown greyed out with *Not synced* (can be turned off). The file menu adds *Git: Exclude this file from sync* and *Git: Include in sync*.
 - **Notifications:** by default a short notice when a sync changed files on phones (which have no status bar), and only errors on desktop. Errors are shown in your language with a hint for the likely cause (sign-in expired, repository not found, rate limit, server or network trouble).
-- **Sync log**, status bar (desktop) and a spinning ribbon icon while syncing.
+- **Sync log**, status bar (desktop; optionally with the time until the next sync and the branch name) and a spinning ribbon icon while syncing.
 
 ### End-to-end encryption
 
@@ -212,7 +212,7 @@ With settings-folder sync on, *Install plugin code from official releases* keeps
 - **Plugin versions**: commits record the plugin version, and the status panel warns when devices run different versions.
 - **Copy diagnostics** for a bug report, with tokens hidden.
 - **Commit messages:** a template with `{{device}}`, `{{summary}}`, `{{count}}`, `{{files}}` (the changed paths, the first 10 then "and N more"), `{{trigger}}` (`manual`, `startup`, `change`, `interval`, `resume`, `background`, `open` or `close`), `{{date}}` (ISO time) and `{{date:YYYY-MM-DD HH:mm}}` (any moment.js format), with a live preview in settings. An optional second template is used for automatic syncs. **Sync with a custom message…** asks for the message of one sync.
-- **Sync and close Obsidian** (desktop command): syncs, then closes Obsidian only if that sync succeeded. When a desktop window is closed without it, the plugin starts a last upload of pending edits, but the window can't wait for it to finish (see *Limits*).
+- **Sync and close Obsidian** (desktop command): syncs, then closes Obsidian only if every part of the sync succeeded (main repository, shared folders and mirror; otherwise it lists what failed). When a desktop window is closed without it, the plugin starts a last upload of pending edits, but the window can't wait for it to finish (see *Limits*).
 - **Status bar extras** (desktop, optional): time until the next scheduled sync ("in 4 min") and the branch name, refreshed every 30 seconds.
 - Commit author name and email, custom API URL for GitHub Enterprise and self-hosted servers, and device names (shown in commits and on conflict copies).
 
