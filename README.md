@@ -30,6 +30,13 @@ See [docs/RESEARCH.md](docs/RESEARCH.md) for how this compares with other sync p
 
 ## Screenshots
 
+On a desktop:
+
+| | |
+|---|---|
+| <img src="docs/screenshots/desktop-1-change-markers-and-history.png" width="420" alt="Lines changed since the last sync marked in the editor, next to the sync history sidebar"> | <img src="docs/screenshots/desktop-2-review-before-sync.png" width="420" alt="Review changes before a sync, with checkboxes and a Diff button"> |
+| <img src="docs/screenshots/desktop-3-visual-diff.png" width="420" alt="Side-by-side diff between GitHub and this device"> | <img src="docs/screenshots/desktop-5-setup-wizard.png" width="420" alt="Setup wizard: choose the host, name the device and sign in"> |
+
 On a phone (Android, end-to-end encrypted vault):
 
 | Changes since the last sync | Sync history | History across renames | Encryption | Sync status |
