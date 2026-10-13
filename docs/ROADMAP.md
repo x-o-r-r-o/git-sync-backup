@@ -1,4 +1,4 @@
-# Roadmap: making Git Sync & Backup the best git-based sync plugin
+# Roadmap: making Vault Sync for Git the best git-based sync plugin
 
 Based on competitor research (2026-10-12): the community plugin list and download stats, plus the most-upvoted GitHub issues of Obsidian Git (3.28M downloads), Remotely Save (2.30M), Self-hosted LiveSync (1.00M), Fit (65k), GitHub Sync (53k), GitHub Gitless Sync (20k), Git Sync (12k), Git Vault Sync (4.8k) and Version History Diff (54k).
 

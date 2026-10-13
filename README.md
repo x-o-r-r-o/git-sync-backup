@@ -1,4 +1,4 @@
-# Git Sync & Backup
+# Vault Sync for Git
 
 **Sync and back up your Obsidian vault with a Git repository on GitHub, GitLab, Codeberg, Gitea, Forgejo or Bitbucket.** It works the same on desktop and mobile (Windows, macOS, Linux, iOS, Android), and you don't need to install Git.
 
@@ -41,7 +41,7 @@ On a phone (Android, end-to-end encrypted vault):
 
 ## Install
 
-- **Community plugins:** in Obsidian, open Settings → Community plugins → Browse, search for **Git Sync & Backup**, then install and enable it.
+- **Community plugins:** in Obsidian, open Settings → Community plugins → Browse, search for **Vault Sync for Git**, then install and enable it.
 - **Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<vault>/.obsidian/plugins/vault-sync-git/`, then enable the plugin under Community plugins.
 - **BRAT:** add this repository in the BRAT plugin to get new releases on each device.
 

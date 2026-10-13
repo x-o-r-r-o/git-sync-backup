@@ -1,7 +1,7 @@
 {
   "id": "vault-sync-git",
-  "name": "Git Sync & Backup",
-  "version": "1.7.2",
+  "name": "Vault Sync for Git",
+  "version": "1.7.3",
   "minAppVersion": "1.11.4",
   "description": "Sync and back up your vault with GitHub, GitLab, Codeberg, Gitea, Forgejo or Bitbucket on desktop and mobile. No Git install needed. Smart merging, version history and optional end-to-end encryption.",
   "author": "Fadi",

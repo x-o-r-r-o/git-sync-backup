@@ -17,7 +17,7 @@ export function webBase(apiBase: string): string {
 export function fineGrainedTokenUrl(apiBase: string, vaultName: string): string {
 	const q = new URLSearchParams({
 		name: `Obsidian Vault Sync (${vaultName})`.slice(0, 40),
-		description: "Used by the Git Sync & Backup Obsidian plugin to sync this vault. Contents read & write on the vault repository only.",
+		description: "Used by the Vault Sync for Git Obsidian plugin to sync this vault. Contents read & write on the vault repository only.",
 		expires_in: "366",
 		contents: "write",
 	});

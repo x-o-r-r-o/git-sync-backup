@@ -8,7 +8,7 @@ The quickest way is the **setup wizard**. It opens on first launch, or run **Run
 
 On github.com you don't need a token:
 
-1. In the wizard (or Settings → Git Sync & Backup), select **Sign in**.
+1. In the wizard (or Settings → Vault Sync for Git), select **Sign in**.
 2. Select **Copy and open GitHub**, paste the code on the page that opens, and approve.
 3. Pick your vault repository from **Repositories the app can use**. If it isn't listed yet, select **Add repositories on GitHub**, choose it there and come back: the list updates by itself, and newly added repositories are marked **New**. The app can only see the repositories you pick, and only their contents.
 
@@ -32,7 +32,7 @@ For Gitea / Forgejo / Codeberg, Bitbucket, or if you prefer a token on GitHub or
    | Gitea / Forgejo / Codeberg | Settings → Applications: a token with **repository: Read and Write** and **user: Read** (**user: Read and Write** if you want the plugin to create the repository). |
    | Bitbucket | Repository access token with **Repositories: Read and Write**. To pick or create repositories in the wizard, use an Atlassian API token with Bitbucket scopes, entered as `email:token`. |
 
-3. In Obsidian, open Settings → Git Sync & Backup, choose the host, paste the token, set owner and repository (or select **Choose** next to *Repository* to pick from your repositories), then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
+3. In Obsidian, open Settings → Vault Sync for Git, choose the host, paste the token, set owner and repository (or select **Choose** next to *Repository* to pick from your repositories), then select **Test connection**. For self-hosted servers and GitHub Enterprise, also set the API URL.
 4. Run **Sync now** (ribbon icon, status bar or command palette).
 
 Repeat on each device with the same repository. An existing vault on a second device is safe: the first sync never deletes anything, and any file that differs is kept in both versions.

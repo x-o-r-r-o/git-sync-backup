@@ -1,4 +1,4 @@
-# Contributing to Git Sync & Backup
+# Contributing to Vault Sync for Git
 
 Thanks for helping. Bug reports, translations and pull requests are all welcome.
 

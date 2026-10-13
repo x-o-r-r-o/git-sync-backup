@@ -174,7 +174,7 @@ export function releaseUrl(repo: string, version: string, file: string): string 
  * Throws (writing nothing) if anything fails validation.
  */
 export async function installPlugin(need: PluginNeed, deps: InstallDeps, configDir: string): Promise<void> {
-	if (need.id === SELF_ID) throw new Error("Refusing to install Git Sync & Backup over itself");
+	if (need.id === SELF_ID) throw new Error("Refusing to install Vault Sync for Git over itself");
 	if (!isValidId(need.id)) throw new Error(`Invalid plugin id: ${String(need.id)}`);
 	if (!isValidRepo(need.repo)) throw new Error(`Invalid repository for ${need.id}: ${String(need.repo)}`);
 	if (!isValidVersion(need.version)) throw new Error(`Invalid version for ${need.id}: ${String(need.version)}`);

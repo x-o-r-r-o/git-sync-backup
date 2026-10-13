@@ -108,7 +108,7 @@ before(async () => {
 	let head = await retry(() => R().getRef(defaultBranch));
 	if (!head) {
 		// Empty repository: the only write ever made to the default branch.
-		const b64 = Buffer.from("# Managed by Git Sync & Backup. Keeps git clients from rewriting line endings.\n* -text\n").toString("base64");
+		const b64 = Buffer.from("# Managed by Vault Sync for Git. Keeps git clients from rewriting line endings.\n* -text\n").toString("base64");
 		await retry(() => R().putFile(".gitattributes", "Initialise vault repository (live test)", b64, defaultBranch));
 		head = await eventually(() => R().getRef(defaultBranch), (h) => !!h, "initialised default branch");
 		notes.push(`Initialised the empty repository on ${defaultBranch}.`);
@@ -411,7 +411,7 @@ test("live host: createPullRequest from a second throwaway branch (VSG_LIVE_PR=1
 	const c = device("PR", R() as any, { owner, repo, branch: pr });
 	c.fs.put(`${dir("pr")}/proposal.md`, "proposed change\n");
 	assertClean(await c.sync(), "pr device");
-	const res = await retry(() => R().createPullRequest!(pr, branch, `Vault Sync live test ${run}`, "Opened by the Git Sync & Backup live test suite. Safe to close."));
+	const res = await retry(() => R().createPullRequest!(pr, branch, `Vault Sync live test ${run}`, "Opened by the Vault Sync for Git live test suite. Safe to close."));
 	assert.match(res.url, /^https?:\/\//);
 	notes.push(`Opened pull request (please close it): ${res.url}`);
 });

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.3 (2026-10-14)
+
+**Changed**
+- **The name is back to Vault Sync for Git** (it was *Git Sync & Backup* in 1.7.1 and 1.7.2): the settings tab, commands, messages, README and guides. Nothing else changes: the plugin id (`vault-sync-git`), settings, sign-ins and synced data stay as they are. The repository stays at [x-o-r-r-o/git-sync-backup](https://github.com/x-o-r-r-o/git-sync-backup), and Sign in with GitHub keeps using the GitHub App registered as *Git Sync & Backup*.
+
 ## 1.7.2 (2026-10-14)
 
 **Changed**
