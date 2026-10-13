@@ -518,7 +518,7 @@ export const en = {
 	"app.disabled": "This GitHub App doesn't allow device sign-in. Use an access token, or ask its owner to enable device flow.",
 	"app.failed": "Sign-in failed: {error}",
 	"app.signedIn": "Signed in with GitHub",
-	"app.signedInDesc": "This device uses the Git Sync & Backup GitHub App. Access renews automatically. Stored on this device only.",
+	"app.signedInDesc": "This device uses the Vault Sync for GitHub GitHub App. Access renews automatically. Stored on this device only.",
 	"app.signOut": "Sign out",
 	"app.chooseRepos": "Choose repositories",
 	"app.chooseReposDesc": "Don't see your vault repository? Add it on GitHub, or create one there first. The list updates by itself when you come back.",

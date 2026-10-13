@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+- **Sign in with GitHub uses the *Vault Sync for GitHub* GitHub App** (`github.com/apps/vault-sync-for-github`). The app used by 1.7.2 and 1.7.3 was removed, so a device signed in with it shows *Your GitHub sign-in has expired* and needs to sign in once more (Settings → Vault Sync for Git → Sign in), then add the vault repository to the app when asked. Devices that use an access token are not affected.
+
 ## 1.7.3 (2026-10-14)
 
 **Changed**
