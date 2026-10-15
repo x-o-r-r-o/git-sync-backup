@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.5 (2026-10-15)
 
 **Fixed** (from a review of the whole plugin; each bug was reproduced first)
 - **Hidden files inside folders could be deleted from the repository.** A hidden file in a normal folder (such as `Notes/.gitignore` or `Notes/.assets/…`) that a sync downloaded wasn't seen by the next scan, which read it as deleted on this device and removed it from the repository. Downloaded files are now found right away.
