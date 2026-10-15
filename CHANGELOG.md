@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**New**
+- **Encrypted files are bound to their names.** New end-to-end encryption uses a newer content format: each file only decrypts under its own path, so someone with write access to the repository can no longer swap two files (or move one to another name) without it showing; the sync reports such a file instead of showing the wrong text. Older files always stay readable.
+- **Upgrade encryption** for repositories encrypted before this version (encryption dialog, or Settings → End-to-end encryption): one commit re-encrypts every file with the same passphrase. Other devices switch on their next sync; devices still on plugin versions before 1.8.0 stop syncing (they say the repository uses a newer format) until they update, so update every device first.
+- **A folder renamed only by letter case on another device** (`Notes/` → `notes/`) is renamed here in the same sync, also on case-insensitive disks (macOS, Windows, iOS); it used to be skipped there on every sync. Single files renamed by case already worked.
+
+**Fixed**
+- A commit, new branch or similar change is no longer sent twice after a server error or a lost answer (the second attempt failed and read as "the branch moved"); the next sync sees what happened.
+- Older versions opened from history (to view or restore) are checked to be complete: GitHub and GitLab by the stored file's checksum, Gitea by its length.
+- GitLab and Gitea: uploading a note to a path where the repository holds something this plugin doesn't sync (such as a symlink) no longer fails on every sync.
+- The status panel no longer briefly counts files moved by the sync itself as edits on this device.
+
 ## 1.7.5 (2026-10-15)
 
 **Fixed** (from a review of the whole plugin; each bug was reproduced first)

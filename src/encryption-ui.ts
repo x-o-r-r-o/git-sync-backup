@@ -52,6 +52,17 @@ export class EncryptionModal extends Modal {
 		this.titleEl.setText(tr("s.hEncryption"));
 		contentEl.createEl("p", { text: tr("s.encOn") });
 		contentEl.createEl("p", { text: tr("s.encOnDesc"), cls: "vsg-muted" });
+		// Older repositories: content isn't bound to its path yet. One-time upgrade, same passphrase.
+		if (this.plugin.encryptionUpgradable()) {
+			new Setting(contentEl)
+				.setDesc(tr("e.upgradeDesc"))
+				.addButton((b) =>
+					b.setButtonText(tr("e.upgrade")).onClick(() => {
+						this.close();
+						void this.plugin.upgradeEncryption();
+					}),
+				);
+		}
 		new Setting(contentEl)
 			.setClass("vsg-wrap-controls")
 			.addButton((b) =>

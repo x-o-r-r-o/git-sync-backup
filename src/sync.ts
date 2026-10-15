@@ -1802,6 +1802,53 @@ export class SyncEngine {
 	 * After switching an existing repository to encryption, the old unencrypted files are still there
 	 * (sync ignores them). This deletes them in one commit. Their history keeps old copies.
 	 */
+	/**
+	 * Re-encrypts every encrypted file of the repository in the newer content format (bound to its
+	 * path) and publishes the new marker, in one commit. `next` is this vault's codec with the new
+	 * encryption layer; names don't change (they use the same key). Files that aren't encrypted are
+	 * left alone. Returns how many files were re-encrypted.
+	 */
+	async upgradeEncryption(next: Codec, markerJson: string): Promise<number> {
+		this.loadCodec();
+		if (!this.codec.has("enc:")) throw new SyncError("encryptionOff");
+		const gh = this.gh;
+		const head = await gh.getRef(this.s.branch);
+		if (!head) return 0;
+		const tree = await gh.getCommitTree(head);
+		const sub = this.repoSubdir;
+		const current = this.codec;
+		const upserts: Upsert[] = [];
+		const entries = await gh.listTree(tree);
+		for (const e of entries) {
+			if (e.type !== "blob" || e.path === MARKER_PATH || e.path === this.markerPath || e.path === ".gitattributes" || e.path === FOLDERS_PATH) continue;
+			if (sub && !e.path.startsWith(sub)) continue;
+			const vp = await current.decodePath(e.path);
+			if (vp === null) continue; // not one of this vault's encrypted files
+			upserts.push({
+				path: e.path,
+				mode: e.mode,
+				// Read when sent (bounded memory): decrypt as stored, encrypt bound to its path.
+				load: async () => next.encode(vp, await current.decode(vp, await this.verifiedBlob(e.sha, vp))),
+			});
+		}
+		upserts.push({ path: this.markerPath, mode: "100644", load: async () => encodeText(markerJson), text: () => markerJson });
+		const device = this.host.deviceName();
+		const n = upserts.length - 1;
+		await gh.commit({
+			author: this.author(),
+			branch: this.s.branch,
+			parent: head,
+			parentTree: tree,
+			message: `${device}: upgrade end-to-end encryption (${n} file(s) re-encrypted)\n\n${this.trailer(device)}`,
+			upserts,
+			deletes: [],
+			existing: new Map(entries.filter((x) => x.type === "blob").map((x): [string, string] => [x.path, x.sha])),
+			progress: (done, total) => this.host.progress?.(t("p.uploading", { done, total })),
+		});
+		this.host.log(`Upgraded end-to-end encryption: ${n} files re-encrypted bound to their paths.`);
+		return n;
+	}
+
 	async removeUnencryptedFiles(confirm: (files: string[]) => Promise<boolean>): Promise<string[]> {
 		this.loadCodec();
 		if (!this.codec.has("enc:")) throw new SyncError("encryptionOff");

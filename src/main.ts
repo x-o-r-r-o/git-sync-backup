@@ -20,7 +20,7 @@ import { Codec, normalizeSubdir, RepoSubdirLayer, vaultCommitsPath } from "./cod
 import type { Layer } from "./codec.ts";
 import { b64, EncryptionLayer, unb64 } from "./crypto.ts";
 import type { EncryptionMeta } from "./crypto.ts";
-import { encryptionGuard } from "./encryption.ts";
+import { EncryptionUpgraded, encryptionGuard } from "./encryption.ts";
 import { LfsLayer, lfsPatternsForSubdir, lfsPatternsFrom } from "./lfs.ts";
 import type { EncryptionRecord } from "./encryption.ts";
 import { EncryptionModal, readRemoteMarker } from "./encryption-ui.ts";
@@ -957,7 +957,8 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	}
 	private async loadEncryption() {
 		const rec = this.encryptionRecord();
-		this.encLayer = rec ? await EncryptionLayer.fromMaster(unb64(rec.master)) : null;
+		// The content format comes from the repository's marker (1 = older repositories, 2 = bound to paths).
+		this.encLayer = rec ? await EncryptionLayer.fromMaster(unb64(rec.master), rec.meta.v === 2 ? 2 : 1) : null;
 	}
 	isEncrypted(): boolean {
 		return this.encLayer !== null;
@@ -991,6 +992,45 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		this.openEncryption();
 		return true;
 	}
+	/** True when this device's key is for a repository still on the older content format (not bound to paths). */
+	encryptionUpgradable(): boolean {
+		const rec = this.encryptionRecord();
+		return !!rec && (rec.meta.v ?? 1) === 1;
+	}
+
+	/**
+	 * Upgrades the repository's encryption to the content format bound to paths: syncs first, then
+	 * re-encrypts every file in one commit with the same passphrase. Other devices switch on their next sync.
+	 */
+	async upgradeEncryption() {
+		const rec = this.encryptionRecord();
+		if (!rec || (rec.meta.v ?? 1) !== 1) return;
+		if (!(await confirmPlan(this.app, t("e.upgradeTitle"), t("e.upgradeBody"), [], t("e.upgradeConfirm")))) return;
+		// Everything pending goes up first, so the re-encrypted commit holds this device's latest files.
+		this.lastError = null;
+		await this.sync("manual", this.settings.mode, { firstSyncPrefer: undefined });
+		if (this.lastError) return void new Notice(t("e.upgradeFailed", { error: this.errorText(this.lastErrorCause ?? this.lastError) }));
+		if (!this.beginExclusive()) return;
+		let upgraded = false;
+		try {
+			const layer = await EncryptionLayer.fromMaster(unb64(rec.master), 2);
+			const meta: EncryptionMeta = { ...rec.meta, v: 2, check: await layer.checkValue() };
+			const n = await this.engine.upgradeEncryption(this.codec(layer), JSON.stringify(meta, null, 2) + "\n");
+			this.setSecret("encryption", JSON.stringify({ meta, master: rec.master } satisfies EncryptionRecord));
+			await this.loadEncryption();
+			this.fullScanNeeded = true;
+			upgraded = true;
+			new Notice(t("e.upgraded", { n }));
+		} catch (e) {
+			new Notice(t("e.upgradeFailed", { error: this.errorText(e) }), 10000);
+		} finally {
+			this.endExclusive();
+			this.refreshHealth(true);
+		}
+		// Confirms the new format: files read back equal, nothing else changes.
+		if (upgraded) void this.sync("manual");
+	}
+
 	async removeUnencryptedFiles() {
 		if (!this.beginExclusive()) return;
 		try {
@@ -1161,10 +1201,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return errors;
 	}
 
-	codec(): Codec {
+	codec(enc: EncryptionLayer | null = this.encLayer): Codec {
 		// LFS is always present for reading pointers; it only uploads when a threshold is set.
 		const lfs = new LfsLayer(this.gh, (this.settings.lfsThresholdMB ?? 0) * 1024 * 1024, undefined, this.lfsPatterns);
-		const layers: Layer[] = this.encLayer ? [this.encLayer, lfs] : [lfs];
+		const layers: Layer[] = enc ? [enc, lfs] : [lfs];
 		// The vault in a folder of the repository: last, so encrypted names go inside that folder.
 		const sub = normalizeSubdir(this.settings.repoSubdir);
 		if (sub) layers.push(new RepoSubdirLayer(sub));
@@ -1195,7 +1235,15 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	checkEncryption = (markerSha: string | null): Promise<string | null> =>
 		encryptionGuard(
 			() => this.encryptionRecord(),
-			(r) => this.setSecret("encryption", JSON.stringify(r)),
+			(r) => {
+				const format = this.encryptionRecord()?.meta.v ?? 1;
+				this.setSecret("encryption", JSON.stringify(r));
+				// Another device upgraded the content format: use it from the next sync on.
+				if ((r.meta.v ?? 1) !== format) {
+					void this.loadEncryption();
+					this.fullScanNeeded = true;
+				}
+			},
 			async (sha) => JSON.parse(new TextDecoder().decode(await this.gh.getBlob(sha))) as EncryptionMeta,
 		)(markerSha);
 
@@ -1703,6 +1751,12 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			if (e instanceof SyncCancelled) {
 				this.log(e.message);
 				this.setStatus("idle", this.errorText(e));
+			} else if (e instanceof EncryptionUpgraded) {
+				// Another device upgraded the encryption; this device switched. Sync again with the new format.
+				this.log(this.errorText(e));
+				new Notice(this.errorText(e), 8000);
+				this.setStatus("idle");
+				window.setTimeout(() => void this.sync(trigger), 1000);
 			} else {
 				this.lastError = errMsg(e);
 				this.lastErrorCause = e;

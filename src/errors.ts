@@ -156,6 +156,7 @@ const ADVICE: Partial<Record<ErrCode, "notConnected" | "badToken" | "repoMissing
 	network: "offline",
 	encLocked: "encrypted",
 	encMismatch: "otherKey",
+	encUpgraded: "busy",
 	overwritePullOnly: "pullOnly",
 	restorePullOnly: "pullOnly",
 	branchMissing: "branchMissing",

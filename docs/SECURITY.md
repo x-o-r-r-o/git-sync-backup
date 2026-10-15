@@ -15,7 +15,7 @@ For network use, accounts and privacy, see the [README](../README.md#network-use
 - **End-to-end encryption limits.**
   - Encrypted files still reveal approximate file sizes and path lengths, and whether two files are identical. Commit messages show the device name, the time and how many files changed.
   - Commits made before version 1.6.2 list the changed file names in their messages, and those messages stay in the repository's history.
-  - Content isn't bound to its path, so someone with write access to the repository could swap or roll back encrypted files. They still can't read or forge content.
+  - Each file's content is bound to its path (since 1.8.0): a file moved to another name or swapped with another file in the repository no longer decrypts, so the sync reports it instead of showing the wrong text. Someone with write access can still put back an *older* version of a file under the same name, or delete files; they can't read or forge content. Repositories encrypted before 1.8.0 keep the older format, where content isn't bound to its path, until you choose *Upgrade encryption*.
   - Shared folders are never encrypted, because collaborators must read them.
 - **Deleting files.** Deletions that arrive from another device follow Obsidian's *Deleted files* setting (system trash, `.trash` folder, or permanent); they also stay in the repository's history. Local content that was never uploaded and gets replaced (for example "the repository wins", or *Make this device match the repository*) always goes to the system trash or `.trash`, even with permanent deletion on.
 - **Data-safety guarantees.**

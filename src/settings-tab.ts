@@ -627,16 +627,18 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					? [
 							{
 								name: t("s.encOn"),
-								desc: t("s.encOnDesc"),
-								render: (st) =>
-									st
+								desc: p.encryptionUpgradable() ? `${t("s.encOnDesc")} ${t("e.upgradeDesc")}` : t("s.encOnDesc"),
+								render: (st) => {
+									if (p.encryptionUpgradable()) st.addButton((b) => b.setButtonText(t("e.upgrade")).setCta().onClick(() => void p.upgradeEncryption()));
+									return st
 										.addButton((b) => b.setButtonText(t("s.encRemovePlain")).onClick(() => p.removeUnencryptedFiles()))
 										.addButton((b) =>
 											destructive(b.setButtonText(t("s.encLock"))).onClick(async () => {
 												await p.lockEncryption();
 												this.refresh();
 											}),
-										),
+										);
+								},
 							},
 						]
 					: [

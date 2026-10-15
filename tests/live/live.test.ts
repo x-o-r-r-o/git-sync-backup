@@ -329,3 +329,45 @@ test("live: file history follows a rename back to the old name (plain and encryp
 		assert.equal(new TextDecoder().decode(oldest!), "one\ntwo\n");
 	}
 });
+
+test("live: upgrading an older encrypted repository to path-bound encryption", { skip: !live }, async () => {
+	const { Codec } = await import("../../src/codec.ts");
+	const { createEncryption, EncryptionLayer, b64, MARKER_PATH } = await import("../../src/crypto.ts");
+	const { encryptionGuard, EncryptionUpgraded } = await import("../../src/encryption.ts");
+	const branch = await freshBranch("enc-upgrade");
+	const { master } = await createEncryption("live upgrade passphrase");
+	const v1 = await EncryptionLayer.fromMaster(master, 1);
+	const v2 = await EncryptionLayer.fromMaster(master, 2);
+	const meta1 = { v: 1 as const, kdf: "PBKDF2-SHA256" as const, iterations: 600_000, salt: "bGl2ZXNhbHQ=", check: await v1.checkValue() };
+	const meta2 = { ...meta1, v: 2 as const, check: await v2.checkValue() };
+	const mk = (name: string) => {
+		const d = device(name, gh as any, { owner, repo, branch });
+		let rec: any = { meta: meta1, master: b64(master) };
+		d.host.codec = () => new Codec([rec.meta.v === 2 ? v2 : v1]);
+		d.host.checkEncryption = encryptionGuard(() => rec, (r) => (rec = r), async (sha) => JSON.parse(new TextDecoder().decode(await gh.getBlob(sha))));
+		return Object.assign(d, { setRec: (r: any) => (rec = r) });
+	};
+	const a = mk("Mac"), b = mk("iPhone");
+	a.fs.put("Notes/secret.md", "launch on friday\n");
+	a.fs.files.set("img/x.png", { data: new Uint8Array(randomBytes(3000)), mtime: 1 });
+	await a.sync();
+	await b.sync();
+	const n = await a.engine.upgradeEncryption(new Codec([v2]), JSON.stringify(meta2));
+	assert.equal(n, 2);
+	a.setRec({ meta: meta2, master: b64(master) });
+	const after = await remoteFiles(branch);
+	for (const [p, sha] of after) {
+		if (!p.startsWith("e/")) continue;
+		assert.equal(new TextDecoder().decode(new Uint8Array(await gh.getBlob(sha)).slice(0, 4)), "VSG2");
+	}
+	assert.ok(after.has(MARKER_PATH));
+	assert.deepEqual((await a.sync()).conflictCopies, []);
+	await assert.rejects(b.sync(), (e) => e instanceof EncryptionUpgraded);
+	const rb = await b.sync();
+	assert.deepEqual(rb.conflictCopies, []);
+	assert.equal(b.fs.text("Notes/secret.md"), "launch on friday\n");
+	b.fs.put("Notes/secret.md", "launch on friday\nbring snacks\n");
+	await b.sync();
+	await a.sync();
+	assert.equal(a.fs.text("Notes/secret.md"), "launch on friday\nbring snacks\n");
+});

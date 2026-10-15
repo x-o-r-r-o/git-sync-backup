@@ -70,7 +70,8 @@ When a file changed on both sides, choose what happens: **merge automatically** 
 Settings → *End-to-end encryption*, or in the setup wizard.
 
 - Content and file names are encrypted on your device before upload, with AES-256-GCM. The key comes from your passphrase through PBKDF2-SHA256 with 600,000 iterations, and file names become opaque paths. Commit messages don't name files either: they only say how many were added, updated, renamed or deleted (`{{files}}` stays empty).
-- Change detection, merging, rename detection, history, restore and the timeline all keep working.
+- Each file's content is bound to its path, so a file moved or swapped in the repository by someone else doesn't open as another file. Change detection, merging, history, restore and the timeline all keep working; renames are still recognised by content.
+- **Upgrade encryption** (repositories encrypted before 1.8.0, from the encryption dialog or settings): re-encrypts every file once, with the same passphrase, in one commit, so each file is bound to its path too. Other devices switch on their next sync; devices on plugin versions before 1.8.0 stop syncing until they update.
 - Other devices unlock with the same passphrase. A device without it, or with a different one, is refused instead of downloading unreadable files.
 - To encrypt an existing repository, *Remove unencrypted copies* deletes the old plain files in one commit. Their history still contains them, so for full privacy start with a new, empty repository.
 - **There is no passphrase recovery.** Keep it in a password manager.

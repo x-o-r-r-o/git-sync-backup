@@ -2,9 +2,12 @@
 //
 // - Key: PBKDF2-SHA256 (600k iterations) from a passphrase and a random salt; HKDF splits it into
 //   separate keys for content, content nonces, names and name nonces.
-// - Content: "VSG1" ‖ nonce(12) ‖ AES-256-GCM(ciphertext ‖ tag). The nonce is HMAC(content) so equal
-//   plaintext gives equal ciphertext: change and rename detection keep working, and git dedupes. The
-//   only leak is "these two files are identical".
+// - Content, format 2 (repositories encrypted since 1.8): "VSG2" ‖ nonce(12) ‖ AES-256-GCM(ciphertext ‖
+//   tag), with the file's vault path as additional authenticated data and nonce = HMAC(path ‖ content).
+//   A file only decrypts under its own path, so nobody with write access can swap two files' contents
+//   unnoticed; equal content at one path still gives equal ciphertext (change detection, git dedupe).
+// - Content, format 1 (older repositories): "VSG1" ‖ nonce ‖ AES-GCM, nonce = HMAC(content), not bound
+//   to the path. Always readable (history), written only to repositories still on format 1.
 // - Names: every path becomes e/<base64url(nonce ‖ AES-GCM(path))>, split into ≤180-char segments,
 //   with nonce = HMAC(path). Deterministic, so all devices compute the same repository path.
 // - A small marker file (MARKER_PATH, not encrypted) stores the salt, iterations and a check value
@@ -47,6 +50,9 @@ export function pickMarker(entries: Iterable<{ path: string; sha: string }>, rep
 	return { sha: null, legacy: false };
 }
 const MAGIC = new Uint8Array([0x56, 0x53, 0x47, 0x31]); // "VSG1"
+const MAGIC2 = new Uint8Array([0x56, 0x53, 0x47, 0x32]); // "VSG2"
+/** Content format of new encryption (see the header). */
+export const CONTENT_FORMAT = 2;
 const ITERATIONS = 600_000;
 const CHECK_TEXT = "vault-sync-check";
 const SEG = 180;
@@ -55,7 +61,8 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 
 export interface EncryptionMeta {
-	v: 1;
+	/** Content format: 1 = not bound to the path (older repositories), 2 = bound to the path. */
+	v: 1 | 2;
 	kdf: "PBKDF2-SHA256";
 	iterations: number;
 	salt: string;
@@ -95,39 +102,53 @@ export async function deriveMaster(passphrase: string, salt: Uint8Array, iterati
 
 export class EncryptionLayer implements Layer {
 	readonly id: string;
+	/** Content format this layer writes (it reads both). */
+	readonly format: 1 | 2;
 	readonly transformsContent = true;
 	readonly transformsPaths = true;
 	private kContent: CryptoKey;
 	private kNonce: CryptoKey;
 	private kName: CryptoKey;
 	private kNameNonce: CryptoKey;
-	private constructor(id: string, kContent: CryptoKey, kNonce: CryptoKey, kName: CryptoKey, kNameNonce: CryptoKey) {
-		this.id = id;
+	private constructor(id: string, format: 1 | 2, kContent: CryptoKey, kNonce: CryptoKey, kName: CryptoKey, kNameNonce: CryptoKey) {
+		this.format = format;
+		// The format is part of the identity (codec fingerprint): switching it starts a fresh comparison.
+		this.id = format === 1 ? id : `${id}:v${format}`;
 		this.kContent = kContent;
 		this.kNonce = kNonce;
 		this.kName = kName;
 		this.kNameNonce = kNameNonce;
 	}
 
-	static async fromMaster(master: Uint8Array): Promise<EncryptionLayer> {
+	static async fromMaster(master: Uint8Array, format: 1 | 2 = 1): Promise<EncryptionLayer> {
 		const base = await crypto.subtle.importKey("raw", ab(master), "HKDF", false, ["deriveBits"]);
 		const bits = (info: string) => crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: te.encode(info) }, base, 256);
 		const aes = async (info: string) => crypto.subtle.importKey("raw", await bits(info), "AES-GCM", false, ["encrypt", "decrypt"]);
 		const hmac = async (info: string) => crypto.subtle.importKey("raw", await bits(info), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 		const fp = new Uint8Array(await crypto.subtle.digest("SHA-256", await bits("vsg fingerprint"))).slice(0, 4);
 		const id = "enc:" + Array.from(fp, (x) => x.toString(16).padStart(2, "0")).join("");
-		return new EncryptionLayer(id, await aes("vsg content"), await hmac("vsg content nonce"), await aes("vsg name"), await hmac("vsg name nonce"));
+		return new EncryptionLayer(id, format, await aes("vsg content"), await hmac("vsg content nonce"), await aes("vsg name"), await hmac("vsg name nonce"));
 	}
 
 	private async nonce(key: CryptoKey, data: BufferSource): Promise<Uint8Array> {
 		return new Uint8Array(await crypto.subtle.sign("HMAC", key, data)).slice(0, 12);
 	}
 
-	async encode(_path: string, data: ArrayBuffer): Promise<ArrayBuffer> {
-		const iv = await this.nonce(this.kNonce, data);
-		const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: ab(iv) }, this.kContent, data));
+	/** Format-2 additional data: the vault path the content belongs to. */
+	private static aad(path: string): ArrayBuffer {
+		return ab(te.encode(`vsg2\0${path}`));
+	}
+
+	async encode(path: string, data: ArrayBuffer): Promise<ArrayBuffer> {
+		const bound = this.format === 2;
+		// Format 2: the nonce covers the path too, so the same content at two paths never shares a nonce
+		// (sharing one under different additional data would leak the authentication key).
+		const nonceInput = bound ? ab(new Uint8Array([...te.encode(path), 0, ...new Uint8Array(data)])) : data;
+		const iv = await this.nonce(this.kNonce, nonceInput);
+		const params: AesGcmParams = bound ? { name: "AES-GCM", iv: ab(iv), additionalData: EncryptionLayer.aad(path) } : { name: "AES-GCM", iv: ab(iv) };
+		const ct = new Uint8Array(await crypto.subtle.encrypt(params, this.kContent, data));
 		const out = new Uint8Array(4 + 12 + ct.length);
-		out.set(MAGIC, 0);
+		out.set(bound ? MAGIC2 : MAGIC, 0);
 		out.set(iv, 4);
 		out.set(ct, 16);
 		return ab(out);
@@ -135,9 +156,14 @@ export class EncryptionLayer implements Layer {
 
 	async decode(path: string, blob: ArrayBuffer): Promise<ArrayBuffer> {
 		const u = new Uint8Array(blob);
-		if (u.length < 16 + 16 || !MAGIC.every((b, i) => u[i] === b)) throw new SyncError("notEncrypted", { path });
+		const v1 = u.length >= 32 && MAGIC.every((b, i) => u[i] === b);
+		const v2 = u.length >= 32 && MAGIC2.every((b, i) => u[i] === b);
+		if (!v1 && !v2) throw new SyncError("notEncrypted", { path });
 		try {
-			return await crypto.subtle.decrypt({ name: "AES-GCM", iv: ab(u.slice(4, 16)) }, this.kContent, ab(u.slice(16)));
+			// Format 2 only decrypts under the path it was written for: a file moved or swapped in the
+			// repository by someone else fails here instead of showing another file's content.
+			const params: AesGcmParams = v2 ? { name: "AES-GCM", iv: ab(u.slice(4, 16)), additionalData: EncryptionLayer.aad(path) } : { name: "AES-GCM", iv: ab(u.slice(4, 16)) };
+			return await crypto.subtle.decrypt(params, this.kContent, ab(u.slice(16)));
 		} catch {
 			throw new SyncError("decryptFailed", { path });
 		}
@@ -184,16 +210,16 @@ export class EncryptionLayer implements Layer {
 export async function createEncryption(passphrase: string): Promise<{ meta: EncryptionMeta; master: Uint8Array; layer: EncryptionLayer }> {
 	const salt = crypto.getRandomValues(new Uint8Array(16));
 	const master = await deriveMaster(passphrase, salt);
-	const layer = await EncryptionLayer.fromMaster(master);
-	const meta: EncryptionMeta = { v: 1, kdf: "PBKDF2-SHA256", iterations: ITERATIONS, salt: b64(salt), check: await layer.checkValue() };
+	const layer = await EncryptionLayer.fromMaster(master, CONTENT_FORMAT);
+	const meta: EncryptionMeta = { v: CONTENT_FORMAT, kdf: "PBKDF2-SHA256", iterations: ITERATIONS, salt: b64(salt), check: await layer.checkValue() };
 	return { meta, master, layer };
 }
 
 /** Unlock an existing encrypted repository. Throws on a wrong passphrase. */
 export async function unlockEncryption(passphrase: string, meta: EncryptionMeta): Promise<{ master: Uint8Array; layer: EncryptionLayer }> {
-	if (meta.v !== 1 || meta.kdf !== "PBKDF2-SHA256") throw new SyncError("newerFormat");
+	if ((meta.v !== 1 && meta.v !== 2) || meta.kdf !== "PBKDF2-SHA256") throw new SyncError("newerFormat");
 	const master = await deriveMaster(passphrase, unb64(meta.salt), meta.iterations);
-	const layer = await EncryptionLayer.fromMaster(master);
+	const layer = await EncryptionLayer.fromMaster(master, meta.v);
 	if (!(await layer.verify(meta))) throw new SyncError("wrongPass");
 	return { master, layer };
 }
