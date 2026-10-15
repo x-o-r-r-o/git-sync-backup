@@ -30,20 +30,20 @@ On a desktop:
 
 | | |
 |---|---|
-| <img src="docs/screenshots/desktop-1-change-markers-and-history.png" width="420" alt="Lines changed since the last sync marked in the editor, next to the sync history sidebar"> | <img src="docs/screenshots/desktop-2-review-before-sync.png" width="420" alt="Review changes before a sync, with checkboxes and a Diff button"> |
-| <img src="docs/screenshots/desktop-3-visual-diff.png" width="420" alt="Side-by-side diff between GitHub and this device"> | <img src="docs/screenshots/desktop-5-setup-wizard.png" width="420" alt="Setup wizard: choose the host, name the device and sign in"> |
+| <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/desktop-1-change-markers-and-history.png" width="420" alt="Lines changed since the last sync marked in the editor, next to the sync history sidebar"> | <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/desktop-2-review-before-sync.png" width="420" alt="Review changes before a sync, with checkboxes and a Diff button"> |
+| <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/desktop-3-visual-diff.png" width="420" alt="Side-by-side diff between GitHub and this device"> | <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/desktop-5-setup-wizard.png" width="420" alt="Setup wizard: choose the host, name the device and sign in"> |
 
 On a phone (Android, end-to-end encrypted vault):
 
 | Changes since the last sync | Sync history | History across renames | Encryption | Sync status |
 |---|---|---|---|---|
-| <img src="docs/screenshots/mobile-1-change-markers.png" width="160" alt="Lines changed since the last sync marked in the editor, with the old text, Revert and Who changed this?"> | <img src="docs/screenshots/mobile-2-sync-history.png" width="160" alt="Sync history sidebar with a sync expanded to its changed files and restore buttons"> | <img src="docs/screenshots/mobile-3-history-across-renames.png" width="160" alt="Version history of a renamed note, including the version under its old name"> | <img src="docs/screenshots/mobile-4-end-to-end-encryption.png" width="160" alt="End-to-end encryption is on and unlocked on this device"> | <img src="docs/screenshots/mobile-5-sync-status.png" width="160" alt="Status panel: up to date, encrypted, pending changes, devices and tools"> |
+| <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/mobile-1-change-markers.png" width="160" alt="Lines changed since the last sync marked in the editor, with the old text, Revert and Who changed this?"> | <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/mobile-2-sync-history.png" width="160" alt="Sync history sidebar with a sync expanded to its changed files and restore buttons"> | <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/mobile-3-history-across-renames.png" width="160" alt="Version history of a renamed note, including the version under its old name"> | <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/mobile-4-end-to-end-encryption.png" width="160" alt="End-to-end encryption is on and unlocked on this device"> | <img src="https://raw.githubusercontent.com/x-o-r-r-o/vault-sync-git/main/docs/screenshots/mobile-5-sync-status.png" width="160" alt="Status panel: up to date, encrypted, pending changes, devices and tools"> |
 
 ## Install
 
 - **Community plugins:** in Obsidian, open Settings → Community plugins → Browse, search for **Vault Sync for Git**, then install and enable it.
-- **Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<vault>/.obsidian/plugins/vault-sync-git/`, then enable the plugin under Community plugins.
-- **BRAT:** add this repository in the BRAT plugin to get new releases on each device.
+- **Manual:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](https://github.com/x-o-r-r-o/vault-sync-git/releases/latest) into `<vault>/.obsidian/plugins/vault-sync-git/`, then enable the plugin under Community plugins.
+- **BRAT:** in the BRAT plugin, add `x-o-r-r-o/vault-sync-git` to get new releases on each device.
 
 ## Quick start
 
@@ -53,15 +53,15 @@ On a phone (Android, end-to-end encrypted vault):
 4. Choose whether this device uploads, downloads or merges, and run the first sync.
 5. On your other devices, use **Add another device** (QR code or link), or run the wizard with the same repository.
 
-The first sync never deletes anything: if a file differs, both versions are kept. Details for every host and for tokens are in [Setup](docs/SETUP.md).
+The first sync never deletes anything: if a file differs, both versions are kept. Details for every host and for tokens are in [Setup](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/SETUP.md).
 
 ## Documentation
 
-- [Setup](docs/SETUP.md): sign-in, access tokens for each host, adding devices
-- [Features and commands](docs/FEATURES.md): everything the plugin does, and every command
-- [Security](docs/SECURITY.md): tokens, encryption limits, data-safety guarantees
-- [Hosts and limits](docs/LIMITS.md): notes per host, file sizes and known limits
-- [Changelog](CHANGELOG.md) · [Roadmap](docs/ROADMAP.md) · [Comparison with other sync plugins](docs/RESEARCH.md) · [Contributing](CONTRIBUTING.md)
+- [Setup](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/SETUP.md): sign-in, access tokens for each host, adding devices
+- [Features and commands](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/FEATURES.md): everything the plugin does, and every command
+- [Security](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/SECURITY.md): tokens, encryption limits, data-safety guarantees
+- [Hosts and limits](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/LIMITS.md): notes per host, file sizes and known limits
+- [Changelog](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/CHANGELOG.md) · [Roadmap](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/ROADMAP.md) · [Comparison with other sync plugins](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/docs/RESEARCH.md) · [Contributing](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/CONTRIBUTING.md)
 
 ## Requirements
 
@@ -87,4 +87,4 @@ This section covers the disclosures Obsidian's developer policies require.
 
 ## License
 
-[MIT](LICENSE). Bundled third-party code (the QR code generator) is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[MIT](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/LICENSE). Bundled third-party code (the QR code generator) is listed in [THIRD_PARTY_NOTICES.md](https://github.com/x-o-r-r-o/vault-sync-git/blob/main/THIRD_PARTY_NOTICES.md).

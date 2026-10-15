@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 (2026-10-15)
 
 **New**
 - **Encrypted files are bound to their names.** New end-to-end encryption uses a newer content format: each file only decrypts under its own path, so someone with write access to the repository can no longer swap two files (or move one to another name) without it showing; the sync reports such a file instead of showing the wrong text. Older files always stay readable.
@@ -12,6 +12,7 @@
 - Older versions opened from history (to view or restore) are checked to be complete: GitHub and GitLab by the stored file's checksum, Gitea by its length.
 - GitLab and Gitea: uploading a note to a path where the repository holds something this plugin doesn't sync (such as a symlink) no longer fails on every sync.
 - The status panel no longer briefly counts files moved by the sync itself as edits on this device.
+- README links and screenshots use full addresses, so they also work on the plugin's page in Obsidian; `package.json` names the repository, homepage and issue tracker.
 
 ## 1.7.5 (2026-10-15)
 

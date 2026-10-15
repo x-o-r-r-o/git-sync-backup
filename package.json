@@ -1,7 +1,16 @@
 {
   "name": "vault-sync-git",
-  "version": "1.7.5",
-  "description": "Obsidian plugin: sync and back up a vault with GitHub on desktop and mobile",
+  "version": "1.8.0",
+  "description": "Obsidian plugin: sync and back up a vault with GitHub, GitLab, Codeberg, Gitea, Forgejo or Bitbucket on desktop and mobile",
+  "author": "Fadi",
+  "homepage": "https://github.com/x-o-r-r-o/vault-sync-git#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-o-r-r-o/vault-sync-git.git"
+  },
+  "bugs": {
+    "url": "https://github.com/x-o-r-r-o/vault-sync-git/issues"
+  },
   "main": "main.js",
   "type": "module",
   "scripts": {
