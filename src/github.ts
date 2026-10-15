@@ -5,7 +5,7 @@ import { arrayBufferToBase64, requestUrl } from "obsidian";
 import type { RequestUrlResponse } from "obsidian";
 import { webBase } from "./auth.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
-import { codedRemoteError } from "./errors.ts";
+import { codedRemoteError, SyncError } from "./errors.ts";
 import type { CommitFile, CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
 import { pool, sleep } from "./util.ts";
 
@@ -372,6 +372,9 @@ export class GitHub implements Remote {
 		const out: TreeEntry[] = [];
 		const walk = async (treeSha: string, prefix: string) => {
 			const t = await this.getTree(treeSha, false);
+			// A folder too large to list in full: a partial list would make the missing files look
+			// deleted in the repository, so stop instead.
+			if (t.truncated) throw new SyncError("repoTooLarge", { host: "GitHub" });
 			for (const e of t.tree) {
 				const p = prefix ? `${prefix}/${e.path}` : e.path;
 				if (e.type === "tree") await walk(e.sha, p);

@@ -25,13 +25,26 @@ export type Transport = (req: HttpRequest) => Promise<HttpResponse>;
 
 export const obsidianTransport: Transport = async (req) => {
 	const res = await requestUrl({ url: req.url, method: req.method, headers: req.headers, body: req.body, contentType: req.contentType, throw: false });
-	let json: unknown = null;
-	try {
-		json = res.json as unknown;
-	} catch {
-		/* not JSON */
-	}
-	return { status: res.status, json, arrayBuffer: res.arrayBuffer, headers: res.headers ?? {} };
+	// Parsed only when read: a raw download (an attachment, an LFS object) never becomes a string, which
+	// for a large file would need several times its size in memory (too much on a phone).
+	let parsed: { value: unknown } | null = null;
+	return {
+		status: res.status,
+		get json(): unknown {
+			if (!parsed) {
+				let value: unknown = null;
+				try {
+					value = res.json as unknown;
+				} catch {
+					/* not JSON */
+				}
+				parsed = { value };
+			}
+			return parsed.value;
+		},
+		arrayBuffer: res.arrayBuffer,
+		headers: res.headers ?? {},
+	};
 };
 
 /**

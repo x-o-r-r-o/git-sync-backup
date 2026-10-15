@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**Fixed** (from a review of the whole plugin; each bug was reproduced first)
+- **Hidden files inside folders could be deleted from the repository.** A hidden file in a normal folder (such as `Notes/.gitignore` or `Notes/.assets/…`) that a sync downloaded wasn't seen by the next scan, which read it as deleted on this device and removed it from the repository. Downloaded files are now found right away.
+- **The setup wizard no longer lets automatic syncs run before you finish.** While the wizard was open, switching apps on a phone or the sync timer could start a sync with the chosen repository before your choices were applied, for example uploading a vault you were about to encrypt. Only the wizard's own first sync runs now.
+- **No duplicate conflict copies when another device pushes during a sync.** The retry used to treat edits already merged in the first attempt as a new conflict.
+- **Phones no longer parse large downloads as text.** Every download on GitLab, Gitea and Bitbucket, and every Git LFS download, was also decoded as JSON, which for a big attachment could use several times its size in memory.
+- **Free up space** now lists the freed files as available on demand right away (they only appeared after the next change in the repository).
+- **Read-only devices** (*Pull only*) no longer make a conflict copy of the list of enabled plugins whenever another device changes it. Lists of names in settings files (such as enabled plugins) now merge as lists on every device: additions from both sides are kept.
+- **Version history, Who last changed this line and Compare** for notes in a shared folder read that folder's repository even before the first sync of a session, and right after adding the folder.
+- The on-demand **Download** box also goes away when the download waited for a sync that was already running.
+- A sign-in renewal still running from before a new sign-in can no longer overwrite it.
+- GitHub: a folder too large for GitHub to list in full stops the sync with a clear message instead of making the unlisted files look deleted.
+- Git LFS: pointer files with Windows line endings, or from the old "hawser" spec, are recognised (their text was written into the vault).
+- Gitea / Forgejo: the repository picker lists every page on servers that return short pages.
+
 ## 1.7.4 (2026-10-14)
 
 **Changed**

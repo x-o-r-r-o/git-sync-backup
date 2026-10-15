@@ -42,6 +42,7 @@ function mergeValue(b: J, l: J, r: J, ctx: Ctx): J {
 	if (Array.isArray(l) && Array.isArray(r) && (b === undefined || Array.isArray(b)) && hasIds(l) && hasIds(r) && (!b || hasIds(b as J[]))) {
 		return mergeById((b as Record<string, J>[]) ?? [], l as Record<string, J>[], r as Record<string, J>[], ctx);
 	}
+	if (isNameList(l) && isNameList(r) && (b === undefined || isNameList(b))) return mergeNameLists((b as string[]) ?? [], l, r);
 	if (typeof l === "string" && typeof r === "string" && typeof b === "string") {
 		const m = merge3(b, l, r, { local: "local", remote: "remote" });
 		if (m?.clean) return m.text;
@@ -58,6 +59,23 @@ function mergeObject(b: Record<string, J>, l: Record<string, J>, r: Record<strin
 		if (v !== undefined) out[k] = v;
 	}
 	return out;
+}
+
+/** A list of distinct strings, such as plugin ids in community-plugins.json. */
+function isNameList(v: J): v is string[] {
+	return Array.isArray(v) && v.every((x) => typeof x === "string") && new Set(v).size === v.length;
+}
+
+/**
+ * Three-way merge of name lists as sets: a name added on either side is kept, a name removed on
+ * either side is removed. Order: this side's list, then names the other side added.
+ */
+function mergeNameLists(b: string[], l: string[], r: string[]): string[] {
+	const B = new Set(b);
+	const L = new Set(l);
+	const R = new Set(r);
+	const keep = (x: string) => (L.has(x) && R.has(x)) || (L.has(x) && !B.has(x)) || (R.has(x) && !B.has(x));
+	return [...l.filter(keep), ...r.filter((x) => !L.has(x) && keep(x))];
 }
 
 function mergeById(b: Record<string, J>[], l: Record<string, J>[], r: Record<string, J>[], ctx: Ctx): Record<string, J>[] {

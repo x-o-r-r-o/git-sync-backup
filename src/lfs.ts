@@ -14,6 +14,7 @@ import { encodeText } from "./util.ts";
 import { SyncError } from "./errors.ts";
 
 const SPEC = "version https://git-lfs.github.com/spec/v1";
+const LEGACY_SPEC = "version https://hawser.github.com/spec/v1";
 
 interface LfsAction {
 	href: string;
@@ -86,9 +87,11 @@ export function pointerFor(oid: string, size: number): string {
 }
 
 export function parsePointer(blob: ArrayBuffer): { oid: string; size: number } | null {
-	if (blob.byteLength > 512) return null;
-	const t = td.decode(blob);
-	if (!t.startsWith(SPEC)) return null;
+	// The spec allows pointers up to 1024 bytes; one committed with CRLF line endings, or with the
+	// legacy "hawser" version line, is still a pointer (never write its text into the vault).
+	if (blob.byteLength > 1024) return null;
+	const t = td.decode(blob).replace(/\r\n/g, "\n");
+	if (!t.startsWith(SPEC) && !t.startsWith(LEGACY_SPEC)) return null;
 	const oid = /\noid sha256:([0-9a-f]{64})\n/.exec(t)?.[1];
 	const size = /\nsize (\d+)\n?/.exec(t)?.[1];
 	return oid && size ? { oid, size: Number(size) } : null;

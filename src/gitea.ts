@@ -102,12 +102,13 @@ export class Gitea implements Remote {
 		const r = await this.json<GtRepo>("POST", org ? `/orgs/${encodeURIComponent(org)}/repos` : "/user/repos", { name, private: true, auto_init: false, description: "Obsidian vault (synced by Vault Sync)" });
 		return { html_url: r.html_url };
 	}
-	async listRepos(maxPages = 3) {
+	async listRepos(maxPages = 6) {
 		const out: { owner: string; name: string; private: boolean; updated: string; defaultBranch: string }[] = [];
 		for (let page = 1; page <= maxPages; page++) {
-			const list = await this.json<GtRepo[]>("GET", `/user/repos?limit=50&page=${page}`);
+			// Servers may return fewer than asked per page (MAX_RESPONSE_ITEMS): only an empty page ends the list.
+			const list = (await this.json<GtRepo[] | null>("GET", `/user/repos?limit=50&page=${page}`)) ?? [];
+			if (!list.length) break;
 			for (const r of list) out.push({ owner: r.owner?.login ?? r.owner?.username ?? "", name: r.name, private: !!r.private, updated: r.updated_at, defaultBranch: r.default_branch || "main" });
-			if (list.length < 50) break;
 		}
 		return out.sort((a, b) => b.updated.localeCompare(a.updated));
 	}

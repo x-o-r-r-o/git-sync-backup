@@ -717,32 +717,45 @@ export class SyncEngine {
 		if (this.host.isUnloaded?.()) throw new SyncCancelled("unloaded");
 	}
 
+	/**
+	 * Base versions for a retry after a refused push: where the failed attempt merged a repository
+	 * version into local files (rename + edit, merged conflicts, push copies), the retry compares
+	 * against that version, so the same edits aren't seen as a conflict again (no duplicate copies).
+	 */
+	private retryBase: Record<string, string> = {};
+
 	private async runWithRetries(mode: SyncMode, opts: SyncOptions): Promise<SyncReport> {
 		this.acceptRewind = false;
-		for (let attempt = 0; ; attempt++) {
-			try {
-				return await this.runOnce(mode, opts);
-			} catch (e) {
-				if (e instanceof NotFastForward && attempt < 3) {
-					this.host.log("Remote moved during sync (another device pushed). Retrying.");
-					continue;
-				}
-				if (e instanceof StaleRemote) {
-					if (attempt < 3) {
-						this.host.log(`${this.gh.label} returned an older branch state. Waiting and retrying.`);
-						await sleep(2000 * (attempt + 1));
+		this.retryBase = {};
+		try {
+			for (let attempt = 0; ; attempt++) {
+				try {
+					return await this.runOnce(mode, opts);
+				} catch (e) {
+					if (e instanceof NotFastForward && attempt < 3) {
+						this.host.log("Remote moved during sync (another device pushed). Retrying.");
 						continue;
 					}
-					if (!this.acceptRewind) {
-						// Still older after waiting: the branch was really moved back (e.g. "undo last commit"
-						// with a force-push). Compare from scratch, like after a rewritten history; nothing is deleted.
-						this.host.log(`The ${this.gh.label} branch was moved back to an earlier commit. Comparing from scratch; nothing will be deleted.`);
-						this.acceptRewind = true;
-						continue;
+					if (e instanceof StaleRemote) {
+						if (attempt < 3) {
+							this.host.log(`${this.gh.label} returned an older branch state. Waiting and retrying.`);
+							await sleep(2000 * (attempt + 1));
+							continue;
+						}
+						if (!this.acceptRewind) {
+							// Still older after waiting: the branch was really moved back (e.g. "undo last commit"
+							// with a force-push). Compare from scratch, like after a rewritten history; nothing is deleted.
+							this.host.log(`The ${this.gh.label} branch was moved back to an earlier commit. Comparing from scratch; nothing will be deleted.`);
+							this.acceptRewind = true;
+							continue;
+						}
 					}
+					throw e;
 				}
-				throw e;
 			}
+		} finally {
+			// Only ever for the retries of this one run.
+			this.retryBase = {};
 		}
 	}
 
@@ -868,7 +881,7 @@ export class SyncEngine {
 
 		// Safety: never act on a remote state older than the one we already synced, and never
 		// infer deletions across a rewritten history.
-		let base = state.base;
+		let base = Object.keys(this.retryBase).length ? { ...state.base, ...this.retryBase } : state.base;
 		// A file whose only change is CRLF <-> LF counts as unchanged.
 		const eolSame = new Set<string>();
 		if (this.s.ignoreLineEndingChanges) {
@@ -1437,6 +1450,8 @@ export class SyncEngine {
 		await recordWrite(copy, copySha, data);
 		await queueUpload(copy, data, copySha);
 		report.conflictCopies.push(copy);
+		// The repository's version is saved in the copy: a retried push doesn't copy it again.
+		this.retryBase[path] = sha;
 		this.host.log(`Push only: ${path} changed here and in ${this.gh.label}; uploaded this device's version (${device}) and kept the ${this.gh.label} version as "${copy}".`);
 	}
 
@@ -1501,6 +1516,9 @@ export class SyncEngine {
 			report.conflictCopies.push(copy);
 		}
 		delete next[d.from];
+		// If this attempt's push is refused (another device pushed), the retry compares against the
+		// repository version merged here, instead of making a copy of the same edits.
+		this.retryBase[d.side === "remote" ? d.path : d.from] = d.remote;
 		if (d.side === "local") remoteDeletes.push(d.from);
 		renames.push(`${d.from} → ${d.path}`);
 		report.renamed.push(`${d.from} → ${d.path} (renamed and edited on both sides, merged)`);
@@ -1549,6 +1567,10 @@ export class SyncEngine {
 			host.log(`Conflict on ${d.path}: kept both, your version saved as "${copy}".`);
 		};
 
+		// A read-only device: the repository's list of enabled plugins wins (writing it keeps this plugin
+		// on). A conflict copy of it would do nothing, and the plugin's own re-adding would make one on
+		// every change elsewhere.
+		if (mode === "pull" && d.path === `${this.host.app.vault.configDir}/community-plugins.json`) return writeRemote();
 		if (mode === "pull") return keepBoth(false);
 
 		// First sync with an existing vault on both sides: the setup wizard may say which side wins.
@@ -1573,6 +1595,7 @@ export class SyncEngine {
 				await this.io.write(d.path, merged);
 				await recordWrite(d.path, sha, merged);
 				await queueUpload(d.path, merged, sha);
+				this.retryBase[d.path] = d.remote;
 				report.merged.push(d.path);
 				host.log(`Merged ${d.path} (${smart.kind}-aware merge).`);
 				return;
@@ -1597,6 +1620,7 @@ export class SyncEngine {
 				await this.io.write(d.path, merged);
 				await recordWrite(d.path, sha, merged);
 				await queueUpload(d.path, merged, sha);
+				this.retryBase[d.path] = d.remote;
 				report.merged.push(d.path);
 				host.log(`Conflict on ${d.path}: resolved change by change.`);
 				return;
@@ -1632,6 +1656,7 @@ export class SyncEngine {
 				await this.io.write(d.path, merged);
 				await recordWrite(d.path, await this.codec.storedSha(d.path, merged), merged);
 				await queueUpload(d.path, merged);
+				this.retryBase[d.path] = d.remote;
 				report.merged.push(d.path);
 				host.log(
 					res.clean
@@ -1770,6 +1795,9 @@ export class SyncEngine {
 			delete state.base[p];
 			delete state.baseNorm[p];
 		}
+		// The next sync compares fully, so the freed files are listed as available on demand (the
+		// "nothing changed" shortcut would skip that).
+		state.dirty = true;
 		await this.host.saveState();
 		this.host.log(`Freed ${(plan.bytes / 1048576).toFixed(1)} MB: removed ${plan.files.length} local copies that are safe in the repository.`);
 		return plan;

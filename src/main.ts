@@ -103,7 +103,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	refreshBadges: () => void = () => {};
 	lastReport: SyncReport | null = null;
 	private encLayer: EncryptionLayer | null = null;
-	private shared: { sig: string; hosts: SharedFolderHost[] } | null = null;
+	private shared: { sig: string; hosts: SharedFolderHost[]; loaded: Promise<void> } | null = null;
 	/** Set by the setup wizard to show live progress. */
 	onProgress: ((text: string) => void) | null = null;
 	/** English message of the last failure (log and diagnostics); see lastErrorCause for display. */
@@ -172,10 +172,23 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 				const btn = box.createEl("button", { text: t("m.download") });
 				btn.onClickEvent(async () => {
 					btn.disabled = true;
+					// Obsidian shows the embed itself once the file exists; the offer goes away then, also
+					// when the download waited for a sync that was already running.
+					const ref = this.app.vault.on("create", (file) => {
+						if (file.path !== f.path) return;
+						box.remove();
+						this.app.vault.offref(ref);
+					});
+					this.registerEvent(ref);
 					await this.downloadOnDemand([f.path]);
-					// Obsidian shows the embed itself once the file exists; the offer goes away.
-					if (this.app.vault.getAbstractFileByPath(f.path)) box.remove();
-					else btn.disabled = false;
+					if (this.app.vault.getAbstractFileByPath(f.path)) {
+						box.remove();
+						this.app.vault.offref(ref);
+					} else if (!this.syncing) {
+						// Nothing downloaded and nothing pending: offer the button again.
+						btn.disabled = false;
+						this.app.vault.offref(ref);
+					}
 				});
 				embed.after(box);
 			});
@@ -622,8 +635,10 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		if (!tokens.web || tokens.web !== this.githubWeb() || (tokens.clientId && tokens.clientId !== app?.clientId)) return null;
 		return tokens;
 	}
-	signedInWithApp(tokens: AppTokens) {
-		this.setSecret("ghapp", JSON.stringify({ ...tokens, web: this.githubWeb(), clientId: this.githubApp()?.clientId }));
+	signedInWithApp(tokens: AppTokens, web = this.githubWeb(), clientId = this.githubApp()?.clientId) {
+		// A renewal still running from before this sign-in must not overwrite it.
+		this.authGen++;
+		this.setSecret("ghapp", JSON.stringify({ ...tokens, web, clientId }));
 		this.localSet("auth:github", "app");
 		this.expiredNoticeShown = false;
 	}
@@ -665,6 +680,7 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return tokens;
 	}
 	signedInWithGitLab(tokens: AppTokens, web = this.gitlabWeb(), clientId = this.gitlabApp()?.clientId) {
+		this.authGen++;
 		this.setSecret("glapp", JSON.stringify({ ...tokens, web, clientId }));
 		this.localSet("auth:gitlab", "app");
 		this.expiredNoticeShown = false;
@@ -709,15 +725,22 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			};
 		}
 		let code: DeviceCode | null = null;
+		let web = "";
+		let clientId = "";
 		return {
 			title: t("app.signIn"),
 			host: "GitHub",
 			available: () => !!this.githubApp(),
-			start: async () => (code = await startDeviceFlow(this.githubWeb(), this.githubApp()!.clientId)),
+			start: async () => {
+				// The server and app the code was asked from are the ones the tokens belong to.
+				web = this.githubWeb();
+				clientId = this.githubApp()!.clientId;
+				return (code = await startDeviceFlow(web, clientId));
+			},
 			finish: async (isCancelled) => {
-				const tokens = await pollDeviceFlow(this.githubWeb(), this.githubApp()!.clientId, code!, { isCancelled });
+				const tokens = await pollDeviceFlow(web, clientId, code!, { isCancelled });
 				if (isCancelled()) return;
-				this.signedInWithApp(tokens);
+				this.signedInWithApp(tokens, web, clientId);
 				// Signing in from the setup wizard: the settings page behind it shows "Signed in" too.
 				this.settingTab?.redraw();
 			},
@@ -980,18 +1003,24 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 	extraExcludes(): string[] {
 		return (this.settings.sharedFolders ?? []).filter((f) => f.enabled && f.folder).map((f) => sharedFolderPattern(f.folder));
 	}
+	/**
+	 * The shared folders' hosts, matching the current settings (rebuilt when they change, so a folder
+	 * just added is known before any sync). Their sync state may still be loading: sharedHosts() waits.
+	 */
 	sharedHostsCached(): SharedFolderHost[] {
-		return this.shared?.hosts ?? [];
-	}
-	async sharedHosts(): Promise<SharedFolderHost[]> {
 		const defs = syncableSharedFolders(this.settings.sharedFolders);
 		const sig = JSON.stringify(defs);
 		if (!this.shared || this.shared.sig !== sig) {
 			const hosts = defs.map((d) => new SharedFolderHost(this, d));
-			for (const h of hosts) await h.loadState();
-			this.shared = { sig, hosts };
+			const loaded = Promise.all(hosts.map((h) => h.loadState())).then(() => undefined);
+			this.shared = { sig, hosts, loaded };
 		}
 		return this.shared.hosts;
+	}
+	async sharedHosts(): Promise<SharedFolderHost[]> {
+		const hosts = this.sharedHostsCached();
+		await this.shared?.loaded;
+		return hosts;
 	}
 	/**
 	 * Settings-folder sync with "install plugins from official releases": plugins turned on (or updated)
@@ -1578,8 +1607,14 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 		return null;
 	}
 
+	/** True while the setup wizard is open: its choices (encryption, first-sync side) aren't applied yet. */
+	wizardOpen = false;
+
 	async sync(trigger: Trigger, mode: SyncMode = this.settings.mode, opts: SyncOptions = {}): Promise<void> {
 		if (this.unloaded) return;
+		// Only the wizard's own first sync runs while it is open: an automatic sync (app switch, resume,
+		// timer) could otherwise upload a vault the user is about to encrypt, or pick the wrong side.
+		if (this.wizardOpen && !("firstSyncPrefer" in opts)) return;
 		// "Sync and close" is asked for by the user: like a manual sync it runs while paused.
 		if (trigger !== "manual" && trigger !== "close" && this.isPaused()) return void this.setStatus("paused", t("m.pausedStatus"));
 		// Battery saver keeps only startup, returning to Obsidian and manual syncs.
@@ -1803,8 +1838,11 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.app,
 			`${file.path}: ${this.hostLabel()} → ${t("u.thisDevice")}`,
 			async () => {
-				const head = await this.gh.getRef(this.settings.branch);
-				const remote = head ? await this.engine.readRemoteFile(file.path, head) : null;
+				// A note inside a shared folder lives in that folder's repository.
+				const shared = (await this.sharedHosts()).find((h) => file.path.startsWith(h.def.folder.replace(/\/+$/, "") + "/"));
+				const h = shared ?? { gh: this.gh, settings: this.settings, engine: this.engine };
+				const head = await h.gh.getRef(h.settings.branch);
+				const remote = head ? await h.engine.readRemoteFile(file.path, head) : null;
 				const localData = await this.app.vault.readBinary(file);
 				const [a, b] = [new Uint8Array(remote ?? new ArrayBuffer(0)), new Uint8Array(localData)];
 				differs = !!remote && (a.length !== b.length || !a.every((x, i) => x === b[i]));

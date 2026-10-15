@@ -225,6 +225,16 @@ export class VaultIO {
 		}
 	}
 
+	/**
+	 * A hidden file inside a normal folder (Notes/.gitignore, Notes/.assets/a.png) written by a sync
+	 * raises no folder event, so the cached folder walk wouldn't list it and the next sync would read it
+	 * as deleted here. Writing one makes the next scan walk the folders again.
+	 */
+	private noteNestedHidden(path: string) {
+		const parts = path.split("/");
+		if (parts.slice(1).some((p) => p.startsWith(".")) && parts[0] !== this.app.vault.configDir) nestedHiddenIndex(this.app).foldersChanged();
+	}
+
 	/** Set when a write kept this plugin enabled: the file then differs from the download and must be re-read. */
 	selfRepaired = false;
 
@@ -235,6 +245,7 @@ export class VaultIO {
 			this.selfRepaired = true;
 		}
 		await this.ensureDir(parentDir(path));
+		this.noteNestedHidden(path);
 		const f = this.tfile(path);
 		if (f) {
 			await this.app.vault.modifyBinary(f, data);
@@ -256,6 +267,7 @@ export class VaultIO {
 	 */
 	async rename(from: string, to: string): Promise<void> {
 		await this.ensureDir(parentDir(to));
+		this.noteNestedHidden(to);
 		if (from !== to && from.normalize("NFC").toLowerCase() === to.normalize("NFC").toLowerCase()) {
 			// Only letter case (or Unicode form) changes: on case-insensitive disks (macOS, Windows, iOS)
 			// the target "exists" already, so go through a temporary name.

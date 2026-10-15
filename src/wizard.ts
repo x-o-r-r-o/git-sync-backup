@@ -31,10 +31,12 @@ export class SetupWizard extends Modal {
 	}
 
 	onOpen() {
+		this.plugin.wizardOpen = true;
 		this.modalEl.addClass("vsg-wizard");
 		this.render();
 	}
 	onClose() {
+		this.plugin.wizardOpen = false;
 		this.cancelled = true;
 		this.stopRepoWatch();
 		this.contentEl.empty();
