@@ -219,6 +219,11 @@ export class SyncEngine {
 	private prConflicts: { path: string; local: ArrayBuffer; remote: ArrayBuffer; remoteSha: string }[] = [];
 	/** Repository metadata files (not vault files) and their blob shas at the head last listed. */
 	private metaShas = new Map<string, string>();
+	/**
+	 * Every file entry of the listed repository tree, including ones this vault leaves out (symlinks,
+	 * other folders): hosts that create-or-update per file (GitLab, Gitea) must update, not create, them.
+	 */
+	private treePaths = new Map<string, string>();
 	/** The codec a running sync uses: toggling encryption mid-sync must not switch it under that sync. */
 	private pinnedCodec: Codec | null = null;
 
@@ -295,6 +300,72 @@ export class SyncEngine {
 	 * Downloads a stored blob and checks it against its git object id, so a truncated or empty
 	 * response (e.g. Gitea's blob size limit, a proxy cutting the body) is never written to the vault.
 	 */
+	/**
+	 * Applies folder renames by letter case (see the caller). Returns the file renames still to do:
+	 * the ones outside such folders, and ones whose file name changes too (with their new old path).
+	 */
+	private async renameCaseFolders(
+		ctx: { base: Record<string, string>; localShas: Map<string, string>; eolSame: Set<string>; caseRenames: [string, string][] },
+		cacheNext: SyncState["cache"],
+		report: SyncReport,
+	): Promise<[string, string][]> {
+		const fold = (p: string) => p.normalize("NFC").toLowerCase();
+		const groups = new Map<string, { to: string; pairs: [string, string][] }>();
+		const rest: [string, string][] = [];
+		for (const [from, to] of ctx.caseRenames) {
+			const a = from.split("/");
+			const b = to.split("/");
+			let i = 0;
+			while (i < a.length - 1 && a[i] === b[i]) i++;
+			// Only the file name differs, or the paths don't line up: a plain file rename.
+			if (a.length !== b.length || i >= a.length - 1 || fold(a[i]) !== fold(b[i])) {
+				rest.push([from, to]);
+				continue;
+			}
+			const oldDir = a.slice(0, i + 1).join("/");
+			const newDir = b.slice(0, i + 1).join("/");
+			const g = groups.get(oldDir) ?? { to: newDir, pairs: [] };
+			if (g.to !== newDir) g.to = "";
+			g.pairs.push([from, to]);
+			groups.set(oldDir, g);
+		}
+		for (const [oldDir, g] of groups) {
+			const moving = new Set(g.pairs.map(([from]) => from));
+			const inside = [...ctx.localShas.keys()].filter((p) => p.startsWith(oldDir + "/"));
+			const unchanged = g.pairs.every(([from]) => !!cacheNext[from]);
+			// Every file of the folder here moves, none was edited during the sync, one target spelling.
+			if (!g.to || !unchanged || inside.some((p) => !moving.has(p))) {
+				rest.push(...g.pairs);
+				continue;
+			}
+			try {
+				for (const [from] of g.pairs) {
+					const st = await this.io.stat(from);
+					const c = cacheNext[from];
+					if (!st || st.mtime !== c.m || st.size !== c.s) throw new EditedDuringSync(from);
+				}
+				await this.io.renameFolderCase(oldDir, g.to);
+			} catch (e) {
+				// Leave the folder; try the files one by one (they report their own problems).
+				this.host.log(`Folder ${oldDir} was renamed to ${g.to} elsewhere; renaming it here failed (${errMsg(e)}), trying file by file.`);
+				rest.push(...g.pairs);
+				continue;
+			}
+			for (const [from, to] of g.pairs) {
+				const moved = g.to + from.slice(oldDir.length);
+				const c = cacheNext[from];
+				const st = await this.io.stat(moved);
+				if (st) cacheNext[moved] = { ...c, m: st.mtime, s: st.size };
+				delete cacheNext[from];
+				this.rekey(ctx, from, moved);
+				if (moved === to) report.renamed.push(`${from} → ${to}`);
+				else rest.push([moved, to]); // its file name changes by case too
+			}
+			this.host.log(`Folder ${oldDir} was renamed to ${g.to} on another device: renamed here too.`);
+		}
+		return rest;
+	}
+
 	/** A conflict-copy name that isn't taken yet (two conflicts in the same minute get "-2", "-3", …). */
 	private async freeCopyPath(path: string, device: string): Promise<string> {
 		const now = new Date();
@@ -930,6 +1001,7 @@ export class SyncEngine {
 		const winBad: string[] = [];
 		const spot = (p: string) => `${p.slice(0, Math.max(0, p.lastIndexOf("/")))}|${/\.[^./]*$/.exec(p)?.[0] ?? ""}`;
 		this.metaShas = new Map();
+		this.treePaths = new Map();
 		this.blobHints = new Map();
 		// Local files renamed on another device by letter case only: [local path, new remote path].
 		const caseRenames: [string, string][] = [];
@@ -951,6 +1023,7 @@ export class SyncEngine {
 			markerLegacy = picked.legacy;
 			if (picked.sha && !picked.legacy) this.metaShas.set(markerFile, picked.sha);
 			for (const raw of tree) {
+				if (raw.type === "blob") this.treePaths.set(raw.path, raw.sha);
 				if (raw.path === FOLDERS_PATH) foldersSha = raw.sha;
 				if (raw.path === FOLDERS_PATH) this.metaShas.set(raw.path, raw.sha);
 				// Marker files are never vault files (neither this vault's nor the root copy).
@@ -1118,9 +1191,14 @@ export class SyncEngine {
 		// in review, delete guard): the next sync must compare fully instead of taking the fast path.
 		let behind = ctx.unknownLocal || !!opts.only || !!opts.defer?.size;
 
+		// A folder renamed by letter case only on another device (Notes/ → notes/): when every file of the
+		// folder here moves with it, rename the folder itself. Renaming the files one by one would leave
+		// the old folder name on a case-insensitive disk, and the files would never really move.
+		const caseRenames = await this.renameCaseFolders(ctx, cacheNext, report);
+
 		// Renamed by letter case only on another device: rename the local file first (nothing is deleted),
 		// then compare it under its new name like any other file.
-		for (const [from, to] of ctx.caseRenames) {
+		for (const [from, to] of caseRenames) {
 			try {
 				const c = cacheNext[from];
 				const st = await this.io.stat(from);
@@ -1713,7 +1791,7 @@ export class SyncEngine {
 			upserts,
 			deletes: rawDeletes,
 			// Metadata files too: hosts that create-or-update per file (GitLab, Gitea) must update them.
-			existing: new Map([...[...remote.values()].map((e): [string, string] => [e.raw, e.sha]), ...this.metaShas]),
+			existing: new Map([...this.treePaths, ...[...remote.values()].map((e): [string, string] => [e.raw, e.sha]), ...this.metaShas]),
 			progress: (done, total) => this.host.progress?.(t("p.uploading", { done, total })),
 		});
 		this.host.log(`Pushed commit ${res.sha.slice(0, 7)} (${uploads.length} changed, ${deletes.length} deleted).`);

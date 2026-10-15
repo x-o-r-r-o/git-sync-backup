@@ -272,8 +272,16 @@ export class VaultIO {
 			// Only letter case (or Unicode form) changes: on case-insensitive disks (macOS, Windows, iOS)
 			// the target "exists" already, so go through a temporary name.
 			// A different file already at the target (case-sensitive disk): never overwrite or strand it.
-			const both = await this.adapter.list(parentDir(to) || "/").catch(() => null);
-			if (both?.files.some((f) => f.replace(/^\/+/, "") === to)) throw new Error(`${to} already exists`);
+			// When only a folder's letter case differs, both spellings may be the same folder on disk
+			// (case-insensitive), where the file "exists" there because it is this very file.
+			const name = (f: string) => f.replace(/^\/+/, "").split("/").pop() ?? "";
+			const list = async (dir: string) => new Set(((await this.adapter.list(dir || "/").catch(() => null))?.files ?? []).map(name));
+			const target = await list(parentDir(to));
+			if (target.has(name(to))) {
+				const source = parentDir(from) === parentDir(to) ? target : await list(parentDir(from));
+				const sameFolder = source.size === target.size && [...source].every((n) => target.has(n));
+				if (!(sameFolder && name(from) === name(to))) throw new Error(`${to} already exists`);
+			}
 			const tmp = `${to}.${Date.now().toString(36)}.renaming`;
 			await this.renameFile(from, tmp);
 			try {
@@ -284,6 +292,27 @@ export class VaultIO {
 			}
 		} else await this.renameFile(from, to);
 		await this.pruneLater(parentDir(from));
+	}
+
+	/**
+	 * Renames a folder whose name changes only by letter case (renamed so on another device), through a
+	 * temporary name so case-insensitive disks (macOS, Windows, iOS) really change it.
+	 */
+	async renameFolderCase(from: string, to: string): Promise<void> {
+		const tmp = `${to}.${Date.now().toString(36)}.renaming`;
+		const step = async (a: string, b: string) => {
+			const f = this.app.vault.getAbstractFileByPath(a);
+			if (f instanceof TFolder) await this.app.vault.rename(f, b);
+			else await this.adapter.rename(a, b);
+		};
+		await step(from, tmp);
+		try {
+			await step(tmp, to);
+		} catch (e) {
+			await step(tmp, from); // put it back under its old name
+			throw e;
+		}
+		nestedHiddenIndex(this.app).foldersChanged();
 	}
 
 	private async renameFile(from: string, to: string): Promise<void> {

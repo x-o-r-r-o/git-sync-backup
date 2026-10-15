@@ -232,14 +232,19 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			this.refreshBadges();
 			void this.checkOtherSync();
 			const touch = (path: string) => {
+				// The sync's own temporary names (case-only renames go through "<name>.<id>.renaming").
+				if (/\.[0-9a-z]+\.renaming(\/|$)/.test(path)) return;
 				if (this.syncing) return void this.touchedDuringSync.add(path);
 				const w = this.writtenBySync.get(path);
 				if (w && Date.now() - w < 5000) return;
 				this.dirty.set(path, ++this.dirtySeq);
 			};
 			const onVaultChange = (file: TAbstractFile, oldPath?: string) => {
-				if (file instanceof TFile) touch(file.path);
-				if (oldPath) touch(oldPath);
+				// Only files count as edits (a renamed folder's own old path isn't a file).
+				if (file instanceof TFile) {
+					touch(file.path);
+					if (oldPath) touch(oldPath);
+				}
 				this.refreshBadges();
 				this.pendingTimer?.();
 				if (!this.settings.syncOnChange) return;
@@ -1678,6 +1683,12 @@ export default class VaultSyncPlugin extends Plugin implements SyncHost {
 			}
 			if (r.downloaded.length || trigger === "startup" || trigger === "manual") void this.offerPluginInstalls().catch((e: unknown) => this.log(`Plugin check failed: ${errMsg(e)}`));
 			written = new Set([...r.downloaded, ...r.merged, ...r.conflictCopies, ...r.deletedLocal]);
+			// Files the sync moved here (renames from another device, a folder renamed by letter case):
+			// their rename events are the sync's own, not edits on this device.
+			for (const line of r.renamed) {
+				const m = /^(.+?) → (.+?)(?: \(.*\))?$/.exec(line);
+				if (m) for (const p of [m[1], m[2]]) written.add(p);
+			}
 			const now = Date.now();
 			for (const p of written) this.writtenBySync.set(p, now);
 			this.lastReport = r;

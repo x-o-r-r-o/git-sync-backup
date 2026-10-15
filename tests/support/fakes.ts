@@ -78,6 +78,19 @@ export class FakeFS {
 			rmdir: async (p: string) => void fs.dirs.delete(p),
 			rename: async (from: string, to: string) => {
 				const f = fs.files.get(from);
+				if (!f && fs.isDir(from)) {
+					// A folder: everything inside moves with it.
+					if (fs.isDir(to) && !(fs.caseInsensitive && from.toLowerCase() === to.toLowerCase())) throw new Error("exists " + to);
+					for (const k of [...fs.files.keys()]) if (k.startsWith(from + "/")) {
+						fs.files.set(to + k.slice(from.length), fs.files.get(k)!);
+						fs.files.delete(k);
+					}
+					for (const d of [...fs.dirs]) if (d === from || d.startsWith(from + "/")) {
+						fs.dirs.delete(d);
+						fs.dirs.add(to + d.slice(from.length));
+					}
+					return;
+				}
 				if (!f) throw new Error("no such file " + from);
 				if (fs.files.has(to)) throw new Error("exists " + to);
 				if (fs.caseInsensitive && [...fs.files.keys()].some((k) => k.toLowerCase() === to.toLowerCase())) throw new Error("exists " + to);

@@ -19,6 +19,8 @@ export class FakeRepo {
 	lastAuthor: unknown = undefined;
 	/** Pull/merge requests opened, as the host received them. */
 	prs: Record<string, unknown>[] = [];
+	/** Git file modes other than 100644 (e.g. "120000" for a symlink), by path. */
+	modes = new Map<string, string>();
 
 	async blob(data: Uint8Array) {
 		const sha = await gitBlobSha(toAB(data));
@@ -115,7 +117,7 @@ export function giteaTransport(repo: FakeRepo) {
 		}
 		if ((m = /^\/repos\/me\/vault\/git\/trees\/t(\w+)$/.exec(path))) {
 			const c = repo.commits.get(m[1])!;
-			const all = [...c.files].map(([p, sha]) => ({ path: p, mode: "100644", type: "blob", sha, size: repo.blobs.get(sha)!.length }));
+			const all = [...c.files].map(([p, sha]) => ({ path: p, mode: repo.modes.get(p) ?? "100644", type: "blob", sha, size: repo.blobs.get(sha)!.length }));
 			const per = 2; // tiny pages to exercise pagination
 			const page = Number(q.get("page") ?? 1);
 			const slice = all.slice((page - 1) * per, page * per);
@@ -188,7 +190,7 @@ export function gitlabTransport(repo: FakeRepo, calls = { head: 0 }) {
 		if (rest === "tree") {
 			const c = repo.commits.get(q.get("ref")!);
 			if (!c) return err(404);
-			const all = [...c.files].map(([p, id]) => ({ id, path: p, name: p.split("/").pop(), type: "blob", mode: "100644" }));
+			const all = [...c.files].map(([p, id]) => ({ id, path: p, name: p.split("/").pop(), type: "blob", mode: repo.modes.get(p) ?? "100644" }));
 			const per = 2;
 			const start = Number(q.get("page_token") ?? 0);
 			const next = start + per < all.length ? `<https://gitlab.test/api/v4${P}/repository/tree?ref=${q.get("ref")}&recursive=true&per_page=100&pagination=keyset&page_token=${start + per}>; rel="next"` : "";

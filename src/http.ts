@@ -61,6 +61,17 @@ export function sameOrigin(url: string, base: string): boolean {
 	}
 }
 
+/**
+ * False when a response body is shorter or longer than its Content-Length says (a proxy cut it off).
+ * Unknown (no length, or a compressed body whose length header counts compressed bytes) passes.
+ */
+export function lengthMatches(res: HttpResponse): boolean {
+	const enc = header(res, "content-encoding");
+	if (enc && !/^identity$/i.test(enc)) return true;
+	const len = header(res, "content-length");
+	return !len || !/^\d+$/.test(len) || Number(len) === res.arrayBuffer.byteLength;
+}
+
 export function header(res: HttpResponse, name: string): string | undefined {
 	const k = Object.keys(res.headers).find((x) => x.toLowerCase() === name.toLowerCase());
 	return k ? res.headers[k] : undefined;
@@ -69,9 +80,13 @@ export function header(res: HttpResponse, name: string): string | undefined {
 export async function httpRequest(
 	transport: Transport,
 	req: HttpRequest,
-	opts: { okStatuses?: number[]; hostLabel: string; wait?: (ms: number) => Promise<void> },
+	opts: { okStatuses?: number[]; hostLabel: string; wait?: (ms: number) => Promise<void>; idempotent?: boolean },
 ): Promise<HttpResponse> {
 	const wait = opts.wait ?? sleep;
+	// A request that changes the repository (a commit, a new branch) may have been applied even when
+	// the answer was a server error or never arrived: repeating it would fail ("already exists",
+	// "changed since") and read as "the branch moved". It isn't repeated; the next sync sees the result.
+	const once = !opts.idempotent && !/^(GET|HEAD)$/i.test(req.method);
 	let lastErr: unknown;
 	for (let attempt = 0; attempt < 4; attempt++) {
 		let res: HttpResponse;
@@ -79,6 +94,7 @@ export async function httpRequest(
 			res = await transport({ ...req, headers: { "Cache-Control": "no-cache", Pragma: "no-cache", ...req.headers } });
 		} catch (e) {
 			lastErr = e;
+			if (once) break;
 			// No point waiting after the last attempt: report the failure right away.
 			if (attempt < 3) await wait(1000 * 2 ** attempt);
 			continue;
@@ -96,6 +112,7 @@ export async function httpRequest(
 		}
 		if (res.status >= 500 && attempt < 3) {
 			lastErr = new RemoteError(String(msg), res.status, { host: opts.hostLabel });
+			if (once) break;
 			await wait(1000 * 2 ** attempt);
 			continue;
 		}

@@ -7,7 +7,7 @@ import { webBase } from "./auth.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
 import { codedRemoteError, SyncError } from "./errors.ts";
 import type { CommitFile, CommitInfo, CommitRequest, CommitResult, Relation, Remote, TreeEntry, WebLink } from "./remote.ts";
-import { pool, sleep } from "./util.ts";
+import { gitBlobSha, pool, sleep } from "./util.ts";
 
 export type { CommitInfo, TreeEntry } from "./remote.ts";
 
@@ -172,6 +172,11 @@ export class GitHub implements Remote {
 		let lastErr: unknown;
 		let reauthed = false;
 		let secondaryWaited = false;
+		// Blobs, trees and commits are content-addressed and moving a branch to the same commit changes
+		// nothing, so those are safe to repeat. Other writes (a new branch, the first file, a repository,
+		// a pull request) may have been applied when the answer was lost: repeating them fails and reads
+		// as "the branch moved", so they aren't repeated after a server or network error.
+		const once = !/^(GET|HEAD)$/i.test(method) && !(/^POST$/i.test(method) && /\/git\/(blobs|trees|commits)$/.test(path)) && !(/^PATCH$/i.test(method) && /\/git\/refs\//.test(path));
 
 		for (let attempt = 0; attempt < 4; attempt++) {
 			let res: RequestUrlResponse;
@@ -195,6 +200,7 @@ export class GitHub implements Remote {
 			} catch (e) {
 				// Network failure (offline, DNS, TLS). Retry with backoff.
 				lastErr = e;
+				if (once) break;
 				// No point waiting after the last attempt: report the failure right away.
 				if (attempt < 3) await this.delay(1000 * 2 ** attempt);
 				continue;
@@ -239,6 +245,7 @@ export class GitHub implements Remote {
 			}
 			if (res.status >= 500 && attempt < 3) {
 				lastErr = new GitHubError(msg, res.status, { host: "GitHub" });
+				if (once) break;
 				await this.delay(1000 * 2 ** attempt);
 				continue;
 			}
@@ -496,6 +503,9 @@ export class GitHub implements Remote {
 		if (res.status === 404) return null;
 		const e = res.json as { type?: string; sha?: string } | null;
 		if (!e || e.type !== "file" || !e.sha) return null;
-		return this.getBlob(e.sha);
+		const data = await this.getBlob(e.sha);
+		// An older version shown or restored must be the stored bytes exactly.
+		if ((await gitBlobSha(data)) !== e.sha.toLowerCase()) throw new SyncError("incompleteDownload", { path, host: "GitHub", bytes: data.byteLength });
+		return data;
 	}
 }

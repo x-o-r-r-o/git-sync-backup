@@ -158,7 +158,7 @@ export class LfsLayer implements Layer {
 				contentType: "application/vnd.git-lfs+json",
 				body: JSON.stringify({ operation, transfers: ["basic"], objects: [{ oid, size }] }),
 			},
-			{ hostLabel: `${this.remote.label} LFS` },
+			{ hostLabel: `${this.remote.label} LFS`, idempotent: true },
 		);
 		const obj = (res.json as LfsBatch | null)?.objects?.[0];
 		if (obj?.error) throw new SyncError("lfsError", { detail: obj.error.message ?? String(obj.error.code) });
@@ -169,13 +169,13 @@ export class LfsLayer implements Layer {
 		const obj = await this.batch("upload", oid, data.byteLength);
 		const up = obj?.actions?.upload;
 		if (!up) return; // the host already has this object
-		await httpRequest(this.transport, { url: up.href, method: "PUT", headers: { ...(up.header ?? {}), "Content-Type": "application/octet-stream" }, body: data }, { hostLabel: `${this.remote.label} LFS` });
+		await httpRequest(this.transport, { url: up.href, method: "PUT", headers: { ...(up.header ?? {}), "Content-Type": "application/octet-stream" }, body: data }, { hostLabel: `${this.remote.label} LFS`, idempotent: true });
 		const verify = obj?.actions?.verify;
 		if (verify) {
 			await httpRequest(
 				this.transport,
 				{ url: verify.href, method: "POST", headers: { ...(verify.header ?? {}), Accept: "application/vnd.git-lfs+json" }, contentType: "application/vnd.git-lfs+json", body: JSON.stringify({ oid, size: data.byteLength }) },
-				{ hostLabel: `${this.remote.label} LFS` },
+				{ hostLabel: `${this.remote.label} LFS`, idempotent: true },
 			);
 		}
 		void path;
@@ -185,7 +185,7 @@ export class LfsLayer implements Layer {
 		const obj = await this.batch("download", oid, size);
 		const down = obj?.actions?.download;
 		if (!down) throw new SyncError("lfsMissing", { path });
-		return (await httpRequest(this.transport, { url: down.href, method: "GET", headers: down.header ?? {} }, { hostLabel: `${this.remote.label} LFS` })).arrayBuffer;
+		return (await httpRequest(this.transport, { url: down.href, method: "GET", headers: down.header ?? {} }, { hostLabel: `${this.remote.label} LFS`, idempotent: true })).arrayBuffer;
 	}
 }
 

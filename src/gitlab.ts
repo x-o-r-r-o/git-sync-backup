@@ -1,7 +1,7 @@
 // GitLab (gitlab.com or self-managed) via API v4. Commits use POST /projects/:id/repository/commits,
 // which writes many files in one atomic commit.
 
-import { b64encode, header, httpRequest, obsidianTransport } from "./http.ts";
+import { b64encode, header, httpRequest, lengthMatches, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import type { HostConfig } from "./gitea.ts";
 import { NotFastForward, RemoteError } from "./remote.ts";
@@ -341,7 +341,12 @@ export class GitLab implements Remote {
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
 		const res = await this.request("GET", `${this.project}/repository/files/${this.file(path)}/raw?ref=${encodeURIComponent(ref)}`, undefined, { accept: "*/*", okStatuses: [404] });
-		return res.status === 404 ? null : res.arrayBuffer;
+		if (res.status === 404) return null;
+		// An older version shown or restored must be the stored bytes: GitLab names the blob it sent.
+		const blobId = header(res, "x-gitlab-blob-id");
+		const ok = blobId && /^[0-9a-f]{40}$/i.test(blobId) ? (await gitBlobSha(res.arrayBuffer)) === blobId.toLowerCase() : lengthMatches(res);
+		if (!ok) throw new SyncError("incompleteDownload", { path, host: this.label, bytes: res.arrayBuffer.byteLength });
+		return res.arrayBuffer;
 	}
 	async listTags() {
 		const out: { name: string; sha: string }[] = [];

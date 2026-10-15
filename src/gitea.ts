@@ -1,7 +1,7 @@
 // Gitea / Forgejo (including Codeberg) via API v1. Commits use the ChangeFiles endpoint
 // (POST /repos/{owner}/{repo}/contents), which writes many files in one atomic commit.
 
-import { b64decode, b64encode, compareByWalking, header, httpRequest, obsidianTransport } from "./http.ts";
+import { b64decode, b64encode, compareByWalking, header, httpRequest, lengthMatches, obsidianTransport } from "./http.ts";
 import type { HttpResponse, Transport } from "./http.ts";
 import { NotFastForward } from "./remote.ts";
 import { SyncError } from "./errors.ts";
@@ -270,7 +270,10 @@ export class Gitea implements Remote {
 	}
 	async getFileAt(path: string, ref: string): Promise<ArrayBuffer | null> {
 		const res = await this.request("GET", `${this.repoPath}/raw/${encPath(path)}?ref=${encodeURIComponent(ref)}`, undefined, { accept: "*/*", okStatuses: [404] });
-		return res.status === 404 ? null : res.arrayBuffer;
+		if (res.status === 404) return null;
+		// An older version shown or restored must be complete (a proxy may cut a body short).
+		if (!lengthMatches(res)) throw new SyncError("incompleteDownload", { path, host: this.label, bytes: res.arrayBuffer.byteLength });
+		return res.arrayBuffer;
 	}
 	async listTags() {
 		// Pages may be shorter than `limit` (server-side clamp): only an empty page ends the list.
